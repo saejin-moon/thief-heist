@@ -100,7 +100,6 @@ class HeistEnv(ParallelEnv):
         self._prev_extract_dist = {}
         self.agents = self.possible_agents[:]
         self.explored_map = np.zeros((self.map_h, self.map_w), dtype=bool)
-        self._rewarded_breaches = set()
         self._rewarded_guards = set()
 
         map_data = generate_procedural_map(
@@ -116,19 +115,41 @@ class HeistEnv(ParallelEnv):
         self.extract_pos = map_data["extract_pos"]
         self.camera_positions = map_data["camera_positions"]
         self.door_positions = map_data["door_positions"]
+        self.room_rects = map_data.get("room_rects", [])
 
-        empty = [tuple(int(x) for x in c) for c in np.argwhere(self.grid == EMPTY)]
-        self.rng.shuffle(empty)
+        # 1. Spawn agents clustered in a dedicated entry room
+        empty_tiles = [tuple(int(x) for x in c) for c in np.argwhere(self.grid == EMPTY)]
+        self.rng.shuffle(empty_tiles)
+        used = set()
+        self.agent_positions = self._spawn_agents(used, empty_tiles)
 
-        self.guard_positions = [
-            empty.pop() for _ in range(min(self.config["guard_count"], len(empty)))
-        ]
+        # 2. Spawn guards at a safe distance from all agents
+        guard_candidates = [p for p in empty_tiles if p not in used]
+        max_map_dim = max(self.map_h, self.map_w)
+        target_min_dist = min(MIN_GUARD_SPAWN_DIST, max(2, max_map_dim // 3))
+
+        self.guard_positions = []
+        for dist in range(target_min_dist, 0, -1):
+            filtered = [
+                p
+                for p in guard_candidates
+                if all(
+                    manhattan(p, apos) >= dist
+                    for apos in self.agent_positions.values()
+                )
+            ]
+            if len(filtered) >= self.config["guard_count"]:
+                self.rng.shuffle(filtered)
+                self.guard_positions = filtered[: self.config["guard_count"]]
+                break
+
+        if len(self.guard_positions) < self.config["guard_count"]:
+            self.guard_positions = guard_candidates[: self.config["guard_count"]]
+
         self.neutralized = np.zeros(len(self.guard_positions), dtype=np.int32)
         self.guard_states = ["patrol"] * len(self.guard_positions)
         self._guard_search_target = [None] * len(self.guard_positions)
         self._guard_search_turns = [0] * len(self.guard_positions)
-
-        self.agent_positions = self._spawn_agents(set(self.guard_positions), empty)
 
         self._refresh_scout_fov()
         for a in self.agents:
@@ -145,30 +166,60 @@ class HeistEnv(ParallelEnv):
 
         return self._get_all_obs(), {a: {} for a in self.agents}
 
-    def _spawn_agents(self, used, empty):
+    def _spawn_agents(self, used, empty_tiles):
         pos = {}
-        if self.config["spawn_mode"] == "role":
-            targets = [
-                ("scout", self.terminal_pos),
-                ("hacker", self.terminal_pos),
-                ("muscle", self.loot_pos),
-                ("extractor", self.loot_pos),
-            ]
-            for agent, target in targets:
-                best, best_d = None, 1e9
-                for r in range(self.map_h):
-                    for c in range(self.map_w):
-                        if self.grid[r, c] == EMPTY and (r, c) not in used:
-                            d = manhattan((r, c), target)
-                            if d < best_d:
-                                best_d, best = d, (r, c)
-                used.add(best)
-                pos[agent] = best
-        else:
-            for a in self.possible_agents:
-                p = empty.pop()
-                used.add(p)
-                pos[a] = p
+        spawn_tiles = []
+        if self.room_rects:
+            shuffled_rooms = list(self.room_rects)
+            self.rng.shuffle(shuffled_rooms)
+            # 1. Prefer a room with no static POIs or cameras
+            for rr, rc, rh, rw in shuffled_rooms:
+                room_coords = {
+                    (r, c)
+                    for r in range(rr, rr + rh)
+                    for c in range(rc, rc + rw)
+                }
+                non_empty = [
+                    self.terminal_pos,
+                    self.loot_pos,
+                    self.extract_pos,
+                ] + self.camera_positions
+                if not any(poi in room_coords for poi in non_empty):
+                    room_empty = [
+                        p
+                        for p in room_coords
+                        if self.grid[p[0], p[1]] == EMPTY and p not in used
+                    ]
+                    if len(room_empty) >= len(self.possible_agents):
+                        spawn_tiles = room_empty[: len(self.possible_agents)]
+                        break
+
+            # 2. If no POI-free room has enough tiles, check any room
+            if len(spawn_tiles) < len(self.possible_agents):
+                for rr, rc, rh, rw in shuffled_rooms:
+                    room_empty = [
+                        (r, c)
+                        for r in range(rr, rr + rh)
+                        for c in range(rc, rc + rw)
+                        if self.grid[r, c] == EMPTY and (r, c) not in used
+                    ]
+                    if len(room_empty) >= len(self.possible_agents):
+                        spawn_tiles = room_empty[: len(self.possible_agents)]
+                        break
+
+        # 3. Fallback to closest cluster in empty tiles
+        if len(spawn_tiles) < len(self.possible_agents):
+            avail = [p for p in empty_tiles if p not in used]
+            if avail:
+                center = avail[0]
+                sorted_avail = sorted(avail, key=lambda p: manhattan(p, center))
+                spawn_tiles = sorted_avail[: len(self.possible_agents)]
+            else:
+                spawn_tiles = [(0, 0)] * len(self.possible_agents)
+
+        for a, p in zip(self.possible_agents, spawn_tiles):
+            used.add(p)
+            pos[a] = p
         return pos
 
     def step(self, actions):
@@ -182,8 +233,6 @@ class HeistEnv(ParallelEnv):
                 continue
             elif action == INTERACT:
                 self._special_action(agent, rewards)
-            elif action == BREACH and agent == "muscle":
-                self._muscle_breach(rewards)
             else:
                 self._move_agent(agent, action)
 
@@ -251,7 +300,22 @@ class HeistEnv(ParallelEnv):
         truncs = {
             a: bool(self.current_step >= self.config["max_steps"]) for a in self.agents
         }
-        infos = {a: {"win": bool(win), "alarm": self.alarm} for a in self.agents}
+        agents_at_extract = sum(
+            1
+            for p in self.agent_positions.values()
+            if manhattan(p, self.extract_pos) <= WIN_CONVERGE_RADIUS
+        )
+        episode_metrics = {
+            "win": bool(win),
+            "alarm": float(self.alarm),
+            "scout_pois_tagged": len(self.tagged_pois),
+            "scout_interact_success": bool(len(self.tagged_pois) > 0),
+            "hacker_hack_success": bool(self.terminal_disabled),
+            "muscle_neutralize_success": bool(len(self._rewarded_guards) > 0),
+            "extractor_loot_success": bool(self.loot_acquired),
+            "agents_at_extract": agents_at_extract,
+        }
+        infos = {a: episode_metrics for a in self.agents}
 
         observations = self._get_all_obs()
         if any(terms.values()) or any(truncs.values()):
@@ -333,7 +397,7 @@ class HeistEnv(ParallelEnv):
         elif agent == "muscle":
             for gi, gpos in enumerate(self.guard_positions):
                 if self.neutralized[gi] == 0 and manhattan(pos, gpos) <= 2:
-                    self.neutralized[gi] = NEUTRALIZE_TURNS
+                    self.neutralized[gi] = 1  # Permanently subdued
                     self._add_alarm(
                         ALARM_NEUTRALIZE, rewards
                     )  # Instant alarm, no delayed queue bloat
@@ -341,42 +405,15 @@ class HeistEnv(ParallelEnv):
                         self._rewarded_guards.add(gi)
                         rewards["muscle"] += REWARD_TASK
                     return
-        elif agent == "extractor":
+        elif agent == "extractor":  # noqa: SIM102
             if (
                 not self.loot_acquired
                 and self.terminal_disabled
                 and manhattan(pos, self.loot_pos) <= 1
             ):
                 self.loot_acquired = True
+                self.extraction_triggered = True  # Single step loot + countdown trigger
                 rewards["extractor"] += REWARD_TASK
-            elif self.loot_acquired and not self.extraction_triggered:
-                self.extraction_triggered = True
-                rewards["extractor"] += 0.5
-
-    def _muscle_breach(self, rewards):
-        pos = self.agent_positions["muscle"]
-        for dr, dc in ACTION_DELTAS.values():
-            nr, nc = pos[0] + dr, pos[1] + dc
-            if (
-                0 <= nr < self.map_h
-                and 0 <= nc < self.map_w
-                and self.grid[nr, nc] == WALL
-            ):
-                self.grid[nr, nc] = EMPTY
-                self._add_alarm(ALARM_BREACH, rewards)
-                if (nr, nc) not in self._rewarded_breaches:
-                    self._rewarded_breaches.add((nr, nc))
-                    rewards["muscle"] += REWARD_TASK
-                # Alerts nearby guards
-                for gi, gpos in enumerate(self.guard_positions):
-                    if (
-                        self.neutralized[gi] == 0
-                        and manhattan((nr, nc), gpos) <= BREACH_RADIUS
-                    ):
-                        self.guard_states[gi] = "search"
-                        self._guard_search_target[gi] = (nr, nc)
-                        self._guard_search_turns[gi] = SEARCH_TURNS
-                return
 
     def _move_guards(self):
         converge = self.alarm >= CONVERGE_ALARM
@@ -389,7 +426,6 @@ class HeistEnv(ParallelEnv):
 
         for gi, (gr, gc) in enumerate(self.guard_positions):
             if self.neutralized[gi] > 0:
-                self.neutralized[gi] -= 1
                 continue
 
             # LOS Check
@@ -478,7 +514,6 @@ class HeistEnv(ParallelEnv):
     def _action_mask(self, agent):
         mask = np.ones(ACTION_SPACE_SIZE, dtype=np.int8)
         mask[INTERACT] = 0
-        mask[BREACH] = 0
         pos = self.agent_positions[agent]
 
         for a in range(4):
@@ -518,20 +553,12 @@ class HeistEnv(ParallelEnv):
                 for gi, gpos in enumerate(self.guard_positions)
             ):
                 mask[INTERACT] = 1
-            for dr, dc in ACTION_DELTAS.values():
-                if (
-                    0 <= pos[0] + dr < self.map_h
-                    and 0 <= pos[1] + dc < self.map_w
-                    and self.grid[pos[0] + dr, pos[1] + dc] == WALL
-                ):
-                    mask[BREACH] = 1
-                    break
         elif agent == "extractor":  # noqa: SIM102
             if (
                 not self.loot_acquired
                 and self.terminal_disabled
                 and manhattan(pos, self.loot_pos) <= 1
-            ) or (self.loot_acquired and not self.extraction_triggered):
+            ):
                 mask[INTERACT] = 1
         return mask
 
@@ -559,25 +586,27 @@ class HeistEnv(ParallelEnv):
                 vr - pad : vr + pad + 1, vc - pad : vc + pad + 1
             ]
 
-            for poi in self.tagged_pois:
-                if (
-                    (poi == self.terminal_pos and not self.terminal_disabled)
-                    or (
-                        poi == self.loot_pos
-                        and self.terminal_disabled
-                        and not self.loot_acquired
-                    )
-                    or (
-                        poi == self.extract_pos
-                        and (self.loot_acquired or self.extraction_triggered)
-                    )
-                ):
-                    dr, dc = poi[0] - r, poi[1] - c
-                    if abs(dr) > pad or abs(dc) > pad:
-                        obs[
-                            pad + int(np.clip(dr, -pad, pad)),
-                            pad + int(np.clip(dc, -pad, pad)),
-                        ] = WAYPOINT
+            # Role-specific waypoint projections
+            target_pois = []
+            if agent == "hacker" and not self.terminal_disabled:
+                if self.terminal_pos in self.tagged_pois:
+                    target_pois.append(self.terminal_pos)
+            elif agent == "extractor":
+                if not self.loot_acquired and self.terminal_disabled:
+                    if self.loot_pos in self.tagged_pois:
+                        target_pois.append(self.loot_pos)
+                elif self.loot_acquired:
+                    target_pois.append(self.extract_pos)
+            elif self.loot_acquired:
+                target_pois.append(self.extract_pos)
+
+            for poi in target_pois:
+                dr, dc = poi[0] - r, poi[1] - c
+                if abs(dr) > pad or abs(dc) > pad:
+                    obs[
+                        pad + int(np.clip(dr, -pad, pad)),
+                        pad + int(np.clip(dc, -pad, pad)),
+                    ] = WAYPOINT
 
             obs_dict[agent] = {
                 "observation": np.where(explored, obs, FOG),
