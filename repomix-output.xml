@@ -1,0 +1,1322 @@
+This file is a merged representation of the entire codebase, combined into a single document by Repomix.
+
+<file_summary>
+This section contains a summary of this file.
+
+<purpose>
+This file contains a packed representation of the entire repository's contents.
+It is designed to be easily consumable by AI systems for analysis, code review,
+or other automated processes.
+</purpose>
+
+<file_format>
+The content is organized as follows:
+1. This summary section
+2. Repository information
+3. Directory structure
+4. Repository files (if enabled)
+5. Multiple file entries, each consisting of:
+  - File path as an attribute
+  - Full contents of the file
+</file_format>
+
+<usage_guidelines>
+- This file should be treated as read-only. Any changes should be made to the
+  original repository files, not this packed version.
+- When processing this file, use the file path to distinguish
+  between different files in the repository.
+- Be aware that this file may contain sensitive information. Handle it with
+  the same level of security as you would the original repository.
+</usage_guidelines>
+
+<notes>
+- Some files may have been excluded based on .gitignore rules and Repomix's configuration
+- Binary files are not included in this packed representation. Please refer to the Repository Structure section for a complete list of file paths, including binary files
+- Files matching patterns in .gitignore are excluded
+- Files matching default ignore patterns are excluded
+- Files are sorted by Git change count (files with more changes are at the bottom)
+</notes>
+
+</file_summary>
+
+<directory_structure>
+src/
+  constants.py
+  env.py
+  map_gen.py
+  vec_env.py
+  vision.py
+.gitignore
+.python-version
+pyproject.toml
+README.md
+test.py
+</directory_structure>
+
+<files>
+This section contains the contents of the repository's files.
+
+<file path="src/constants.py">
+"""
+Global constants for the HEIST environment.
+"""
+import numpy as np
+
+# Tile types (values observed by agents / used by the renderer)
+FOG = -1       # Hidden behind fog of war
+EMPTY = 0      # Walkable floor
+WALL = 1       # Solid wall (blocks movement and line of sight)
+TERMINAL = 2   # Security terminal - Hacker disables cameras/vault here
+LOOT = 3       # The heist loot - Extractor must secure it
+EXTRACT = 4    # Extraction point - All agents must end here with loot
+GUARD = 5      # Rule-based adversary (dynamic entity)
+ALLY = 6       # Other agent (dynamic entity)
+CAMERA = 7     # Security camera (line-of-sight alarm source)
+DOOR = 8       # Locked door (blocks movement; hacker can bypass)
+WAYPOINT = 9   # Directional beacon for tagged objectives
+
+# Actions
+UP = 0
+DOWN = 1
+LEFT = 2
+RIGHT = 3
+WAIT = 4
+INTERACT = 5
+BREACH = 6
+
+ACTION_DELTAS = {
+    UP: (-1, 0), DOWN: (1, 0), LEFT: (0, -1), RIGHT: (0, 1), WAIT: (0, 0),
+}
+
+# Agents
+AGENTS = ["scout", "hacker", "muscle", "extractor"]
+N_AGENTS = len(AGENTS)
+AGENT_CHAR = {"scout": "S", "hacker": "H", "muscle": "M", "extractor": "E"}
+ROLE_ONEHOT_ARRAYS = {
+    a: np.array([1 if i == j else 0 for j in range(N_AGENTS)], dtype=np.int8) 
+    for i, a in enumerate(AGENTS)
+}
+
+# Observation / layout dimensions
+MAP_SIZE = (50, 50)
+OBSERVATION_SIZE = (7, 7)  # Agent local view window
+ACTION_SPACE_SIZE = 7      # |A| for every agent
+TILE_SIZE = 20             # Renderer pixels per tile
+SCOUT_VISION_RADIUS = 8    
+AGENT_VISION_RADIUS = 3    
+
+# Reward structure
+REWARD_WIN = 15.0
+REWARD_LOSE = -10.0
+REWARD_TASK = 2.0          
+REWARD_TAG = 1.0           
+REWARD_TIME_BLEED = -0.01  
+CONVERGE_BONUS = 1.0       
+CONVERGE_RADIUS = 4        
+WIN_CONVERGE_RADIUS = 3    
+
+# Mechanics & Alarms
+HACK_TURNS = 3
+EXTRACTION_COUNTDOWN = 60
+ALARM_MAX = 100.0
+ALARM_CAMERA = 0.20
+ALARM_HACK_TURN = 2.0
+ALARM_BYPASS = 6.0
+ALARM_NEUTRALIZE = 10.0
+ALARM_BREACH = 10.0
+ALARM_GUARD_SPOT = 25.0
+ALARM_EXTRACTION_TIMEOUT = 25.0
+CAMERA_RANGE = 12
+CATCH_DISTANCE = 1
+CONVERGE_ALARM = 50.0
+NEUTRALIZE_TURNS = 8
+GUARD_LOS_RANGE = 8
+SEARCH_RADIUS = 5
+SEARCH_TURNS = 6
+
+# Renderer Palette
+COLORS = {
+    WALL: (20, 20, 30), EMPTY: (245, 245, 245), TERMINAL: (0, 100, 255),
+    LOOT: (255, 215, 0), EXTRACT: (0, 200, 90), GUARD: (255, 60, 60),
+    CAMERA: (120, 40, 180), DOOR: (160, 110, 40),
+    "AGENT": {"scout": (0, 255, 255), "hacker": (150, 60, 220), "muscle": (180, 60, 60), "extractor": (255, 150, 40)},
+    "EXPLORED": (0, 0, 0, 90),
+}
+</file>
+
+<file path="src/env.py">
+"""
+HEIST: Hierarchical Environment for Interdependent Sequential Tasks.
+Clean Version.
+"""
+import numpy as np
+from gymnasium.spaces import Box, Dict, Discrete
+from pettingzoo import ParallelEnv
+
+from constants import *
+from map_gen import generate_procedural_map
+from vision import (
+    bfs_next_step, calculate_fov, camera_exposure, 
+    distance_to_nearest_target, get_valid_moves, line_is_clear, 
+    next_step_from_distance, pick_search_tile
+)
+
+def manhattan(a, b):
+    return int(abs(a[0] - b[0]) + abs(a[1] - b[1]))
+
+class HeistEnv(ParallelEnv):
+    def __init__(self, config=None):
+        self.config = {
+            "map_size": MAP_SIZE, "num_rooms_range": (8, 12),
+            "guard_count": 4, "camera_count": 3, "door_count": 4,
+            "max_steps": 300, "spawn_mode": "role"
+        }
+        if config: self.config.update(config)
+
+        self.agents = AGENTS[:]
+        self.possible_agents = AGENTS[:]
+        self.map_h, self.map_w = self.config["map_size"]
+        self.grid = np.zeros((self.map_h, self.map_w), dtype=np.int32)
+
+        self.action_spaces = {a: Discrete(ACTION_SPACE_SIZE) for a in self.possible_agents}
+        self.observation_spaces = {
+            a: Dict({
+                "observation": Box(low=FOG, high=255, shape=OBSERVATION_SIZE, dtype=np.int32),
+                "action_mask": Box(low=0, high=1, shape=(ACTION_SPACE_SIZE,), dtype=np.int8),
+                "role_id": Box(low=0, high=1, shape=(N_AGENTS,), dtype=np.int8),
+            }) for a in self.possible_agents
+        }
+
+        self.rng = np.random.default_rng()
+        
+        # Pre-allocated arrays for O(1) BFS in guards logic
+        max_cells = self.map_h * self.map_w
+        self._distance_map = np.full((self.map_h, self.map_w), -1, dtype=np.int32)
+        self._bfs_queue = np.empty(max_cells, dtype=np.int32)
+        self._bfs_previous = np.full(max_cells, -1, dtype=np.int32)
+        self._bfs_reset = np.empty(max_cells, dtype=np.int32)
+        
+        self._pad = OBSERVATION_SIZE[0] // 2
+        self._pad_grid_cache = np.full((self.map_h + 2*self._pad, self.map_w + 2*self._pad), WALL, dtype=np.int32)
+        self._pad_explored_cache = np.full((self.map_h + 2*self._pad, self.map_w + 2*self._pad), False, dtype=bool)
+        self._state_buffer = np.zeros(6 + (self.map_h * self.map_w) + (N_AGENTS * 2) + (12 * 2) + 12, dtype=np.float32)
+
+    def reset(self, seed=None, _options=None):
+        if seed is not None: self.rng = np.random.default_rng(seed)
+        
+        self.current_step = 0
+        self.alarm = 0.0
+        self.terminal_disabled = False
+        self.loot_acquired = False
+        self.extraction_triggered = False
+        self.extraction_countdown = EXTRACTION_COUNTDOWN
+        self.hack_progress = 0
+        self.tagged_pois = set()
+        self._prev_extract_dist = {}
+        self.agents = self.possible_agents[:]
+        self.explored_map = np.zeros((self.map_h, self.map_w), dtype=bool)
+        self._rewarded_breaches = set()
+        self._rewarded_guards = set()
+
+        map_data = generate_procedural_map(
+            self.rng, map_size=(self.map_h, self.map_w),
+            num_rooms_range=self.config["num_rooms_range"],
+            camera_count=self.config["camera_count"], door_count=self.config["door_count"]
+        )
+        self.grid = map_data["grid"]
+        self.terminal_pos = map_data["terminal_pos"]
+        self.loot_pos = map_data["loot_pos"]
+        self.extract_pos = map_data["extract_pos"]
+        self.camera_positions = map_data["camera_positions"]
+        self.door_positions = map_data["door_positions"]
+
+        empty = [tuple(int(x) for x in c) for c in np.argwhere(self.grid == EMPTY)]
+        self.rng.shuffle(empty)
+        
+        self.guard_positions = [empty.pop() for _ in range(min(self.config["guard_count"], len(empty)))]
+        self.neutralized = np.zeros(len(self.guard_positions), dtype=np.int32)
+        self.guard_states = ["patrol"] * len(self.guard_positions)
+        self._guard_search_target = [None] * len(self.guard_positions)
+        self._guard_search_turns = [0] * len(self.guard_positions)
+
+        self.agent_positions = self._spawn_agents(set(self.guard_positions), empty)
+
+        self._refresh_scout_fov()
+        for a in self.agents:
+            calculate_fov(self.grid, self.explored_map, self.agent_positions[a][0], self.agent_positions[a][1], AGENT_VISION_RADIUS, self.map_h, self.map_w, WALL)
+
+        return self._get_all_obs(), {a: {} for a in self.agents}
+
+    def _spawn_agents(self, used, empty):
+        pos = {}
+        if self.config["spawn_mode"] == "role":
+            targets = [("scout", self.terminal_pos), ("hacker", self.terminal_pos), ("muscle", self.loot_pos), ("extractor", self.loot_pos)]
+            for agent, target in targets:
+                best, best_d = None, 1e9
+                for r in range(self.map_h):
+                    for c in range(self.map_w):
+                        if self.grid[r, c] == EMPTY and (r, c) not in used:
+                            d = manhattan((r, c), target)
+                            if d < best_d: best_d, best = d, (r, c)
+                used.add(best)
+                pos[agent] = best
+        else:
+            for a in self.possible_agents:
+                p = empty.pop()
+                used.add(p)
+                pos[a] = p
+        return pos
+
+    def step(self, actions):
+        self.current_step += 1
+        rewards = {a: REWARD_TIME_BLEED for a in self.agents}
+
+        # 1. Agent Actions
+        for agent in list(self.agents):
+            action = actions[agent]
+            if action == WAIT: continue
+            elif action == INTERACT: self._special_action(agent, rewards)
+            elif action == BREACH and agent == "muscle": self._muscle_breach(rewards)
+            else: self._move_agent(agent, action)
+
+        # Hacking interruption penalty
+        if self.hack_progress > 0 and not self.terminal_disabled and manhattan(self.agent_positions["hacker"], self.terminal_pos) > 1:
+            self.hack_progress = 0
+            self._add_alarm(ALARM_HACK_TURN, rewards)
+
+        # 2. Guard Movement & Spotting
+        self._move_guards()
+        if self._check_caught(): self._add_alarm(ALARM_GUARD_SPOT, rewards)
+
+        # 3. Camera Exposure
+        if not self.terminal_disabled and self.camera_positions:
+            exposure = camera_exposure(self.grid, self.camera_positions, list(self.agent_positions.values()), WALL, DOOR, CAMERA_RANGE)
+            self._add_alarm(ALARM_CAMERA * exposure.sum(), rewards)
+
+        # 4. Extraction Countdown
+        if self.extraction_triggered:
+            self.extraction_countdown -= 1
+            if self.extraction_countdown == 0: self._add_alarm(ALARM_EXTRACTION_TIMEOUT, rewards)
+
+        # 5. Potential-Based Reward Shaping (Convergence)
+        if self.loot_acquired or self.extraction_triggered:
+            for a in self.agents:
+                d_cur = manhattan(self.agent_positions[a], self.extract_pos)
+                d_prev = self._prev_extract_dist.get(a, d_cur)
+                rewards[a] += CONVERGE_BONUS * (d_prev - d_cur)
+                if d_cur <= CONVERGE_RADIUS: rewards[a] += 0.05
+                self._prev_extract_dist[a] = d_cur
+
+        # 6. Win / Loss States
+        win = self.loot_acquired and self.extraction_triggered and self.agent_positions["extractor"] == self.extract_pos and all(manhattan(self.agent_positions[a], self.extract_pos) <= WIN_CONVERGE_RADIUS for a in self.agents)
+        lose = self.alarm >= ALARM_MAX
+
+        if win: rewards = {a: REWARD_WIN for a in self.agents}
+        elif lose: rewards = {a: REWARD_LOSE for a in self.agents}
+
+        terms = {a: bool(win or lose) for a in self.agents}
+        truncs = {a: bool(self.current_step >= self.config["max_steps"]) for a in self.agents}
+        infos = {a: {"win": bool(win), "alarm": self.alarm} for a in self.agents}
+
+        if any(terms.values()) or any(truncs.values()): self.agents = []
+        return self._get_all_obs(), rewards, terms, truncs, infos
+
+    def _move_agent(self, agent, action):
+        r, c = self.agent_positions[agent]
+        dr, dc = ACTION_DELTAS[action]
+        nr, nc = r + dr, c + dc
+        if 0 <= nr < self.map_h and 0 <= nc < self.map_w and self.grid[nr, nc] not in (WALL, DOOR):
+            self.agent_positions[agent] = (nr, nc)
+            calculate_fov(self.grid, self.explored_map, nr, nc, AGENT_VISION_RADIUS, self.map_h, self.map_w, WALL)
+            if agent == "scout": self._refresh_scout_fov()
+
+    def _refresh_scout_fov(self):
+        calculate_fov(self.grid, self.explored_map, self.agent_positions["scout"][0], self.agent_positions["scout"][1], SCOUT_VISION_RADIUS, self.map_h, self.map_w, WALL)
+
+    def _special_action(self, agent, rewards):
+        pos = self.agent_positions[agent]
+        if agent == "scout":
+            for p in [self.terminal_pos, self.loot_pos, self.extract_pos] + self.camera_positions + self.door_positions:
+                if p not in self.tagged_pois and manhattan(pos, p) <= 3:
+                    self.tagged_pois.add(p)
+                    rewards["scout"] += REWARD_TAG
+                    return
+        elif agent == "hacker":
+            if not self.terminal_disabled and self.terminal_pos in self.tagged_pois and manhattan(pos, self.terminal_pos) <= 1:
+                self.hack_progress += 1
+                self._add_alarm(ALARM_HACK_TURN, rewards)
+                if self.hack_progress >= HACK_TURNS:
+                    self.terminal_disabled = True
+                    rewards["hacker"] += REWARD_TASK
+                else: rewards["hacker"] += 0.5
+                return
+            for dr, dc in ACTION_DELTAS.values():
+                nr, nc = pos[0]+dr, pos[1]+dc
+                if 0 <= nr < self.map_h and 0 <= nc < self.map_w and self.grid[nr, nc] == DOOR:
+                    self.grid[nr, nc] = EMPTY
+                    self._add_alarm(ALARM_BYPASS, rewards)
+                    rewards["hacker"] += 0.2
+                    return
+        elif agent == "muscle":
+            for gi, gpos in enumerate(self.guard_positions):
+                if self.neutralized[gi] == 0 and manhattan(pos, gpos) <= 2:
+                    self.neutralized[gi] = NEUTRALIZE_TURNS
+                    self._add_alarm(ALARM_NEUTRALIZE, rewards) # Instant alarm, no delayed queue bloat
+                    if gi not in self._rewarded_guards:
+                        self._rewarded_guards.add(gi)
+                        rewards["muscle"] += REWARD_TASK
+                    return
+        elif agent == "extractor":
+            if not self.loot_acquired and self.terminal_disabled and manhattan(pos, self.loot_pos) <= 1:
+                self.loot_acquired = True
+                rewards["extractor"] += REWARD_TASK
+            elif self.loot_acquired and not self.extraction_triggered:
+                self.extraction_triggered = True
+                rewards["extractor"] += 0.5
+
+    def _muscle_breach(self, rewards):
+        pos = self.agent_positions["muscle"]
+        for dr, dc in ACTION_DELTAS.values():
+            nr, nc = pos[0]+dr, pos[1]+dc
+            if 0 <= nr < self.map_h and 0 <= nc < self.map_w and self.grid[nr, nc] == WALL:
+                self.grid[nr, nc] = EMPTY
+                self._add_alarm(ALARM_BREACH, rewards)
+                if (nr, nc) not in self._rewarded_breaches:
+                    self._rewarded_breaches.add((nr, nc))
+                    rewards["muscle"] += REWARD_TASK
+                # Alerts nearby guards
+                for gi, gpos in enumerate(self.guard_positions):
+                    if self.neutralized[gi] == 0 and manhattan((nr, nc), gpos) <= BREACH_RADIUS:
+                        self.guard_states[gi] = "search"
+                        self._guard_search_target[gi] = (nr, nc)
+                        self._guard_search_turns[gi] = SEARCH_TURNS
+                return
+
+    def _move_guards(self):
+        converge = self.alarm >= CONVERGE_ALARM
+        converge_dist = None
+        if converge:
+            targets = np.asarray(list(self.agent_positions.values()), dtype=np.int32)
+            converge_dist = distance_to_nearest_target(self.grid, targets, WALL, DOOR, self._distance_map, self._bfs_queue)
+
+        for gi, (gr, gc) in enumerate(self.guard_positions):
+            if self.neutralized[gi] > 0:
+                self.neutralized[gi] -= 1
+                continue
+
+            # LOS Check
+            spotted = None
+            for _agent, apos in self.agent_positions.items():
+                if manhattan((gr, gc), apos) <= GUARD_LOS_RANGE and line_is_clear(self.grid, gr, gc, apos[0], apos[1], WALL, DOOR):
+                    spotted = apos
+                    break
+            
+            if spotted:
+                self.guard_states[gi] = "search"
+                self._guard_search_target[gi] = spotted
+                self._guard_search_turns[gi] = SEARCH_TURNS
+
+            if converge: self.guard_states[gi] = "converge"
+            elif self.guard_states[gi] == "search" and self._guard_search_turns[gi] <= 0:
+                self.guard_states[gi] = "patrol"
+
+            valid = [(int(m[0]), int(m[1])) for m in get_valid_moves(self.grid, gr, gc, WALL, DOOR)]
+            if not valid: continue
+
+            if self.guard_states[gi] == "converge":
+                nr, nc = next_step_from_distance(converge_dist, gr, gc)
+                if nr >= 0: self.guard_positions[gi] = (nr, nc)
+                else: self.guard_positions[gi] = valid[int(self.rng.integers(len(valid)))]
+            elif self.guard_states[gi] == "search":
+                target = self._guard_search_target[gi]
+                if (gr, gc) == target:
+                    tr, tc = pick_search_tile(self.grid, target[0], target[1], SEARCH_RADIUS, WALL, DOOR, float(self.rng.random()))
+                    self._guard_search_target[gi] = target = (int(tr), int(tc))
+                nr, nc = bfs_next_step(self.grid, gr, gc, target[0], target[1], WALL, DOOR, self._bfs_queue, self._bfs_previous, self._bfs_reset)
+                if nr >= 0: self.guard_positions[gi] = (nr, nc)
+                else: self.guard_positions[gi] = valid[int(self.rng.integers(len(valid)))]
+                self._guard_search_turns[gi] -= 1
+            else:
+                self.guard_positions[gi] = valid[int(self.rng.integers(len(valid)))]
+
+    def _check_caught(self):
+        for gi, gpos in enumerate(self.guard_positions):
+            if self.neutralized[gi] > 0: continue
+            for apos in self.agent_positions.values():
+                if manhattan(gpos, apos) <= CATCH_DISTANCE: return True
+        return False
+
+    def _add_alarm(self, amount, rewards):
+        prev = self.alarm
+        self.alarm = min(self.alarm + amount, ALARM_MAX)
+        if self.alarm - prev > 0:
+            for a in self.agents: rewards[a] -= 0.01 * (self.alarm - prev)
+
+    def _action_mask(self, agent):
+        mask = np.ones(ACTION_SPACE_SIZE, dtype=np.int8)
+        mask[INTERACT] = 0; mask[BREACH] = 0
+        pos = self.agent_positions[agent]
+
+        for a in range(4):
+            nr, nc = pos[0] + ACTION_DELTAS[a][0], pos[1] + ACTION_DELTAS[a][1]
+            if not (0 <= nr < self.map_h and 0 <= nc < self.map_w) or self.grid[nr, nc] in (WALL, DOOR):
+                mask[a] = 0
+
+        if agent == "scout":
+            for p in [self.terminal_pos, self.loot_pos, self.extract_pos] + self.camera_positions + self.door_positions:
+                if manhattan(pos, p) <= 1: mask[INTERACT] = 1; break
+        elif agent == "hacker":
+            if (not self.terminal_disabled and self.terminal_pos in self.tagged_pois and manhattan(pos, self.terminal_pos) <= 1): mask[INTERACT] = 1
+            for dr, dc in ACTION_DELTAS.values():
+                if 0 <= pos[0]+dr < self.map_h and 0 <= pos[1]+dc < self.map_w and self.grid[pos[0]+dr, pos[1]+dc] == DOOR:
+                    mask[INTERACT] = 1; break
+        elif agent == "muscle":
+            if any(self.neutralized[gi] == 0 and manhattan(pos, gpos) <= 2 for gi, gpos in enumerate(self.guard_positions)): mask[INTERACT] = 1
+            for dr, dc in ACTION_DELTAS.values():
+                if 0 <= pos[0]+dr < self.map_h and 0 <= pos[1]+dc < self.map_w and self.grid[pos[0]+dr, pos[1]+dc] == WALL:
+                    mask[BREACH] = 1; break
+        elif agent == "extractor":
+            if (not self.loot_acquired and self.terminal_disabled and manhattan(pos, self.loot_pos) <= 1) or (self.loot_acquired and not self.extraction_triggered):
+                mask[INTERACT] = 1
+        return mask
+
+    def _get_all_obs(self):
+        composite = self.grid.copy()
+        for gi, gpos in enumerate(self.guard_positions):
+            if self.neutralized[gi] == 0: composite[gpos] = GUARD
+        for opos in self.agent_positions.values(): composite[opos] = ALLY
+        
+        pad = self._pad
+        self._pad_grid_cache[pad:-pad, pad:-pad] = composite
+        self._pad_explored_cache[pad:-pad, pad:-pad] = self.explored_map
+        
+        obs_dict = {}
+        for agent in self.agents:
+            r, c = self.agent_positions[agent]
+            vr, vc = r + pad, c + pad
+            obs = self._pad_grid_cache[vr-pad:vr+pad+1, vc-pad:vc+pad+1].copy()
+            obs[pad, pad] = self.grid[r, c] # Make self transparent
+            explored = self._pad_explored_cache[vr-pad:vr+pad+1, vc-pad:vc+pad+1]
+            
+            for poi in self.tagged_pois:
+                if (poi == self.terminal_pos and not self.terminal_disabled) or \
+                   (poi == self.loot_pos and self.terminal_disabled and not self.loot_acquired) or \
+                   (poi == self.extract_pos and (self.loot_acquired or self.extraction_triggered)):
+                    dr, dc = poi[0] - r, poi[1] - c
+                    if abs(dr) > pad or abs(dc) > pad:
+                        obs[pad + int(np.clip(dr, -pad, pad)), pad + int(np.clip(dc, -pad, pad))] = WAYPOINT
+
+            obs_dict[agent] = {
+                "observation": np.where(explored, obs, FOG),
+                "action_mask": self._action_mask(agent),
+                "role_id": ROLE_ONEHOT_ARRAYS[agent],
+            }
+        return obs_dict
+
+    def state(self):
+        self._state_buffer[0] = self.current_step
+        self._state_buffer[1] = self.alarm
+        self._state_buffer[2] = int(self.terminal_disabled)
+        self._state_buffer[3] = int(self.loot_acquired)
+        self._state_buffer[4] = int(self.extraction_triggered)
+        self._state_buffer[5] = self.extraction_countdown
+        idx = 6
+        grid_len = self.map_h * self.map_w
+        self._state_buffer[idx : idx+grid_len] = self.grid.ravel()
+        idx += grid_len
+        for a in self.possible_agents:
+            self._state_buffer[idx:idx+2] = self.agent_positions[a]
+            idx += 2
+        for gpos in self.guard_positions:
+            self._state_buffer[idx:idx+2] = gpos
+            idx += 2
+        if len(self.neutralized) > 0:
+            self._state_buffer[idx : idx+len(self.neutralized)] = self.neutralized
+        return self._state_buffer
+</file>
+
+<file path="src/map_gen.py">
+"""
+Procedural map generator for HEIST.
+
+Generates a connected, random-dungeon-style map with:
+  - Rooms carved out of a wall-filled grid
+  - L-shaped corridors connecting successive rooms (guaranteeing connectivity)
+  - Security cameras placed inside random rooms
+  - Doors placed on corridor tiles that sit between rooms
+  - Terminal, loot, and extraction-point spawns spread across empty space
+
+The map dimensions and feature counts are parameterised so that
+`curriculum.py` can start training on tiny, guard-free maps and ramp
+up to the full 50x50, guard/camera-rich benchmark.
+"""
+
+import numpy as np
+
+from constants import (
+    CAMERA,
+    DOOR,
+    EMPTY,
+    EXTRACT,
+    LOOT,
+    TERMINAL,
+    WALL,
+)
+
+
+def generate_procedural_map(
+    rng: np.random.Generator,
+    map_size: tuple[int, int] = (50, 50),
+    num_rooms_range: tuple[int, int] = (8, 12),
+    camera_count: int = 3,
+    door_count: int = 4,
+) -> dict:
+    """Return a dict describing the generated map.
+
+    Returns
+    -------
+    dict with keys:
+        grid          : np.ndarray[map_size]  — base tile grid
+        terminal_pos  : (r, c) of the security terminal
+        loot_pos      : (r, c) of the loot
+        extract_pos   : (r, c) of the extraction point
+        camera_positions : list of (r, c) for each camera tile
+        room_rects   : list of (r_start, c_start, h, w) for each room
+        corridor_coords : set of (r, c) tiles that are corridor (not in any room)
+    """
+    h, w = map_size
+    grid = np.full(map_size, WALL, dtype=np.int32)
+
+    # --- carve rooms --------------------------------------------------------
+    num_rooms = rng.integers(num_rooms_range[0], num_rooms_range[1] + 1)
+    room_rects: list[tuple[int, int, int, int]] = []
+    for _ in range(num_rooms):
+        rh = rng.integers(4, min(9, h - 2))
+        rw = rng.integers(4, min(9, w - 2))
+        rr = rng.integers(1, h - rh - 1)
+        rc = rng.integers(1, w - rw - 1)
+        grid[rr : rr + rh, rc : rc + rw] = EMPTY
+        room_rects.append((rr, rc, rh, rw))
+
+    # --- connect rooms with L-shaped corridors ------------------------------
+    room_centers = [(r + rh // 2, c + rw // 2) for (r, c, rh, rw) in room_rects]
+    corridor_coords: set[tuple[int, int]] = set()
+    for i in range(len(room_centers) - 1):
+        r1, c1 = room_centers[i]
+        r2, c2 = room_centers[i + 1]
+        cmin, cmax = min(c1, c2), max(c1, c2)
+        rmin, rmax = min(r1, r2), max(r1, r2)
+        # horizontal sweep on c1
+        for c in range(cmin, cmax + 1):
+            if grid[r1, c] == WALL:
+                corridor_coords.add((r1, c))
+            grid[r1, c] = EMPTY
+        # vertical sweep on c2
+        for r in range(rmin, rmax + 1):
+            if grid[r, c2] == WALL:
+                corridor_coords.add((r, c2))
+            grid[r, c2] = EMPTY
+
+    # --- identify all empty tiles (rooms + corridors) ----------------------
+    all_empty = np.argwhere(grid == EMPTY)
+    # classify which empty tiles belong to a room vs corridor
+    room_set: set[tuple[int, int]] = set()
+    for rr, rc, rh, rw in room_rects:
+        for r in range(rr, rr + rh):
+            for c in range(rc, rc + rw):
+                room_set.add((r, c))
+    corridor_coords = {(r, c) for (r, c) in corridor_coords if (r, c) not in room_set}
+
+    # --- place cameras inside random rooms ----------------------------------
+    room_tiles: list[tuple[int, int]] = list(room_set & set(map(tuple, all_empty)))
+    rng.shuffle(room_tiles)
+    camera_positions: list[tuple[int, int]] = []
+    if camera_count > 0 and room_tiles:
+        cam_tiles = room_tiles[:camera_count]
+        for pos in cam_tiles:
+            p = (int(pos[0]), int(pos[1]))
+            grid[p[0], p[1]] = CAMERA
+            camera_positions.append(p)
+
+    # --- place doors on corridor tiles (between rooms) ---------------------
+    door_coords = list(corridor_coords)
+    rng.shuffle(door_coords)
+    door_positions: list[tuple[int, int]] = []
+    for pos in door_coords[:door_count]:
+        p = (int(pos[0]), int(pos[1]))
+        grid[p[0], p[1]] = DOOR
+        door_positions.append(p)
+
+    # --- place terminal, loot, extraction on remaining empty space ----------
+    empty_coords = np.argwhere(grid == EMPTY)
+    if len(empty_coords) < 3:
+        # fallback: use all non-wall tiles for spawning
+        empty_coords = np.argwhere(grid != WALL)
+    spawns = rng.choice(empty_coords, size=3, replace=False)
+    terminal_pos = tuple(spawns[0].tolist())
+    loot_pos = tuple(spawns[1].tolist())
+    extract_pos = tuple(spawns[2].tolist())
+    grid[terminal_pos[0], terminal_pos[1]] = TERMINAL
+    grid[loot_pos[0], loot_pos[1]] = LOOT
+    grid[extract_pos[0], extract_pos[1]] = EXTRACT
+
+    return {
+        "grid": grid,
+        "terminal_pos": terminal_pos,
+        "loot_pos": loot_pos,
+        "extract_pos": extract_pos,
+        "camera_positions": camera_positions,
+        "door_positions": door_positions,
+        "room_rects": room_rects,
+        "corridor_coords": corridor_coords,
+    }
+</file>
+
+<file path="src/vec_env.py">
+"""
+Vectorized environment wrapper for HEIST.
+
+Wraps `num_envs` independent HeistEnv instances so the PPO training loops
+can collect rollouts in a simple numpy array layout (one buffer per agent),
+mirroring the CleanRL vector-env convention.
+
+Each env is stepped with a dict of per-agent actions.  When an episode
+terminates or truncates, that env is immediately reset so the rollout buffer
+can be kept dense.  REV-4 (REVISION_PLAN.md §3a) fixes the contract so the
+TRUE terminal observation is not lost: ``step`` stashes it (packed per agent)
+in ``infos[env]["terminal_observation"]`` (and the terminal env-state in
+``infos[env]["terminal_state"]``) BEFORE the internal reset, and returns
+terminations and truncations separately so the trainer can bootstrap value
+estimates correctly on truncation (REV-3, REVISION_PLAN.md §3b).
+"""
+
+import multiprocessing as mp
+
+import numpy as np
+
+from env import AGENTS, HeistEnv
+
+
+def _worker(remote, parent_remote, config):
+    parent_remote.close()
+    env = HeistEnv(config)
+    try:
+        while True:
+            cmd, data = remote.recv()
+            if cmd == "step":
+                if not env.agents:
+                    env.reset()
+                o, r, t, tr, inf = env.step(data)
+                done = bool(any(t.values()) or any(tr.values()))
+                term_obs = None
+                term_state = None
+                if done:
+                    # pack terminal observation
+                    n_agents = len(AGENTS)
+                    obs_shape = o["scout"]["observation"].shape
+                    mask_shape = o["scout"]["action_mask"].shape
+                    role_shape = o["scout"]["role_id"].shape
+                    obs_arr = np.empty((n_agents, 1) + obs_shape, dtype=np.int32)
+                    mask_arr = np.empty((n_agents, 1) + mask_shape, dtype=np.int8)
+                    role_arr = np.empty((n_agents, 1) + role_shape, dtype=np.int8)
+                    for i, a in enumerate(AGENTS):
+                        obs_arr[i, 0] = o[a]["observation"]
+                        mask_arr[i, 0] = o[a]["action_mask"]
+                        role_arr[i, 0] = o[a]["role_id"]
+                    term_obs = {}
+                    for i, a in enumerate(AGENTS):
+                        term_obs[a] = {
+                            "observation": obs_arr[i],
+                            "action_mask": mask_arr[i],
+                            "role_id": role_arr[i],
+                        }
+                    term_state = env.state()
+                    o, _ = env.reset()
+                remote.send((o, r, t, tr, inf, done, term_obs, term_state, env.state()))
+            elif cmd == "reset":
+                o, _ = env.reset(seed=data)
+                remote.send((o, env.state()))
+            elif cmd == "close":
+                remote.close()
+                break
+    except KeyboardInterrupt:
+        pass
+    except Exception as e:
+        remote.send(e)
+    finally:
+        env.close()
+
+
+class VectorEnv:
+    def __init__(self, num_envs, config=None, base_seed=0):
+        self.num_envs = num_envs
+        self.base_seed = base_seed
+        # Prototype env for metadata/inspectability (workers spawn their own)
+        self.envs = [HeistEnv(config)]
+
+        # Use multiprocessing context
+        ctx = mp.get_context(
+            "fork"
+            if hasattr(mp, "get_context") and "fork" in mp.get_all_start_methods()
+            else "spawn"
+        )
+        self.remotes, self.work_remotes = zip(
+            *[ctx.Pipe() for _ in range(num_envs)], strict=True
+        )
+        self.ps = [
+            ctx.Process(target=_worker, args=(work_remote, remote, config))
+            for work_remote, remote in zip(self.work_remotes, self.remotes, strict=True)
+        ]
+        for p in self.ps:
+            p.daemon = True
+            p.start()
+        for remote in self.work_remotes:
+            remote.close()
+
+        # inspect initial state_dim
+        self.remotes[0].send(("reset", base_seed))
+        _, initial_state = self.remotes[0].recv()
+        self.state_dim = initial_state.shape[0]
+        self.obs = None
+        self.state = None
+
+    # ------------------------------------------------------------------
+    def _pack(self, obs_list):
+        n_envs = len(obs_list)
+        obs_shape = obs_list[0]["scout"]["observation"].shape
+        mask_shape = obs_list[0]["scout"]["action_mask"].shape
+        role_shape = obs_list[0]["scout"]["role_id"].shape
+
+        n_agents = len(AGENTS)
+        obs_array = np.empty((n_agents, n_envs) + obs_shape, dtype=np.int32)
+        mask_array = np.empty((n_agents, n_envs) + mask_shape, dtype=np.int8)
+        role_array = np.empty((n_agents, n_envs) + role_shape, dtype=np.int8)
+
+        for i, a in enumerate(AGENTS):
+            for j, o in enumerate(obs_list):
+                obs_array[i, j] = o[a]["observation"]
+                mask_array[i, j] = o[a]["action_mask"]
+                role_array[i, j] = o[a]["role_id"]
+
+        packed = {}
+        for i, a in enumerate(AGENTS):
+            packed[a] = {
+                "observation": obs_array[i],
+                "action_mask": mask_array[i],
+                "role_id": role_array[i],
+            }
+        packed["_stacked"] = {
+            "observation": obs_array,
+            "action_mask": mask_array,
+            "role_id": role_array,
+        }
+        return packed
+
+    def reset(self, seed=None):
+        base = seed if seed is not None else self.base_seed
+        for i, remote in enumerate(self.remotes):
+            remote.send(("reset", base + i))
+
+        obs_list, states = [], []
+        for remote in self.remotes:
+            o, s = remote.recv()
+            if isinstance(o, Exception):
+                raise o
+            obs_list.append(o)
+            states.append(s)
+
+        self.obs = self._pack(obs_list)
+        self.state = np.stack(states).astype(np.float32)
+        self.state_dim = self.state.shape[1]
+        return self.obs, self.state
+
+    def step(self, actions):
+        for i, remote in enumerate(self.remotes):
+            acts = {a: int(actions[a][i]) for a in AGENTS}
+            remote.send(("step", acts))
+
+        rewards = {a: np.zeros(self.num_envs, dtype=np.float32) for a in AGENTS}
+        terminations = {a: np.zeros(self.num_envs, dtype=bool) for a in AGENTS}
+        truncations = {a: np.zeros(self.num_envs, dtype=bool) for a in AGENTS}
+        next_obs_list = []
+        next_states = np.zeros((self.num_envs, self.state_dim), dtype=np.float32)
+        infos = [{} for _ in range(self.num_envs)]
+
+        for i, remote in enumerate(self.remotes):
+            res = remote.recv()
+            if isinstance(res, Exception):
+                raise res
+            o, r, t, tr, inf, done, term_obs, term_state, st = res
+            infos[i] = inf
+            for a in AGENTS:
+                rewards[a][i] = r[a]
+                terminations[a][i] = bool(t[a])
+                truncations[a][i] = bool(tr[a])
+            if done:
+                infos[i]["terminal_observation"] = term_obs
+                infos[i]["terminal_state"] = term_state
+            next_obs_list.append(o)
+            next_states[i] = st
+
+        self.obs = self._pack(next_obs_list)
+        self.state = next_states
+        return self.obs, rewards, terminations, truncations, infos
+
+    def close(self):
+        for remote in self.remotes:
+            try:
+                remote.send(("close", None))
+            except Exception:
+                pass
+        for p in self.ps:
+            p.join(timeout=1.0)
+</file>
+
+<file path="src/vision.py">
+"""
+Vision and line-of-sight primitives for HEIST.
+
+All heavy loops are JIT-compiled with Numba so that high-FPS headless
+training rollouts are not throttled by the Python interpreter.  This
+addresses the "Performance Horizon (Raycasting Bottleneck)" section of
+PLAN.md: raycasting is now fully numba-vectorized and callable from plain
+NumPy code.
+
+Functions
+---------
+raycast : fill a Bresenham line into explored_map until a wall is hit
+calculate_fov : reveal a radius around a position using raycast
+line_is_clear : True when the Bresenham line between two tiles is unobstructed
+camera_exposure : which cameras see which agents (vectorized over agents)
+"""
+
+import numpy as np
+from numba import njit
+
+from constants import DOOR, WALL
+
+
+@njit(cache=True)
+def raycast(grid, explored_map, start_r, start_c, target_r, target_c, wall_val):
+    """Walk a Bresenham line from (start_r, start_c) to (target_r, target_c),
+    marking every tile traversed as explored until a wall blocks the line."""
+    r0, c0 = start_r, start_c
+    r1, c1 = target_r, target_c
+
+    dr = abs(r1 - r0)
+    dc = abs(c1 - c0)
+    sr = 1 if r0 < r1 else -1
+    sc = 1 if c0 < c1 else -1
+    err = dr - dc
+
+    while True:
+        explored_map[r0, c0] = True
+
+        if grid[r0, c0] == wall_val:
+            break
+
+        if r0 == r1 and c0 == c1:
+            break
+
+        e2 = 2 * err
+        if e2 > -dc:
+            err -= dc
+            r0 += sr
+        if e2 < dr:
+            err += dr
+            c0 += sc
+
+
+@njit(cache=True)
+def calculate_fov(grid, explored_map, start_r, start_c, radius, map_h, map_w, wall_val):
+    """Reveal every tile within `radius` of (start_r, start_c), clipped to the
+    map bounds.  Walls terminate each ray, which is what creates the fog."""
+    min_row = max(start_r - radius, 0)
+    max_row = min(start_r + radius, map_h - 1)
+    min_col = max(start_c - radius, 0)
+    max_col = min(start_c + radius, map_w - 1)
+
+    for r in range(min_row, max_row + 1):
+        for c in range(min_col, max_col + 1):
+            raycast(grid, explored_map, start_r, start_c, r, c, wall_val)
+
+
+@njit(cache=True)
+def line_is_clear(grid, r0, c0, r1, c1, wall_val, door_val):
+    """Return True when the tile at (r0, c0) can 'see' the tile at (r1, c1):
+    the Bresenham line between them is not blocked by a wall or a locked door.
+
+    The starting tile itself never blocks (a camera on the same tile as an
+    agent would be a trivial edge case, and we treat the start as transparent).
+    """
+    dr = abs(r1 - r0)
+    dc = abs(c1 - c0)
+    sr = 1 if r0 < r1 else -1
+    sc = 1 if c0 < c1 else -1
+    err = dr - dc
+
+    r, c = r0, c0
+    while True:
+        if r == r1 and c == c1:
+            return True
+        if (r != r0 or c != c0) and (grid[r, c] == wall_val or grid[r, c] == door_val):
+            return False
+        e2 = 2 * err
+        if e2 > -dc:
+            err -= dc
+            r += sr
+        if e2 < dr:
+            err += dr
+            c += sc
+        if not (0 <= r < grid.shape[0] and 0 <= c < grid.shape[1]):
+            return False
+
+
+@njit(cache=True)
+def bfs_next_step(
+    grid,
+    start_r,
+    start_c,
+    target_r,
+    target_c,
+    wall_val,
+    door_val,
+    queue,
+    previous,
+    reset_stack,
+):
+    """Return the first shortest-path step as ``(row, col)`` or ``(-1, -1)``.
+
+    This is deliberately BFS, rather than A*: movement has uniform cost and
+    the action ordering matches ``ACTION_DELTAS`` (up, down, left, right).
+    Fixed-size NumPy arrays avoid the per-search Python ``deque``/``dict``
+    allocations that made guard movement expensive on large maps.
+    """
+    if start_r == target_r and start_c == target_c:
+        return -1, -1
+
+    height, width = grid.shape
+    head = 0
+    tail = 1
+    reset_ptr = 0
+    start = start_r * width + start_c
+    target = target_r * width + target_c
+    queue[0] = start
+    previous[start] = -1
+    reset_stack[reset_ptr] = start
+    reset_ptr += 1
+
+    while head < tail:
+        current = queue[head]
+        head += 1
+        if current == target:
+            break
+        row = current // width
+        col = current % width
+        for direction in range(4):
+            if direction == 0:
+                nr, nc = row - 1, col
+            elif direction == 1:
+                nr, nc = row + 1, col
+            elif direction == 2:
+                nr, nc = row, col - 1
+            else:
+                nr, nc = row, col + 1
+            if nr < 0 or nr >= height or nc < 0 or nc >= width:
+                continue
+            neighbor = nr * width + nc
+            if previous[neighbor] != -2:
+                continue
+            tile = grid[nr, nc]
+            if tile in (wall_val, door_val):
+                continue
+            previous[neighbor] = current
+            queue[tail] = neighbor
+            tail += 1
+            reset_stack[reset_ptr] = neighbor
+            reset_ptr += 1
+
+    res_r, res_c = -1, -1
+    if previous[target] != -2:
+        current = target
+        while previous[current] != start:
+            current = previous[current]
+            if current < 0:
+                res_r, res_c = -1, -1
+                break
+        else:
+            res_r, res_c = current // width, current % width
+
+    for i in range(reset_ptr):
+        previous[reset_stack[i]] = -2
+
+    return res_r, res_c
+
+
+@njit(cache=True)
+def bfs_shortest_path_distance(
+    grid,
+    start_r,
+    start_c,
+    target_r,
+    target_c,
+    wall_val,
+    door_val,
+    queue,
+    distance,
+    reset_stack,
+):
+    """Return shortest-path distance between (start_r, start_c) and (target_r, target_c) or 999999."""
+    if start_r == target_r and start_c == target_c:
+        return 0
+    height, width = grid.shape
+    head = 0
+    tail = 1
+    reset_ptr = 0
+    start = start_r * width + start_c
+    target = target_r * width + target_c
+    queue[0] = start
+    distance[start_r, start_c] = 0
+    reset_stack[reset_ptr] = start
+    reset_ptr += 1
+
+    res_d = 999999
+    while head < tail:
+        current = queue[head]
+        head += 1
+        row = current // width
+        col = current % width
+        d = distance[row, col]
+        if current == target:
+            res_d = int(d)
+            break
+        for direction in range(4):
+            if direction == 0:
+                nr, nc = row - 1, col
+            elif direction == 1:
+                nr, nc = row + 1, col
+            elif direction == 2:
+                nr, nc = row, col - 1
+            else:
+                nr, nc = row, col + 1
+            if nr < 0 or nr >= height or nc < 0 or nc >= width:
+                continue
+            neighbor = nr * width + nc
+            if distance[nr, nc] != -1:
+                continue
+            tile = grid[nr, nc]
+            if tile in (wall_val, door_val):
+                continue
+            distance[nr, nc] = d + 1
+            queue[tail] = neighbor
+            tail += 1
+            reset_stack[reset_ptr] = neighbor
+            reset_ptr += 1
+
+    for i in range(reset_ptr):
+        idx = reset_stack[i]
+        distance[idx // width, idx % width] = -1
+
+    return res_d
+
+
+@njit(cache=True)
+def distance_to_nearest_target(grid, targets, wall_val, door_val, distance, queue):
+    """Return a walkable-cell distance field seeded by every target.
+
+    A single multi-source BFS lets all converging guards follow an optimal
+    route to their nearest reachable agent rather than running one BFS per
+    guard.  ``-1`` indicates walls, doors, and unreachable cells.
+    """
+    height, width = grid.shape
+    for r in range(height):
+        for c in range(width):
+            distance[r, c] = -1
+
+    head = 0
+    tail = 0
+    for i in range(targets.shape[0]):
+        row = targets[i, 0]
+        col = targets[i, 1]
+        if row < 0 or row >= height or col < 0 or col >= width:
+            continue
+        if distance[row, col] == -1:
+            distance[row, col] = 0
+            queue[tail] = row * width + col
+            tail += 1
+
+    while head < tail:
+        current = queue[head]
+        head += 1
+        row = current // width
+        col = current % width
+        for direction in range(4):
+            if direction == 0:
+                nr, nc = row - 1, col
+            elif direction == 1:
+                nr, nc = row + 1, col
+            elif direction == 2:
+                nr, nc = row, col - 1
+            else:
+                nr, nc = row, col + 1
+            if nr < 0 or nr >= height or nc < 0 or nc >= width:
+                continue
+            if distance[nr, nc] != -1:
+                continue
+            tile = grid[nr, nc]
+            if tile in (wall_val, door_val):
+                continue
+            distance[nr, nc] = distance[row, col] + 1
+            queue[tail] = nr * width + nc
+            tail += 1
+    return distance
+
+
+@njit(cache=True)
+def next_step_from_distance(distance, row, col):
+    """Pick the first adjacent cell that reduces a BFS distance field."""
+    current_distance = distance[row, col]
+    if current_distance <= 0:
+        return -1, -1
+    height, width = distance.shape
+    for direction in range(4):
+        if direction == 0:
+            nr, nc = row - 1, col
+        elif direction == 1:
+            nr, nc = row + 1, col
+        elif direction == 2:
+            nr, nc = row, col - 1
+        else:
+            nr, nc = row, col + 1
+        if (
+            0 <= nr < height
+            and 0 <= nc < width
+            and distance[nr, nc] == current_distance - 1
+        ):
+            return nr, nc
+    return -1, -1
+
+
+def camera_exposure(
+    grid, camera_positions, agent_positions, wall_val=WALL, door_val=DOOR, max_range=12
+):
+    """Return a boolean matrix [n_cameras, n_agents] indicating which cameras
+    currently have a clear line of sight to which agents, restricted to
+    `max_range` Manhattan distance.  Thin Python wrapper around the
+    numba-compiled `line_is_clear`; camera counts are small (typically <= 4)
+    so the overhead is negligible."""
+    n_cam, n_agent = len(camera_positions), len(agent_positions)
+    if n_cam == 0 or n_agent == 0:
+        return np.zeros((n_cam, n_agent), dtype=bool)
+
+    c_pos = np.array(camera_positions)
+    a_pos = np.array(agent_positions)
+    dist = np.abs(c_pos[:, None, 0] - a_pos[None, :, 0]) + np.abs(
+        c_pos[:, None, 1] - a_pos[None, :, 1]
+    )
+
+    exposure = np.zeros((n_cam, n_agent), dtype=bool)
+    for i in range(n_cam):
+        for j in range(n_agent):
+            if dist[i, j] > max_range:
+                continue
+            exposure[i, j] = line_is_clear(
+                grid,
+                c_pos[i, 0],
+                c_pos[i, 1],
+                a_pos[j, 0],
+                a_pos[j, 1],
+                wall_val,
+                door_val,
+            )
+    return exposure
+
+
+@njit(cache=True)
+def pick_search_tile(grid, center_r, center_c, radius, wall_val, door_val, rand_val):
+    height, width = grid.shape
+    max_cells = (2 * radius + 1) * (2 * radius + 1)
+    stack_r = np.empty(max_cells, dtype=np.int32)
+    stack_c = np.empty(max_cells, dtype=np.int32)
+    count = 0
+    for dr in range(-radius, radius + 1):
+        for dc in range(-radius, radius + 1):
+            nr, nc = center_r + dr, center_c + dc
+            if 0 <= nr < height and 0 <= nc < width:
+                tile = grid[nr, nc]
+                if tile != wall_val and tile != door_val:
+                    stack_r[count] = nr
+                    stack_c[count] = nc
+                    count += 1
+    if count == 0:
+        return center_r, center_c
+    idx = int(rand_val * count)
+    return stack_r[idx], stack_c[idx]
+
+
+@njit(cache=True)
+def get_valid_moves(grid, r, c, wall_val, door_val):
+    height, width = grid.shape
+    moves = np.empty((4, 2), dtype=np.int32)
+    count = 0
+    for direction in range(4):
+        if direction == 0:
+            nr, nc = r - 1, c
+        elif direction == 1:
+            nr, nc = r + 1, c
+        elif direction == 2:
+            nr, nc = r, c - 1
+        else:
+            nr, nc = r, c + 1
+        if 0 <= nr < height and 0 <= nc < width:
+            tile = grid[nr, nc]
+            if tile != wall_val and tile != door_val:
+                moves[count, 0] = nr
+                moves[count, 1] = nc
+                count += 1
+    return moves[:count]
+</file>
+
+<file path=".gitignore">
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+</file>
+
+<file path=".python-version">
+3.14
+</file>
+
+<file path="pyproject.toml">
+[project]
+name = "ecoop-heist"
+version = "0.1.0"
+description = "MARL environment and algorithm"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+   # ...
+]
+</file>
+
+<file path="README.md">
+
+</file>
+
+<file path="test.py">
+from src.env import HeistEnv
+
+env = HeistEnv({"map_size": (11, 11), "guard_count": 0})
+obs, _ = env.reset()
+print(obs["scout"]["observation"])
+print("Mask:", obs["scout"]["action_mask"])
+</file>
+
+</files>
