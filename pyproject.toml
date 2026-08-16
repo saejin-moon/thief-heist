@@ -10,4 +10,5 @@ dependencies = [
    "numba>=0.67.0",
    "numpy>=2.5.2",
    "pettingzoo>=1.27.0",
+   "torch>=2.13.0",
 ]

@@ -16,41 +16,55 @@ GAE_LAMBDA = 0.95
 UPDATE_EPOCHS = 4
 CLIP_COEF = 0.2
 
-class MappoNetwork(nn.Module):
-    def __init__(self, state_dim):
+class CoopNetwork(nn.Module):
+    def __init__(self, state_dim, num_experts=2):
         super().__init__()
-        # Actor sees: 7x7 Grid (49) + Role One-Hot (4) = 53 dims
-        actor_in_dim = (OBSERVATION_SIZE[0] * OBSERVATION_SIZE[1]) + N_AGENTS
-        self.actor = nn.Sequential(
-            nn.Linear(actor_in_dim, 64), nn.Tanh(),
-            nn.Linear(64, 64), nn.Tanh(),
-            nn.Linear(64, ACTION_SPACE_SIZE) # Outputs raw logits for 7 actions
-        )
-        
-        # Critic sees: Global state (everything)
-        self.critic = nn.Sequential(
-            nn.Linear(state_dim, 64), nn.Tanh(),
-            nn.Linear(64, 64), nn.Tanh(),
-            nn.Linear(64, 1) # Outputs a single expected reward (Value)
-        )
+        # Instead of one network, we make a list of identical experts!
+        self.experts = nn.ModuleList([MappoNetwork(state_dim) for _ in range(num_experts)])
 
-    def get_action_and_value(self, obs, role, mask, state=None, action=None):
-        # 1. Prepare Actor Input
-        x_actor = torch.cat([obs.flatten(start_dim=1), role], dim=1)
-        logits = self.actor(x_actor)
+    def get_action_and_value(self, obs, role, mask, state, action=None, expert_idx=None):
+        batch_size = obs.shape[0]
         
-        # 2. THE MASKING TRICK: Make illegal actions infinitely bad (-1e9)
-        masked_logits = logits + ((1.0 - mask) * -1e9)
-        
-        # 3. Sample an action
-        probs = Categorical(logits=masked_logits)
-        if action is None:
-            action = probs.sample()
+        # 1. THE ROUTER: If we don't know which expert to use, they vote!
+        if expert_idx is None:
+            expert_values = []
+            for expert in self.experts:
+                # Each expert's critic predicts how well it can handle this state
+                val = expert.critic(state).squeeze(-1)
+                expert_values.append(val)
             
-        # 4. Get Critic Value
-        value = self.critic(state).squeeze(-1) if state is not None else None
-        
-        return action, probs.log_prob(action), probs.entropy(), value
+            expert_values = torch.stack(expert_values, dim=1) # Shape: [Batch, Num_Experts]
+            
+            # The expert with the highest confidence wins control of the agent
+            chosen_expert = torch.argmax(expert_values, dim=1) # Shape: [Batch]
+        else:
+            chosen_expert = expert_idx
+
+        # 2. EXECUTION: Now that we have a winner for each item in the batch, we get their actions
+        actions = torch.zeros(batch_size, dtype=torch.long, device=obs.device)
+        logprobs = torch.zeros(batch_size, device=obs.device)
+        entropies = torch.zeros(batch_size, device=obs.device)
+        values = torch.zeros(batch_size, device=obs.device)
+
+        for k, expert in enumerate(self.experts):
+            # Find which items in the batch picked expert 'k'
+            mask_k = (chosen_expert == k)
+            if not mask_k.any(): 
+                continue # Nobody picked this expert, skip it
+            
+            # Ask expert 'k' what to do for its assigned batch items
+            a, lp, ent, v = expert.get_action_and_value(
+                obs[mask_k], role[mask_k], mask[mask_k], state[mask_k], 
+                action[mask_k] if action is not None else None
+            )
+            
+            # Store the results
+            actions[mask_k] = a
+            logprobs[mask_k] = lp
+            entropies[mask_k] = ent
+            values[mask_k] = v
+
+        return actions, logprobs, entropies, values, chosen_expert
 
 def train():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -64,7 +78,7 @@ def train():
     vec_env = VectorEnv(NUM_ENVS, config=env_config)
     state_dim = vec_env.state_dim
     
-    agent = MappoNetwork(state_dim).to(device)
+    agent = CoopNetwork(state_dim, num_experts=2)
     optimizer = torch.optim.Adam(agent.parameters(), lr=LR)
 
     next_obs, next_state = vec_env.reset()
@@ -84,6 +98,7 @@ def train():
         b_values = {a: torch.zeros((NUM_STEPS, NUM_ENVS)).to(device) for a in AGENTS}
         b_dones = torch.zeros((NUM_STEPS, NUM_ENVS)).to(device)
         b_states = torch.zeros((NUM_STEPS, NUM_ENVS, state_dim)).to(device)
+        b_experts = {a: torch.zeros((NUM_STEPS, NUM_ENVS), dtype=torch.long).to(device) for a in AGENTS}
 
         for step in range(NUM_STEPS):
             b_states[step] = torch.tensor(next_state, dtype=torch.float32).to(device)
@@ -97,9 +112,10 @@ def train():
                 role_all = torch.tensor(stacked["role_id"], dtype=torch.float32, device=device)
                 mask_all = torch.tensor(stacked["action_mask"], dtype=torch.float32, device=device)
                 
+                
                 # 2. ONE massive forward pass for all 4 agents across 8 envs (Batch Size = 32)
                 state_rep = b_states[step].repeat(N_AGENTS, 1) # Match state shape to the 32 agents
-                actions, logprobs, _, values = agent.get_action_and_value(
+                actions, logprobs, _, values, chosen_expert = agent.get_action_and_value(
                     obs_all.flatten(0, 1), role_all.flatten(0, 1), mask_all.flatten(0, 1), state_rep
                 )
                 
@@ -107,9 +123,11 @@ def train():
                 actions = actions.view(N_AGENTS, NUM_ENVS)
                 logprobs = logprobs.view(N_AGENTS, NUM_ENVS)
                 values = values.view(N_AGENTS, NUM_ENVS)
+                experts_unflattened = chosen_expert.view(N_AGENTS, NUM_ENVS)
                 
                 # 4. Store in buffers
                 for i, a in enumerate(AGENTS):
+                    b_experts[a][step] = experts_unflattened[i]
                     b_obs[a][step], b_role[a][step], b_mask[a][step] = obs_all[i], role_all[i], mask_all[i]
                     b_actions[a][step] = actions[i]
                     b_logprobs[a][step] = logprobs[i]
@@ -161,7 +179,7 @@ def train():
                 # Normalize advantage
                 adv_flat = (adv_flat - adv_flat.mean()) / (adv_flat.std() + 1e-8)
 
-                _, newlogprob, entropy, newvalue = agent.get_action_and_value(obs_flat, role_flat, mask_flat, b_states_flat, action=action_flat)
+                _, newlogprob, entropy, newvalue, _ = agent.get_action_and_value(obs_flat, role_flat, mask_flat, b_states_flat, action=action_flat, expert_idx=b_experts[a].reshape(-1))
                 
                 # PPO Clipping Math
                 logratio = newlogprob - logprob_flat

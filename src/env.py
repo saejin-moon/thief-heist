@@ -171,8 +171,9 @@ class HeistEnv(ParallelEnv):
         truncs = {a: bool(self.current_step >= self.config["max_steps"]) for a in self.agents}
         infos = {a: {"win": bool(win), "alarm": self.alarm} for a in self.agents}
 
+        observations = self._get_all_obs()
         if any(terms.values()) or any(truncs.values()): self.agents = []
-        return self._get_all_obs(), rewards, terms, truncs, infos
+        return observations, rewards, terms, truncs, infos
 
     def _move_agent(self, agent, action):
         r, c = self.agent_positions[agent]
