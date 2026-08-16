@@ -1,11 +1,12 @@
-import sys
 import os
+import sys
 import unittest
 
 sys.path.insert(0, os.path.abspath('src'))
 
-from env import HeistEnv
 from constants import AGENTS
+from env import HeistEnv
+
 
 class TestHeistEnv(unittest.TestCase):
     def setUp(self):
@@ -20,7 +21,7 @@ class TestHeistEnv(unittest.TestCase):
         self.env = HeistEnv(self.config)
 
     def test_reset(self):
-        obs, infos = self.env.reset()
+        obs, _infos = self.env.reset()
         self.assertIn("scout", obs)
         self.assertEqual(len(self.env.agents), len(AGENTS))
 

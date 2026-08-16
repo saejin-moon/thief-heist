@@ -114,17 +114,17 @@ def train(
 ):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+    handlers = [logging.StreamHandler()]
     if log_dir is not None:
-        logging.basicConfig(
-            filename=os.path.join(log_dir, "train.log"),
-            level=logging.INFO,
-            format="%(asctime)s %(message)s",
-            force=True,
-        )
-    else:
-        logging.basicConfig(
-            level=logging.INFO, format="%(asctime)s %(message)s", force=True
-        )
+        os.makedirs(log_dir, exist_ok=True)
+        handlers.append(logging.FileHandler(os.path.join(log_dir, "train.log")))
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(message)s",
+        handlers=handlers,
+        force=True,
+    )
 
     logging.info(  # noqa: LOG015
         f"Training {algo_name} Stage {stage_idx} on {device}..."
@@ -159,6 +159,8 @@ def train(
     num_updates = total_timesteps // (NUM_ENVS * NUM_STEPS)
     global_episodes = 0
     global_wins = 0
+    current_env_returns = np.zeros(NUM_ENVS)
+    completed_episode_returns = []
 
     for update in range(1, num_updates + 1):
         # Worker Buffers
@@ -256,6 +258,10 @@ def train(
 
             next_obs, rewards, terms, truncs, infos = vec_env.step(actions_dict)
 
+            # Accumulate team total return per env
+            step_team_reward = sum(rewards[a] for a in AGENTS)
+            current_env_returns += step_team_reward
+
             for e in range(NUM_ENVS):
                 # Check for termination to update tracking metrics
                 is_done = terms["scout"][e] or truncs["scout"][e]
@@ -264,6 +270,8 @@ def train(
                     global_episodes += 1
                     if infos[e]["scout"].get("win", False):
                         global_wins += 1
+                    completed_episode_returns.append(float(current_env_returns[e]))
+                    current_env_returns[e] = 0.0
             next_state = vec_env.state
             next_done = torch.tensor(
                 terms["scout"] | truncs["scout"], dtype=torch.float32
@@ -310,8 +318,14 @@ def train(
 
         if update % 5 == 0:
             avg_reward = sum(m_rewards_buf[a].mean().item() for a in AGENTS) / N_AGENTS
+            win_rate = global_wins / max(1, global_episodes)
+            mean_episodic_reward = (
+                float(np.mean(completed_episode_returns[-100:]))
+                if completed_episode_returns
+                else 0.0
+            )
             logging.info(  # noqa: LOG015
-                f"Update: {update}/{num_updates} | Mean Extrinsic Macro Reward: {avg_reward:.3f}"
+                f"Update: {update}/{num_updates} | Win Rate: {win_rate:.2f} | Episodic Return: {mean_episodic_reward:.3f} | Mean Extrinsic Macro Reward: {avg_reward:.3f}"
             )
 
     # Save checkpoint and results
@@ -320,8 +334,9 @@ def train(
         results = {
             "algo": algo_name,
             "stage": stage_idx,
-            "win_rate": 0.0,
-            "mean_reward": 0.0,
+            "win_rate": float(win_rate) if "win_rate" in locals() else 0.0,
+            "mean_reward": float(mean_episodic_reward) if "mean_episodic_reward" in locals() else 0.0,
+            "mean_step_reward": float(avg_reward) if "avg_reward" in locals() else 0.0,
         }
         with open(os.path.join(save_ckpt_dir, "results.json"), "w") as jf:
             json.dump(results, jf, indent=4)

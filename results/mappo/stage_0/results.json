@@ -1,0 +1,7 @@
+{
+    "algo": "mappo",
+    "stage": 0,
+    "win_rate": 0.11166785969935576,
+    "mean_reward": 23.541299672611057,
+    "mean_step_reward": 0.08843000419437885
+}

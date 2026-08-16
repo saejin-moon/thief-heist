@@ -1,0 +1,26 @@
+2026-08-16 17:22:04,250 Training mappo Stage 0 on cuda...
+2026-08-16 17:22:08,166 Update: 5/120 | Win Rate: 0.00 | Episodic Return: -1.125 | Step Reward: -0.000
+2026-08-16 17:22:10,212 Update: 10/120 | Win Rate: 0.00 | Episodic Return: 0.086 | Step Reward: -0.001
+2026-08-16 17:22:12,260 Update: 15/120 | Win Rate: 0.00 | Episodic Return: -0.021 | Step Reward: -0.018
+2026-08-16 17:22:14,319 Update: 20/120 | Win Rate: 0.00 | Episodic Return: -0.906 | Step Reward: 0.025
+2026-08-16 17:22:16,358 Update: 25/120 | Win Rate: 0.00 | Episodic Return: -1.783 | Step Reward: -0.016
+2026-08-16 17:22:18,396 Update: 30/120 | Win Rate: 0.00 | Episodic Return: -0.625 | Step Reward: 0.006
+2026-08-16 17:22:20,432 Update: 35/120 | Win Rate: 0.01 | Episodic Return: 0.966 | Step Reward: -0.005
+2026-08-16 17:22:22,482 Update: 40/120 | Win Rate: 0.01 | Episodic Return: 1.222 | Step Reward: 0.017
+2026-08-16 17:22:24,506 Update: 45/120 | Win Rate: 0.02 | Episodic Return: 1.565 | Step Reward: 0.002
+2026-08-16 17:22:26,685 Update: 50/120 | Win Rate: 0.02 | Episodic Return: 3.312 | Step Reward: -0.003
+2026-08-16 17:22:28,769 Update: 55/120 | Win Rate: 0.03 | Episodic Return: 3.764 | Step Reward: 0.025
+2026-08-16 17:22:30,814 Update: 60/120 | Win Rate: 0.04 | Episodic Return: 9.237 | Step Reward: 0.068
+2026-08-16 17:22:32,847 Update: 65/120 | Win Rate: 0.05 | Episodic Return: 11.625 | Step Reward: 0.058
+2026-08-16 17:22:34,929 Update: 70/120 | Win Rate: 0.05 | Episodic Return: 6.682 | Step Reward: 0.033
+2026-08-16 17:22:36,989 Update: 75/120 | Win Rate: 0.06 | Episodic Return: 11.969 | Step Reward: 0.057
+2026-08-16 17:22:39,029 Update: 80/120 | Win Rate: 0.07 | Episodic Return: 18.408 | Step Reward: 0.023
+2026-08-16 17:22:41,064 Update: 85/120 | Win Rate: 0.07 | Episodic Return: 12.669 | Step Reward: 0.036
+2026-08-16 17:22:43,104 Update: 90/120 | Win Rate: 0.07 | Episodic Return: 8.308 | Step Reward: 0.023
+2026-08-16 17:22:45,152 Update: 95/120 | Win Rate: 0.08 | Episodic Return: 8.001 | Step Reward: -0.008
+2026-08-16 17:22:47,207 Update: 100/120 | Win Rate: 0.08 | Episodic Return: 10.678 | Step Reward: 0.035
+2026-08-16 17:22:49,242 Update: 105/120 | Win Rate: 0.09 | Episodic Return: 13.571 | Step Reward: 0.050
+2026-08-16 17:22:51,257 Update: 110/120 | Win Rate: 0.10 | Episodic Return: 23.001 | Step Reward: 0.039
+2026-08-16 17:22:53,287 Update: 115/120 | Win Rate: 0.11 | Episodic Return: 28.526 | Step Reward: 0.057
+2026-08-16 17:22:55,314 Update: 120/120 | Win Rate: 0.11 | Episodic Return: 23.541 | Step Reward: 0.088
+2026-08-16 17:22:55,319 Saved checkpoint and results to results/mappo/stage_0

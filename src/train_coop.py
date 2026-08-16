@@ -5,9 +5,10 @@ Decentralized bottom-up routing across specialized experts via Critic confidence
 import json
 import logging
 import os
+
 import numpy as np
 import torch
-import torch.nn as nn
+from torch import nn
 from torch.distributions.categorical import Categorical
 
 from constants import (
@@ -125,19 +126,21 @@ def train(
 ):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+    handlers = [logging.StreamHandler()]
     if log_dir is not None:
         os.makedirs(log_dir, exist_ok=True)
-        logging.basicConfig(
-            filename=os.path.join(log_dir, "train.log"),
-            level=logging.INFO,
-            format="%(asctime)s %(message)s",
-            force=True,
-        )
-    else:
-        logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s", force=True)
+        handlers.append(logging.FileHandler(os.path.join(log_dir, "train.log")))
 
-    print(f"Training {algo_name} Stage {stage_idx} on {device}...")
-    logging.info(f"Training {algo_name} Stage {stage_idx} on {device}...")
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(message)s",
+        handlers=handlers,
+        force=True,
+    )
+
+    logging.info(  # noqa: LOG015
+        f"Training {algo_name} Stage {stage_idx} on {device}..."
+    )
 
     if env_config is None:
         env_config = {
@@ -158,8 +161,10 @@ def train(
         try:
             agent.load_state_dict(torch.load(load_ckpt_path, map_location=device, weights_only=True))
             print(f"Loaded checkpoint from {load_ckpt_path}")
-            logging.info(f"Loaded checkpoint from {load_ckpt_path}")
-        except Exception as e:
+            logging.info(  # noqa: LOG015
+                f"Loaded checkpoint from {load_ckpt_path}"
+            )
+        except Exception as e:  # noqa: BLE001
             print(f"Warning: Could not load full checkpoint ({e}). Training from scratch.")
 
     next_obs, next_state = vec_env.reset()
@@ -168,6 +173,8 @@ def train(
     num_updates = total_timesteps // (NUM_ENVS * NUM_STEPS)
     global_episodes = 0
     global_wins = 0
+    current_env_returns = np.zeros(NUM_ENVS)
+    completed_episode_returns = []
 
     for update in range(1, num_updates + 1):
         b_obs = {a: torch.zeros((NUM_STEPS, NUM_ENVS, *OBSERVATION_SIZE)).to(device) for a in AGENTS}
@@ -218,12 +225,18 @@ def train(
 
             next_obs, rewards, terms, truncs, infos = vec_env.step(actions_dict)
 
+            # Accumulate team total return per env
+            step_team_reward = sum(rewards[a] for a in AGENTS)
+            current_env_returns += step_team_reward
+
             for e in range(NUM_ENVS):
                 is_done = terms["scout"][e] or truncs["scout"][e]
                 if is_done:
                     global_episodes += 1
                     if infos[e]["scout"].get("win", False):
                         global_wins += 1
+                    completed_episode_returns.append(float(current_env_returns[e]))
+                    current_env_returns[e] = 0.0
 
             next_state = vec_env.state
             next_done = torch.tensor(terms["scout"] | truncs["scout"], dtype=torch.float32).to(device)
@@ -305,9 +318,14 @@ def train(
         if update % 5 == 0:
             avg_reward = sum(b_rewards[a].mean().item() for a in AGENTS) / N_AGENTS
             win_rate = global_wins / max(1, global_episodes)
-            msg = f"Update: {update}/{num_updates} | Win Rate: {win_rate:.2f} | Mean Reward: {avg_reward:.3f}"
+            mean_episodic_reward = (
+                float(np.mean(completed_episode_returns[-100:]))
+                if completed_episode_returns
+                else 0.0
+            )
+            msg = f"Update: {update}/{num_updates} | Win Rate: {win_rate:.2f} | Episodic Return: {mean_episodic_reward:.3f} | Step Reward: {avg_reward:.3f}"
             print(msg)
-            logging.info(msg)
+            logging.info(msg)  # noqa: LOG015
 
     # Save checkpoint and results
     if save_ckpt_dir:
@@ -317,12 +335,13 @@ def train(
             "algo": algo_name,
             "stage": stage_idx,
             "win_rate": float(win_rate) if "win_rate" in locals() else 0.0,
-            "mean_reward": float(avg_reward) if "avg_reward" in locals() else 0.0,
+            "mean_reward": float(mean_episodic_reward) if "mean_episodic_reward" in locals() else 0.0,
+            "mean_step_reward": float(avg_reward) if "avg_reward" in locals() else 0.0,
         }
         with open(os.path.join(save_ckpt_dir, "results.json"), "w") as jf:
             json.dump(results, jf, indent=4)
         print(f"Saved checkpoint and results to {save_ckpt_dir}")
-        logging.info(f"Saved checkpoint and results to {save_ckpt_dir}")
+        logging.info(f"Saved checkpoint and results to {save_ckpt_dir}")  # noqa: LOG015
 
     vec_env.close()
 

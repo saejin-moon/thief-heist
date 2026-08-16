@@ -81,7 +81,7 @@ class HeistEnv(ParallelEnv):
             (self.map_h + 2 * self._pad, self.map_w + 2 * self._pad), False, dtype=bool
         )
         self._state_buffer = np.zeros(
-            6 + (self.map_h * self.map_w) + (N_AGENTS * 2) + (12 * 2) + 12,
+            6 + (MAP_SIZE[0] * MAP_SIZE[1]) + (N_AGENTS * 2) + (12 * 2) + 12,
             dtype=np.float32,
         )
 
@@ -587,6 +587,7 @@ class HeistEnv(ParallelEnv):
         return obs_dict
 
     def state(self):
+        self._state_buffer.fill(0)
         self._state_buffer[0] = self.current_step
         self._state_buffer[1] = self.alarm
         self._state_buffer[2] = int(self.terminal_disabled)
@@ -594,15 +595,25 @@ class HeistEnv(ParallelEnv):
         self._state_buffer[4] = int(self.extraction_triggered)
         self._state_buffer[5] = self.extraction_countdown
         idx = 6
-        grid_len = self.map_h * self.map_w
-        self._state_buffer[idx : idx + grid_len] = self.grid.ravel()
+        max_h, max_w = MAP_SIZE
+        grid_len = max_h * max_w
+        padded_grid = np.full((max_h, max_w), WALL, dtype=np.int32)
+        padded_grid[:self.map_h, :self.map_w] = self.grid
+        self._state_buffer[idx : idx + grid_len] = padded_grid.ravel()
         idx += grid_len
         for a in self.possible_agents:
             self._state_buffer[idx : idx + 2] = self.agent_positions[a]
             idx += 2
-        for gpos in self.guard_positions:
-            self._state_buffer[idx : idx + 2] = gpos
+        for i in range(12):
+            if i < len(self.guard_positions):
+                self._state_buffer[idx : idx + 2] = self.guard_positions[i]
+            else:
+                self._state_buffer[idx : idx + 2] = (-1, -1)
             idx += 2
-        if len(self.neutralized) > 0:
-            self._state_buffer[idx : idx + len(self.neutralized)] = self.neutralized
+        for i in range(12):
+            if i < len(self.neutralized):
+                self._state_buffer[idx] = self.neutralized[i]
+            else:
+                self._state_buffer[idx] = 0
+            idx += 1
         return self._state_buffer
