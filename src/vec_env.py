@@ -66,7 +66,7 @@ def _worker(remote, parent_remote, config):
                 break
     except KeyboardInterrupt:
         pass
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         remote.send(e)
     finally:
         env.close()
@@ -191,7 +191,7 @@ class VectorEnv:
         for remote in self.remotes:
             try:
                 remote.send(("close", None))
-            except Exception:
+            except Exception:  # noqa: BLE001, S110
                 pass
         for p in self.ps:
             p.join(timeout=1.0)

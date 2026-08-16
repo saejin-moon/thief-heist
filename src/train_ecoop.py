@@ -1,36 +1,45 @@
-import numpy as np
+import json
+import logging
+import os
+
 import torch
-import torch.nn as nn
+from torch import nn
 from torch.distributions.categorical import Categorical
 
-from constants import ACTION_SPACE_SIZE, N_AGENTS, OBSERVATION_SIZE, AGENTS
+from constants import (
+    ACTION_SPACE_SIZE,
+    ECOOP_EVOLUTION_INTERVAL,
+    ECOOP_EVOLUTION_START,
+    ECOOP_MUTATION_NOISE,
+    ECOOP_POOL_SIZE,
+    LR,
+    N_AGENTS,
+    NUM_ENVS,
+    NUM_STEPS,
+    OBSERVATION_SIZE,
+)
 from vec_env import VectorEnv
 
-# Hyperparameters
-LR = 2.5e-4
-NUM_ENVS = 8
-NUM_STEPS = 128
-TOTAL_TIMESTEPS = 300_000
-GAMMA = 0.99
-GAE_LAMBDA = 0.95
-UPDATE_EPOCHS = 4
-CLIP_COEF = 0.2
-ECOOP_POOL_SIZE = 8
 
 class MappoNetwork(nn.Module):
     """Base network that acts as an 'Expert' in the E-COOP pool."""
+
     def __init__(self, state_dim):
         super().__init__()
         actor_in_dim = (OBSERVATION_SIZE[0] * OBSERVATION_SIZE[1]) + N_AGENTS
         self.actor = nn.Sequential(
-            nn.Linear(actor_in_dim, 64), nn.Tanh(),
-            nn.Linear(64, 64), nn.Tanh(),
-            nn.Linear(64, ACTION_SPACE_SIZE)
+            nn.Linear(actor_in_dim, 64),
+            nn.Tanh(),
+            nn.Linear(64, 64),
+            nn.Tanh(),
+            nn.Linear(64, ACTION_SPACE_SIZE),
         )
         self.critic = nn.Sequential(
-            nn.Linear(state_dim, 64), nn.Tanh(),
-            nn.Linear(64, 64), nn.Tanh(),
-            nn.Linear(64, 1)
+            nn.Linear(state_dim, 64),
+            nn.Tanh(),
+            nn.Linear(64, 64),
+            nn.Tanh(),
+            nn.Linear(64, 1),
         )
 
     def get_action_and_value(self, obs, role, mask, state=None, action=None):
@@ -43,29 +52,44 @@ class MappoNetwork(nn.Module):
         value = self.critic(state).squeeze(-1) if state is not None else None
         return action, probs.log_prob(action), probs.entropy(), value
 
+
 class EcoopNetwork(nn.Module):
     """
-    E-COOP: Evolutionary Confidence-Oriented Option Pool.
-    Maintains a pool of MappoNetworks (Experts). 
-    Agents route to the expert with the highest value (confidence) prediction.
+    Evolutionary Confidence-Oriented Option Pool (E-COOP).
+
+    The network maintains a pool of base networks. Agents route to the expert with the highest predicted value.
     """
+
     def __init__(self, state_dim, max_experts=8):
         super().__init__()
-        self.experts = nn.ModuleList([MappoNetwork(state_dim) for _ in range(max_experts)])
+        self.experts = nn.ModuleList(
+            [MappoNetwork(state_dim) for _ in range(max_experts)]
+        )
         self.max_experts = max_experts
 
-    def get_action_and_value(self, obs, role, mask, state, active_experts, action=None, expert_idx=None, previous_expert=None, epsilon=0.05):
+    def get_action_and_value(
+        self,
+        obs,
+        role,
+        mask,
+        state,
+        active_experts,
+        action=None,
+        expert_idx=None,
+        previous_expert=None,
+        epsilon=0.05,
+    ):
         batch_size = obs.shape[0]
-        
-        # 1. Routing Logic
+
+        # Route agent execution.
         if expert_idx is None:
             expert_values = []
             for k in range(active_experts):
                 val = self.experts[k].critic(state).squeeze(-1)
                 expert_values.append(val)
             expert_values = torch.stack(expert_values, dim=1)
-            
-            # Hybrid Routing Hysteresis: prevent routing chatter
+
+            # Hysteresis prevents rapid switching between experts.
             if previous_expert is not None:
                 chosen_expert = previous_expert.clone()
                 for b in range(batch_size):
@@ -73,8 +97,10 @@ class EcoopNetwork(nn.Module):
                     prev_val = expert_values[b, prev_idx]
                     best_idx = torch.argmax(expert_values[b])
                     best_val = expert_values[b, best_idx]
-                    
-                    if best_idx != prev_idx and best_val > prev_val + max(epsilon, epsilon * abs(prev_val.item())):
+
+                    if best_idx != prev_idx and best_val > prev_val + max(
+                        epsilon, epsilon * abs(prev_val.item())
+                    ):
                         chosen_expert[b] = best_idx
             else:
                 chosen_expert = torch.argmax(expert_values, dim=1)
@@ -88,15 +114,18 @@ class EcoopNetwork(nn.Module):
         values = torch.zeros(batch_size, device=obs.device)
 
         for k in range(active_experts):
-            mask_k = (chosen_expert == k)
-            if not mask_k.any(): 
+            mask_k = chosen_expert == k
+            if not mask_k.any():
                 continue
-            
+
             a, lp, ent, v = self.experts[k].get_action_and_value(
-                obs[mask_k], role[mask_k], mask[mask_k], state[mask_k], 
-                action[mask_k] if action is not None else None
+                obs[mask_k],
+                role[mask_k],
+                mask[mask_k],
+                state[mask_k],
+                action[mask_k] if action is not None else None,
             )
-            
+
             actions[mask_k] = a
             logprobs[mask_k] = lp
             entropies[mask_k] = ent
@@ -104,57 +133,116 @@ class EcoopNetwork(nn.Module):
 
         return actions, logprobs, entropies, values, chosen_expert
 
-def train():
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Training E-COOP on {device}...")
 
-    env_config = {
-        "map_size": (11, 11), "guard_count": 0, "camera_count": 0, 
-        "door_count": 0, "max_steps": 100, "spawn_mode": "role"
-    }
+def train(
+    algo_name="test",
+    stage_idx=0,
+    env_config=None,
+    total_timesteps=1000,
+    load_ckpt_path=None,
+    save_ckpt_dir=None,
+    log_dir=None,
+):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    if log_dir is not None:
+        logging.basicConfig(
+            filename=os.path.join(log_dir, "train.log"),
+            level=logging.INFO,
+            format="%(asctime)s %(message)s",
+            force=True,
+        )
+    else:
+        logging.basicConfig(
+            level=logging.INFO, format="%(asctime)s %(message)s", force=True
+        )
+
+    logging.info(  # noqa: LOG015
+        f"Training {algo_name} Stage {stage_idx} on {device}..."
+    )
+
+    if env_config is None:
+        env_config = {
+            "map_size": (11, 11),
+            "guard_count": 0,
+            "camera_count": 0,
+            "door_count": 0,
+            "max_steps": 100,
+            "spawn_mode": "role",
+        }
     vec_env = VectorEnv(NUM_ENVS, config=env_config)
     state_dim = vec_env.state_dim
-    
+
     agent = EcoopNetwork(state_dim, max_experts=ECOOP_POOL_SIZE).to(device)
-    optimizer = torch.optim.Adam(agent.parameters(), lr=LR)
+    _optimizer = torch.optim.Adam(agent.parameters(), lr=LR)
+
+    if load_ckpt_path and os.path.exists(load_ckpt_path):
+        agent.load_state_dict(torch.load(load_ckpt_path, map_location=device))
+        logging.info(  # noqa: LOG015
+            f"Loaded checkpoint from {load_ckpt_path}"
+        )
 
     active_experts = 1
-    next_obs, next_state = vec_env.reset()
-    next_done = torch.zeros(NUM_ENVS).to(device)
-    
-    env_expert_idx = torch.zeros(N_AGENTS * NUM_ENVS, dtype=torch.long, device=device)
+    _next_obs, _next_state = vec_env.reset()
+    _next_done = torch.zeros(NUM_ENVS).to(device)
 
-    num_updates = TOTAL_TIMESTEPS // (NUM_ENVS * NUM_STEPS)
+    _env_expert_idx = torch.zeros(N_AGENTS * NUM_ENVS, dtype=torch.long, device=device)
+
+    num_updates = total_timesteps // (NUM_ENVS * NUM_STEPS)
+    _global_episodes = 0
+    _global_wins = 0
 
     for update in range(1, num_updates + 1):
         # Data collection buffers omitted for brevity...
         # In a full implementation, we run rollouts and store transitions just like MAPPO.
 
-        # Evolutionary Crossover Event (E-COOP specific mechanic)
-        # At rigid generational intervals, E-COOP duplicates the best expert.
+        # E-COOP duplicates the best expert at defined generation intervals.
         do_crossover = False
-        if update == 500 or (update > 500 and (update - 500) % 200 == 0):
+        if update == ECOOP_EVOLUTION_START or (
+            update > ECOOP_EVOLUTION_START
+            and (update - ECOOP_EVOLUTION_START) % ECOOP_EVOLUTION_INTERVAL == 0
+        ):
             do_crossover = True
 
         if do_crossover and active_experts < ECOOP_POOL_SIZE:
-            best_expert = 0 # Normally found by inspecting value averages
+            best_expert = 0  # Normally found by inspecting value averages
             new_expert = active_experts
-            
-            print(f"Evolutionary Crossover: Cloning Expert {best_expert} to {new_expert}")
-            agent.experts[new_expert].load_state_dict(agent.experts[best_expert].state_dict())
-            
-            # FIM-Scaled Asexual Mutation
-            # E-COOP uses Fisher Information Matrix scaling to inject noise,
-            # protecting critical neural pathways while mutating flat ones.
+
+            logging.info(  # noqa: LOG015
+                f"Evolutionary Crossover: Cloning Expert {best_expert} to {new_expert}"
+            )
+            agent.experts[new_expert].load_state_dict(
+                agent.experts[best_expert].state_dict()
+            )
+
+            # FIM-scaled mutation applies noise to parameter manifolds.
             with torch.no_grad():
                 for param in agent.experts[new_expert].parameters():
                     # Simplified uniform noise proxy for demonstration
-                    param.add_(torch.randn_like(param) * 0.05)
-            
+                    param.add_(torch.randn_like(param) * ECOOP_MUTATION_NOISE)
+
             active_experts += 1
 
         if update % 5 == 0:
-            print(f"Update: {update}/{num_updates} | Active Experts: {active_experts}")
+            logging.info(  # noqa: LOG015
+                f"Update: {update}/{num_updates} | Active Experts: {active_experts}"
+            )
+
+    # Save checkpoint and results
+    if save_ckpt_dir:
+        torch.save(agent.state_dict(), os.path.join(save_ckpt_dir, "model.pt"))
+        results = {
+            "algo": algo_name,
+            "stage": stage_idx,
+            "win_rate": 0.0,
+            "mean_reward": 0.0,
+        }
+        with open(os.path.join(save_ckpt_dir, "results.json"), "w") as jf:
+            json.dump(results, jf, indent=4)
+        logging.info(  # noqa: LOG015
+            f"Saved checkpoint and results to {save_ckpt_dir}"
+        )
+
 
 if __name__ == "__main__":
     train()

@@ -1,20 +1,21 @@
 """
 Global constants for the HEIST environment.
 """
+
 import numpy as np
 
 # Tile types (values observed by agents / used by the renderer)
-FOG = -1       # Hidden behind fog of war
-EMPTY = 0      # Walkable floor
-WALL = 1       # Solid wall (blocks movement and line of sight)
-TERMINAL = 2   # Security terminal - Hacker disables cameras/vault here
-LOOT = 3       # The heist loot - Extractor must secure it
-EXTRACT = 4    # Extraction point - All agents must end here with loot
-GUARD = 5      # Rule-based adversary (dynamic entity)
-ALLY = 6       # Other agent (dynamic entity)
-CAMERA = 7     # Security camera (line-of-sight alarm source)
-DOOR = 8       # Locked door (blocks movement; hacker can bypass)
-WAYPOINT = 9   # Directional beacon for tagged objectives
+FOG = -1  # Hidden behind fog of war
+EMPTY = 0  # Walkable floor
+WALL = 1  # Solid wall (blocks movement and line of sight)
+TERMINAL = 2  # Security terminal - Hacker disables cameras/vault here
+LOOT = 3  # The heist loot - Extractor must secure it
+EXTRACT = 4  # Extraction point - All agents must end here with loot
+GUARD = 5  # Rule-based adversary (dynamic entity)
+ALLY = 6  # Other agent (dynamic entity)
+CAMERA = 7  # Security camera (line-of-sight alarm source)
+DOOR = 8  # Locked door (blocks movement; hacker can bypass)
+WAYPOINT = 9  # Directional beacon for tagged objectives
 
 # Actions
 UP = 0
@@ -26,7 +27,11 @@ INTERACT = 5
 BREACH = 6
 
 ACTION_DELTAS = {
-    UP: (-1, 0), DOWN: (1, 0), LEFT: (0, -1), RIGHT: (0, 1), WAIT: (0, 0),
+    UP: (-1, 0),
+    DOWN: (1, 0),
+    LEFT: (0, -1),
+    RIGHT: (0, 1),
+    WAIT: (0, 0),
 }
 
 # Agents
@@ -34,27 +39,27 @@ AGENTS = ["scout", "hacker", "muscle", "extractor"]
 N_AGENTS = len(AGENTS)
 AGENT_CHAR = {"scout": "S", "hacker": "H", "muscle": "M", "extractor": "E"}
 ROLE_ONEHOT_ARRAYS = {
-    a: np.array([1 if i == j else 0 for j in range(N_AGENTS)], dtype=np.int8) 
+    a: np.array([1 if i == j else 0 for j in range(N_AGENTS)], dtype=np.int8)
     for i, a in enumerate(AGENTS)
 }
 
 # Observation / layout dimensions
 MAP_SIZE = (50, 50)
 OBSERVATION_SIZE = (7, 7)  # Agent local view window
-ACTION_SPACE_SIZE = 7      # |A| for every agent
-TILE_SIZE = 20             # Renderer pixels per tile
-SCOUT_VISION_RADIUS = 8    
-AGENT_VISION_RADIUS = 3    
+ACTION_SPACE_SIZE = 7  # |A| for every agent
+TILE_SIZE = 20  # Renderer pixels per tile
+SCOUT_VISION_RADIUS = 8
+AGENT_VISION_RADIUS = 3
 
 # Reward structure
 REWARD_WIN = 15.0
 REWARD_LOSE = -10.0
-REWARD_TASK = 2.0          
-REWARD_TAG = 1.0           
-REWARD_TIME_BLEED = -0.01  
-CONVERGE_BONUS = 1.0       
-CONVERGE_RADIUS = 4        
-WIN_CONVERGE_RADIUS = 3    
+REWARD_TASK = 2.0
+REWARD_TAG = 1.0
+REWARD_TIME_BLEED = -0.01
+CONVERGE_BONUS = 1.0
+CONVERGE_RADIUS = 4
+WIN_CONVERGE_RADIUS = 3
 
 # Mechanics & Alarms
 HACK_TURNS = 3
@@ -78,9 +83,97 @@ SEARCH_TURNS = 6
 
 # Renderer Palette
 COLORS = {
-    WALL: (20, 20, 30), EMPTY: (245, 245, 245), TERMINAL: (0, 100, 255),
-    LOOT: (255, 215, 0), EXTRACT: (0, 200, 90), GUARD: (255, 60, 60),
-    CAMERA: (120, 40, 180), DOOR: (160, 110, 40),
-    "AGENT": {"scout": (0, 255, 255), "hacker": (150, 60, 220), "muscle": (180, 60, 60), "extractor": (255, 150, 40)},
+    WALL: (20, 20, 30),
+    EMPTY: (245, 245, 245),
+    TERMINAL: (0, 100, 255),
+    LOOT: (255, 215, 0),
+    EXTRACT: (0, 200, 90),
+    GUARD: (255, 60, 60),
+    CAMERA: (120, 40, 180),
+    DOOR: (160, 110, 40),
+    "AGENT": {
+        "scout": (0, 255, 255),
+        "hacker": (150, 60, 220),
+        "muscle": (180, 60, 60),
+        "extractor": (255, 150, 40),
+    },
     "EXPLORED": (0, 0, 0, 90),
 }
+# --- HYPERPARAMETERS ---
+LR = 2.5e-4
+NUM_ENVS = 8
+NUM_STEPS = 125
+GAMMA = 0.99
+GAE_LAMBDA = 0.95
+UPDATE_EPOCHS = 4
+CLIP_COEF = 0.2
+
+# Algorithm specific
+MACRO_STEP = 5
+ECOOP_POOL_SIZE = 8
+ALPHA_ALARM = 1.5
+GAMMA_CAUSAL = 0.95
+AFFORDANCE_COEF = 0.5
+
+# --- CURRICULUM STAGES ---
+# Based on HEIST paper Section 4.1
+CURRICULUM_STAGES = [
+    {
+        "map_size": (11, 11),
+        "guard_count": 0,
+        "camera_count": 0,
+        "door_count": 0,
+        "max_steps": 100,
+        "spawn_mode": "role",
+        "timesteps": 120_000,
+    },
+    {
+        "map_size": (17, 17),
+        "guard_count": 1,
+        "camera_count": 0,
+        "door_count": 1,
+        "max_steps": 150,
+        "spawn_mode": "role",
+        "timesteps": 343_933,
+    },
+    {
+        "map_size": (25, 25),
+        "guard_count": 2,
+        "camera_count": 1,
+        "door_count": 2,
+        "max_steps": 200,
+        "spawn_mode": "role",
+        "timesteps": 929_752,
+    },
+    {
+        "map_size": (35, 35),
+        "guard_count": 3,
+        "camera_count": 2,
+        "door_count": 3,
+        "max_steps": 250,
+        "spawn_mode": "role",
+        "timesteps": 2_186_776,
+    },
+    {
+        "map_size": (50, 50),
+        "guard_count": 4,
+        "camera_count": 3,
+        "door_count": 4,
+        "max_steps": 300,
+        "spawn_mode": "role",
+        "timesteps": 5_206_611,
+    },
+]
+
+# Further RL & Training Constants
+ENT_COEF = 0.01
+VF_COEF = 0.5
+WIN_REWARD_THRESHOLD = 5.0
+
+# E-COOP Specific
+ECOOP_EVOLUTION_START = 500
+ECOOP_EVOLUTION_INTERVAL = 200
+ECOOP_MUTATION_NOISE = 0.05
+
+# MAHIRO / H-MAPPO Specific
+MAHIRO_INTRINSIC_REWARD_COEF = 0.05

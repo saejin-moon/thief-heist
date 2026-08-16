@@ -1,44 +1,57 @@
-import numpy as np
+import json
+import logging
+import os
+
 import torch
-import torch.nn as nn
+from torch import nn
 from torch.distributions.categorical import Categorical
 
-from constants import ACTION_SPACE_SIZE, N_AGENTS, OBSERVATION_SIZE, AGENTS, ALARM_MAX
+from constants import (
+    ACTION_SPACE_SIZE,
+    AFFORDANCE_COEF,
+    AGENTS,
+    ALARM_MAX,
+    ALPHA_ALARM,
+    CLIP_COEF,
+    ENT_COEF,
+    GAMMA,
+    GAMMA_CAUSAL,
+    LR,
+    N_AGENTS,
+    NUM_ENVS,
+    NUM_STEPS,
+    OBSERVATION_SIZE,
+    UPDATE_EPOCHS,
+    VF_COEF,
+)
 from vec_env import VectorEnv
 
-# Hyperparameters
-LR = 2.5e-4
-NUM_ENVS = 8
-NUM_STEPS = 128
-TOTAL_TIMESTEPS = 300_000
-GAMMA = 0.99
-GAE_LAMBDA = 0.95
-UPDATE_EPOCHS = 4
-CLIP_COEF = 0.2
+# Controls how severely the alarm penalizes macro credit
 
-# MARC Specific Hyperparameters
-ALPHA_ALARM = 1.5           # Controls how severely the alarm penalizes macro credit
-GAMMA_CAUSAL = 0.95         # Retroactive discount factor for causal trace
-AFFORDANCE_COEF = 0.5       # Reward weight for unlocking affordances for the team
 
-# CleanRL philosophy: Everything in one file. 
+# CleanRL philosophy: Everything in one file.
 class MarcNetwork(nn.Module):
     """
     Standard Actor-Critic network. In MARC, the architecture is flat like MAPPO,
     but the credit assignment (GAE calculation) is profoundly different.
     """
+
     def __init__(self, state_dim):
         super().__init__()
         actor_in_dim = (OBSERVATION_SIZE[0] * OBSERVATION_SIZE[1]) + N_AGENTS
         self.actor = nn.Sequential(
-            nn.Linear(actor_in_dim, 64), nn.Tanh(),
-            nn.Linear(64, 64), nn.Tanh(),
-            nn.Linear(64, ACTION_SPACE_SIZE)
+            nn.Linear(actor_in_dim, 64),
+            nn.Tanh(),
+            nn.Linear(64, 64),
+            nn.Tanh(),
+            nn.Linear(64, ACTION_SPACE_SIZE),
         )
         self.critic = nn.Sequential(
-            nn.Linear(state_dim, 64), nn.Tanh(),
-            nn.Linear(64, 64), nn.Tanh(),
-            nn.Linear(64, 1)
+            nn.Linear(state_dim, 64),
+            nn.Tanh(),
+            nn.Linear(64, 64),
+            nn.Tanh(),
+            nn.Linear(64, 1),
         )
 
     def get_action_and_value(self, obs, role, mask, state=None, action=None):
@@ -51,134 +64,223 @@ class MarcNetwork(nn.Module):
         value = self.critic(state).squeeze(-1) if state is not None else None
         return action, probs.log_prob(action), probs.entropy(), value
 
-def train():
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Training MARC on {device}...")
 
-    env_config = {
-        "map_size": (11, 11), "guard_count": 0, "camera_count": 0, 
-        "door_count": 0, "max_steps": 100, "spawn_mode": "role"
-    }
+def train(
+    algo_name="test",
+    stage_idx=0,
+    env_config=None,
+    total_timesteps=1000,
+    load_ckpt_path=None,
+    save_ckpt_dir=None,
+    log_dir=None,
+):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    if log_dir is not None:
+        logging.basicConfig(
+            filename=os.path.join(log_dir, "train.log"),
+            level=logging.INFO,
+            format="%(asctime)s %(message)s",
+            force=True,
+        )
+    else:
+        logging.basicConfig(
+            level=logging.INFO, format="%(asctime)s %(message)s", force=True
+        )
+
+    logging.info(  # noqa: LOG015
+        f"Training {algo_name} Stage {stage_idx} on {device}..."
+    )
+
+    if env_config is None:
+        env_config = {
+            "map_size": (11, 11),
+            "guard_count": 0,
+            "camera_count": 0,
+            "door_count": 0,
+            "max_steps": 100,
+            "spawn_mode": "role",
+        }
     vec_env = VectorEnv(NUM_ENVS, config=env_config)
     state_dim = vec_env.state_dim
-    
+
     agent = MarcNetwork(state_dim).to(device)
     optimizer = torch.optim.Adam(agent.parameters(), lr=LR)
+
+    if load_ckpt_path and os.path.exists(load_ckpt_path):
+        agent.load_state_dict(torch.load(load_ckpt_path, map_location=device))
+        logging.info(  # noqa: LOG015
+            f"Loaded checkpoint from {load_ckpt_path}"
+        )
 
     next_obs, next_state = vec_env.reset()
     next_done = torch.zeros(NUM_ENVS).to(device)
 
-    num_updates = TOTAL_TIMESTEPS // (NUM_ENVS * NUM_STEPS)
+    num_updates = total_timesteps // (NUM_ENVS * NUM_STEPS)
+    global_episodes = 0
+    global_wins = 0
 
     for update in range(1, num_updates + 1):
-        b_obs = {a: torch.zeros((NUM_STEPS, NUM_ENVS, *OBSERVATION_SIZE)).to(device) for a in AGENTS}
-        b_role = {a: torch.zeros((NUM_STEPS, NUM_ENVS, N_AGENTS)).to(device) for a in AGENTS}
-        b_mask = {a: torch.zeros((NUM_STEPS, NUM_ENVS, ACTION_SPACE_SIZE)).to(device) for a in AGENTS}
+        b_obs = {
+            a: torch.zeros((NUM_STEPS, NUM_ENVS, *OBSERVATION_SIZE)).to(device)
+            for a in AGENTS
+        }
+        b_role = {
+            a: torch.zeros((NUM_STEPS, NUM_ENVS, N_AGENTS)).to(device) for a in AGENTS
+        }
+        b_mask = {
+            a: torch.zeros((NUM_STEPS, NUM_ENVS, ACTION_SPACE_SIZE)).to(device)
+            for a in AGENTS
+        }
         b_actions = {a: torch.zeros((NUM_STEPS, NUM_ENVS)).to(device) for a in AGENTS}
         b_logprobs = {a: torch.zeros((NUM_STEPS, NUM_ENVS)).to(device) for a in AGENTS}
         b_rewards = {a: torch.zeros((NUM_STEPS, NUM_ENVS)).to(device) for a in AGENTS}
         b_values = {a: torch.zeros((NUM_STEPS, NUM_ENVS)).to(device) for a in AGENTS}
         b_dones = torch.zeros((NUM_STEPS, NUM_ENVS)).to(device)
+        b_wins = torch.zeros((NUM_STEPS, NUM_ENVS), dtype=torch.bool).to(device)
         b_states = torch.zeros((NUM_STEPS, NUM_ENVS, state_dim)).to(device)
-        
+
         # MARC specific buffers
         b_alarms = torch.zeros((NUM_STEPS, NUM_ENVS)).to(device)
-        b_affordances = {a: torch.zeros((NUM_STEPS, NUM_ENVS)).to(device) for a in AGENTS}
+        b_affordances = {
+            a: torch.zeros((NUM_STEPS, NUM_ENVS)).to(device) for a in AGENTS
+        }
 
         for step in range(NUM_STEPS):
             b_states[step] = torch.tensor(next_state, dtype=torch.float32).to(device)
             b_dones[step] = next_done
-            
+
             actions_dict = {}
             with torch.no_grad():
                 stacked = next_obs["_stacked"]
-                obs_all = torch.tensor(stacked["observation"], dtype=torch.float32, device=device)
-                role_all = torch.tensor(stacked["role_id"], dtype=torch.float32, device=device)
-                mask_all = torch.tensor(stacked["action_mask"], dtype=torch.float32, device=device)
-                
+                obs_all = torch.tensor(
+                    stacked["observation"], dtype=torch.float32, device=device
+                )
+                role_all = torch.tensor(
+                    stacked["role_id"], dtype=torch.float32, device=device
+                )
+                mask_all = torch.tensor(
+                    stacked["action_mask"], dtype=torch.float32, device=device
+                )
+
                 state_rep = b_states[step].repeat(N_AGENTS, 1)
                 actions, logprobs, _, values = agent.get_action_and_value(
-                    obs_all.flatten(0, 1), role_all.flatten(0, 1), mask_all.flatten(0, 1), state_rep
+                    obs_all.flatten(0, 1),
+                    role_all.flatten(0, 1),
+                    mask_all.flatten(0, 1),
+                    state_rep,
                 )
-                
+
                 actions = actions.view(N_AGENTS, NUM_ENVS)
                 logprobs = logprobs.view(N_AGENTS, NUM_ENVS)
                 values = values.view(N_AGENTS, NUM_ENVS)
-                
+
                 for i, a in enumerate(AGENTS):
-                    b_obs[a][step], b_role[a][step], b_mask[a][step] = obs_all[i], role_all[i], mask_all[i]
+                    b_obs[a][step], b_role[a][step], b_mask[a][step] = (
+                        obs_all[i],
+                        role_all[i],
+                        mask_all[i],
+                    )
                     b_actions[a][step] = actions[i]
                     b_logprobs[a][step] = logprobs[i]
                     b_values[a][step] = values[i]
                     actions_dict[a] = actions[i].cpu().numpy()
 
             next_obs_new, rewards, terms, truncs, infos = vec_env.step(actions_dict)
-            
-            # Structural Affordance Detection for MARC Micro Credit
-            # If an agent interacted and the total mask volume increased, they unlocked an affordance!
+
+            for e in range(NUM_ENVS):
+                if infos[e]["scout"].get("win", False):
+                    b_wins[step, e] = True
+                # Check for termination to update tracking metrics
+                is_done = terms["scout"][e] or truncs["scout"][e]
+
+                if is_done:
+                    global_episodes += 1
+                    if infos[e]["scout"].get("win", False):
+                        global_wins += 1
+
+            # The team unlocked an affordance if an agent interacted and the mask volume increased.
             mask_new = next_obs_new["_stacked"]["action_mask"]
-            mask_vol_new = mask_new.sum(axis=(0, 2)) # sum over agents and action dims
+            mask_vol_new = mask_new.sum(axis=(0, 2))  # sum over agents and action dims
             mask_vol_old = stacked["action_mask"].sum(axis=(0, 2))
             unlocked = mask_vol_new > mask_vol_old
-            
+
             for i, a in enumerate(AGENTS):
                 # 5 is INTERACT
-                interacted = (actions_dict[a] == 5)
+                interacted = actions_dict[a] == 5
                 # Assign affordance delta (1.0) if they interacted and unlocked something
-                b_affordances[a][step] = torch.tensor(interacted & unlocked, dtype=torch.float32).to(device)
+                b_affordances[a][step] = torch.tensor(
+                    interacted & unlocked, dtype=torch.float32
+                ).to(device)
 
             next_state = vec_env.state
-            next_done = torch.tensor(terms["scout"] | truncs["scout"], dtype=torch.float32).to(device)
-            
+            next_done = torch.tensor(
+                terms["scout"] | truncs["scout"], dtype=torch.float32
+            ).to(device)
+
             # Global alarm used for Macro Weighting
-            alarms_list = [infos[e].get("scout", {}).get("alarm", 0.0) for e in range(NUM_ENVS)]
+            alarms_list = [
+                infos[e].get("scout", {}).get("alarm", 0.0) for e in range(NUM_ENVS)
+            ]
             b_alarms[step] = torch.tensor(alarms_list, dtype=torch.float32).to(device)
 
             for a in AGENTS:
-                b_rewards[a][step] = torch.tensor(rewards[a], dtype=torch.float32).to(device)
-            
+                b_rewards[a][step] = torch.tensor(rewards[a], dtype=torch.float32).to(
+                    device
+                )
+
             next_obs = next_obs_new
 
         # --- MARC ADVANTAGE CALCULATION ---
         with torch.no_grad():
-            next_val = agent.critic(torch.tensor(next_state, dtype=torch.float32).to(device)).squeeze(-1)
+            next_val = agent.critic(
+                torch.tensor(next_state, dtype=torch.float32).to(device)
+            ).squeeze(-1)
             b_adv = {a: torch.zeros_like(b_rewards[a]) for a in AGENTS}
-            
-            # Determine trajectory win states (any agent got >5 reward at any step)
-            win_mask = torch.zeros(NUM_ENVS, dtype=torch.bool).to(device)
-            for a in AGENTS:
-                win_mask |= (b_rewards[a] > 5.0).any(dim=0)
-            
-            # Macro Weighting (Omega_t): Alarm scaling and Outcome factor
+
+            # Trajectory win states derive directly from the environment signals.
+
+            win_mask = b_wins.any(dim=0)
+            # Apply alarm scaling and outcome factors.
             macro_alarm_factor = torch.exp(-ALPHA_ALARM * (b_alarms / ALARM_MAX))
-            macro_outcome = torch.where(win_mask, 1.0, 0.5) # [NUM_ENVS]
-            unshielded_omega = macro_outcome.unsqueeze(0) * macro_alarm_factor # [NUM_STEPS, NUM_ENVS]
-            
+            macro_outcome = torch.where(win_mask, 1.0, 0.5)  # [NUM_ENVS]
+            unshielded_omega = (
+                macro_outcome.unsqueeze(0) * macro_alarm_factor
+            )  # [NUM_STEPS, NUM_ENVS]
+
             for a in AGENTS:
-                # Binary Success Masking (Shielding):
-                # Protect upstream enablers (affordance > 0) from downstream incompetence (loss)
+                # Shielding protects upstream enablers from downstream failures.
                 shield_mask = (~win_mask.unsqueeze(0)) & (b_affordances[a] > 0)
                 omega_t = torch.where(shield_mask, macro_alarm_factor, unshielded_omega)
-                
+
                 # Base temporal difference
                 deltas = torch.zeros_like(b_rewards[a])
                 for t in range(NUM_STEPS):
-                    nextnonterminal = 1.0 - (next_done if t == NUM_STEPS - 1 else b_dones[t + 1])
+                    nextnonterminal = 1.0 - (
+                        next_done if t == NUM_STEPS - 1 else b_dones[t + 1]
+                    )
                     nextvalues = next_val if t == NUM_STEPS - 1 else b_values[a][t + 1]
-                    deltas[t] = b_rewards[a][t] + GAMMA * nextvalues * nextnonterminal - b_values[a][t]
-                
+                    deltas[t] = (
+                        b_rewards[a][t]
+                        + GAMMA * nextvalues * nextnonterminal
+                        - b_values[a][t]
+                    )
+
                 # Micro Credit: Base TD + Affordance delta
                 micro_credit = deltas + (b_affordances[a] * AFFORDANCE_COEF)
                 immediate_marc = micro_credit * omega_t
-                
-                # Retroactive Causal Trace Propagation
+
+                # Retroactive causal trace propagation.
                 retro_trace = torch.zeros(NUM_ENVS).to(device)
                 for t in reversed(range(NUM_STEPS)):
-                    retro_trace = immediate_marc[t] + GAMMA_CAUSAL * (1.0 - b_dones[t]) * retro_trace
+                    retro_trace = (
+                        immediate_marc[t]
+                        + GAMMA_CAUSAL * (1.0 - b_dones[t]) * retro_trace
+                    )
                     b_adv[a][t] = retro_trace
 
         b_returns = {a: b_adv[a] + b_values[a] for a in AGENTS}
-        
+
         # --- UPDATE PHASE (PPO) ---
         b_states_flat = b_states.reshape(-1, state_dim)
         for _epoch in range(UPDATE_EPOCHS):
@@ -190,19 +292,23 @@ def train():
                 logprob_flat = b_logprobs[a].reshape(-1)
                 adv_flat = b_adv[a].reshape(-1)
                 ret_flat = b_returns[a].reshape(-1)
-                
+
                 adv_flat = (adv_flat - adv_flat.mean()) / (adv_flat.std() + 1e-8)
 
-                _, newlogprob, entropy, newvalue = agent.get_action_and_value(obs_flat, role_flat, mask_flat, b_states_flat, action=action_flat)
-                
+                _, newlogprob, entropy, newvalue = agent.get_action_and_value(
+                    obs_flat, role_flat, mask_flat, b_states_flat, action=action_flat
+                )
+
                 logratio = newlogprob - logprob_flat
                 ratio = logratio.exp()
                 pg_loss1 = -adv_flat * ratio
-                pg_loss2 = -adv_flat * torch.clamp(ratio, 1.0 - CLIP_COEF, 1.0 + CLIP_COEF)
+                pg_loss2 = -adv_flat * torch.clamp(
+                    ratio, 1.0 - CLIP_COEF, 1.0 + CLIP_COEF
+                )
                 pg_loss = torch.max(pg_loss1, pg_loss2).mean()
-                
+
                 v_loss = 0.5 * ((newvalue - ret_flat) ** 2).mean()
-                loss = pg_loss - 0.01 * entropy.mean() + 0.5 * v_loss
+                loss = pg_loss - ENT_COEF * entropy.mean() + VF_COEF * v_loss
 
                 optimizer.zero_grad()
                 loss.backward()
@@ -211,8 +317,26 @@ def train():
 
         if update % 5 == 0:
             avg_reward = sum(b_rewards[a].mean().item() for a in AGENTS) / N_AGENTS
-            win_rate = (b_rewards["scout"] > 5.0).float().max(dim=0).values.mean().item()
-            print(f"Update: {update}/{num_updates} | Win Rate: {win_rate:.2f} | Mean Reward: {avg_reward:.3f}")
+            win_rate = global_wins / max(1, global_episodes)
+            logging.info(  # noqa: LOG015
+                f"Update: {update}/{num_updates} | Win Rate: {win_rate:.2f} | Mean Reward: {avg_reward:.3f}"
+            )
+
+    # Save checkpoint and results
+    if save_ckpt_dir:
+        torch.save(agent.state_dict(), os.path.join(save_ckpt_dir, "model.pt"))
+        results = {
+            "algo": algo_name,
+            "stage": stage_idx,
+            "win_rate": float(win_rate) if "win_rate" in locals() else 0.0,
+            "mean_reward": float(avg_reward) if "avg_reward" in locals() else 0.0,
+        }
+        with open(os.path.join(save_ckpt_dir, "results.json"), "w") as jf:
+            json.dump(results, jf, indent=4)
+        logging.info(  # noqa: LOG015
+            f"Saved checkpoint and results to {save_ckpt_dir}"
+        )
+
 
 if __name__ == "__main__":
     train()
