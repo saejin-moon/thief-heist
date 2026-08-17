@@ -15,8 +15,10 @@ from constants import (
     ACTION_SPACE_SIZE,
     AGENTS,
     CLIP_COEF,
+    ECOOP_CROSSOVER_DAMPING,
     ECOOP_EVOLUTION_INTERVAL,
     ECOOP_EVOLUTION_START,
+    ECOOP_GRACE_UPDATES,
     ECOOP_MUTATION_NOISE,
     ECOOP_POOL_SIZE,
     ENT_COEF,
@@ -130,7 +132,7 @@ class EcoopNetwork(nn.Module):
             if not mask_k.any():
                 continue
 
-            act_k = action[mask_k] if action is not None else None
+            act_k = action[mask_k].long() if action is not None else None
             a, lp, ent, v = self.experts[k].get_action_and_value(
                 obs[mask_k],
                 role[mask_k],
@@ -139,7 +141,7 @@ class EcoopNetwork(nn.Module):
                 action=act_k,
             )
 
-            actions[mask_k] = a
+            actions[mask_k] = a.long()
             logprobs[mask_k] = lp
             entropies[mask_k] = ent
             if v is not None:
@@ -222,6 +224,13 @@ def train(
     agent = EcoopNetwork(state_dim, max_experts=ECOOP_POOL_SIZE).to(device)
     optimizer = torch.optim.Adam(agent.parameters(), lr=LR)
 
+    active_experts = 1
+    total_spawns = 0
+    spawn_history = []
+    current_grace_expert = None
+    grace_updates_remaining = 0
+    env_previous_expert = None
+
     if load_ckpt_path and os.path.exists(load_ckpt_path):
         try:
             agent.load_state_dict(torch.load(load_ckpt_path, map_location=device, weights_only=True))
@@ -232,11 +241,6 @@ def train(
         except Exception as e:  # noqa: BLE001
             print(f"Warning: Could not load full checkpoint ({e}). Training from scratch.")
 
-    active_experts = 1
-    grace_updates_remaining = 0
-    current_grace_expert = None
-    env_previous_expert = torch.zeros(N_AGENTS * NUM_ENVS, dtype=torch.long, device=device)
-
     next_obs, next_state = vec_env.reset()
     next_done = torch.zeros(NUM_ENVS).to(device)
 
@@ -245,12 +249,15 @@ def train(
     global_wins = 0
     current_env_returns = np.zeros(NUM_ENVS)
     completed_episode_returns = []
+    completed_wins = []
     completed_scout_interact = []
     completed_scout_pois = []
     completed_hacker_hack = []
     completed_muscle_neutralize = []
     completed_extractor_loot = []
     completed_agents_at_extract = []
+    last_expert_usage = {}
+    last_switch_rate = 0.0
 
     for update in range(1, num_updates + 1):
         if grace_updates_remaining > 0:
@@ -268,6 +275,9 @@ def train(
         b_dones = torch.zeros((NUM_STEPS, NUM_ENVS)).to(device)
         b_states = torch.zeros((NUM_STEPS, NUM_ENVS, state_dim)).to(device)
         b_experts = {a: torch.zeros((NUM_STEPS, NUM_ENVS), dtype=torch.long).to(device) for a in AGENTS}
+
+        total_switches = 0
+        total_switch_opportunities = 0
 
         # --- ROLLOUT PHASE ---
         for step in range(NUM_STEPS):
@@ -291,6 +301,12 @@ def train(
                     previous_expert=env_previous_expert,
                     grace_expert=current_grace_expert,
                 )
+
+                if env_previous_expert is not None:
+                    switches = (chosen_expert != env_previous_expert).sum().item()
+                    total_switches += switches
+                    total_switch_opportunities += chosen_expert.numel()
+
                 env_previous_expert = chosen_expert
 
                 actions = actions.view(N_AGENTS, NUM_ENVS)
@@ -319,8 +335,10 @@ def train(
                 if is_done:
                     global_episodes += 1
                     scout_info = infos[e]["scout"]
-                    if scout_info.get("win", False):
+                    is_win = bool(scout_info.get("win", False))
+                    if is_win:
                         global_wins += 1
+                    completed_wins.append(float(is_win))
                     completed_episode_returns.append(float(current_env_returns[e]))
                     current_env_returns[e] = 0.0
 
@@ -336,6 +354,18 @@ def train(
 
             for a in AGENTS:
                 b_rewards[a][step] = torch.tensor(rewards[a], dtype=torch.float32).to(device)
+
+        # Track usage and switch rate
+        all_experts_tensor = torch.stack([b_experts[a] for a in AGENTS]).view(-1)
+        total_decisions = max(1, all_experts_tensor.numel())
+        last_expert_usage = {
+            str(k): round(float((all_experts_tensor == k).sum().item()) / total_decisions * 100.0, 1)
+            for k in range(active_experts)
+        }
+        last_switch_rate = (
+            float(total_switches) / max(1, total_switch_opportunities)
+            if total_switch_opportunities > 0 else 0.0
+        )
 
         # --- GAE (ADVANTAGE) CALCULATION ---
         with torch.no_grad():
@@ -411,33 +441,75 @@ def train(
                 nn.utils.clip_grad_norm_(agent.parameters(), 0.5)
                 optimizer.step()
 
-        # --- EVOLUTIONARY CROSSOVER / FIM MUTATION ---
+        # --- EVOLUTIONARY CROSSOVER / FIM MUTATION & ACTIVE PRUNING ---
         do_crossover = (
             update == ECOOP_EVOLUTION_START
             or (update > ECOOP_EVOLUTION_START and (update - ECOOP_EVOLUTION_START) % ECOOP_EVOLUTION_INTERVAL == 0)
         )
 
-        if do_crossover and active_experts < ECOOP_POOL_SIZE:
-            # Find best expert by average value prediction
+        if do_crossover:
+            # Find best expert and track mean values for all active experts
             best_expert = 0
             best_val = -1e9
             all_experts_tensor = torch.stack([b_experts[a] for a in AGENTS])
             all_values_tensor = torch.stack([b_values[a] for a in AGENTS])
+
+            expert_mean_vals = {}
             for k in range(active_experts):
                 expert_vals = all_values_tensor[all_experts_tensor == k]
                 if len(expert_vals) > 0:
                     mean_v = expert_vals.mean().item()
+                    expert_mean_vals[k] = mean_v
                     if mean_v > best_val:
                         best_val = mean_v
                         best_expert = k
+                else:
+                    expert_mean_vals[k] = -1e9
 
-            new_expert = active_experts
-            msg = f"Evolutionary Crossover: Cloning Expert {best_expert} (val={best_val:.3f}) to Expert {new_expert}"
+            parent_pool_size = active_experts
+            was_replaced = False
+            worst_expert = None
+            if active_experts < ECOOP_POOL_SIZE:
+                new_expert = active_experts
+                active_experts += 1
+            else:
+                # Pool is full -> active pruning: replace lowest-value / least-utilized expert
+                worst_expert = min(expert_mean_vals, key=expert_mean_vals.get)
+                if worst_expert == best_expert:
+                    worst_expert = (best_expert + 1) % ECOOP_POOL_SIZE
+                new_expert = worst_expert
+                was_replaced = True
+
+            total_spawns += 1
+            event_record = {
+                "update": update,
+                "parent_expert": best_expert,
+                "child_expert": new_expert,
+                "parent_value": float(best_val),
+                "replaced_expert": worst_expert if was_replaced else None,
+                "active_experts": active_experts,
+                "total_spawns": total_spawns,
+                "crossover_type": "all_pool_fisher_recombination",
+            }
+            spawn_history.append(event_record)
+
+            if was_replaced:
+                msg = f"[Evolution Event] Update: {update} | Replaced E{worst_expert} (val={expert_mean_vals[worst_expert]:.3f}) via All-Pool Fisher Recombination (top E{best_expert}, val={best_val:.3f}) | Active: {active_experts}/{ECOOP_POOL_SIZE} | Total Spawns: {total_spawns}"
+            else:
+                msg = f"[Evolution Event] Update: {update} | Spawned E{new_expert} via All-Pool Fisher Recombination (top E{best_expert}, val={best_val:.3f}) | Active: {active_experts}/{ECOOP_POOL_SIZE} | Total Spawns: {total_spawns}"
+
             console_logger.info(msg)
             if file_logger:
                 file_logger.info(msg)
 
-            # Compute empirical FIM from all rollout samples
+            # 1. Compute Softmax Fitness Weights across ALL parent experts in the pool
+            val_tensor = torch.tensor(
+                [expert_mean_vals[k] for k in range(parent_pool_size)],
+                dtype=torch.float32,
+            )
+            fitness_weights = torch.softmax(val_tensor, dim=0).numpy()
+
+            # 2. Extract Rollout Batch Samples
             sample_obs = torch.cat(
                 [b_obs[a].reshape(-1, *OBSERVATION_SIZE) for a in AGENTS], dim=0
             )
@@ -451,37 +523,58 @@ def train(
                 [b_actions[a].reshape(-1).long() for a in AGENTS], dim=0
             )
 
-            fim = compute_fim_diagonal(
-                agent.experts[best_expert],
-                sample_obs,
-                sample_role,
-                sample_mask,
-                sample_acts,
-            )
+            # 3. Compute empirical FIM for EVERY parent expert in the pool
+            pool_fims = []
+            for k in range(parent_pool_size):
+                fim_k = compute_fim_diagonal(
+                    agent.experts[k],
+                    sample_obs,
+                    sample_role,
+                    sample_mask,
+                    sample_acts,
+                )
+                pool_fims.append(fim_k)
 
-            # FIM-scaled inverse mutation
+            # 4. Perform All-Pool Fisher-Weighted Parameter Recombination & Mutation
             with torch.no_grad():
                 for name, param in agent.experts[new_expert].named_parameters():
-                    if name in fim:
-                        f_diag = fim[name]
-                        # Inverse square root scaling with safety clipping
-                        scale = torch.clamp(1.0 / (torch.sqrt(f_diag) + 1e-8), max=10.0)
-                        noise = torch.randn_like(param) * scale * ECOOP_MUTATION_NOISE
-                        param.add_(noise)
+                    weighted_param_sum = torch.zeros_like(param)
+                    weight_denom = torch.zeros_like(param)
+                    f_combined = torch.zeros_like(param)
 
-            # Adam Cold-Start: clear stale momentum for the new mutant
+                    for k in range(parent_pool_size):
+                        w_k = float(fitness_weights[k])
+                        param_k = dict(agent.experts[k].named_parameters())[name].data
+                        fim_k = pool_fims[k].get(name, torch.zeros_like(param))
+
+                        # Effective Fisher weight = w_k * (F_k + ECOOP_CROSSOVER_DAMPING)
+                        eff_weight = w_k * (fim_k + ECOOP_CROSSOVER_DAMPING)
+                        weighted_param_sum += eff_weight * param_k
+                        weight_denom += eff_weight
+                        f_combined += w_k * fim_k
+
+                    # Recombined parameter
+                    recombined = weighted_param_sum / (weight_denom + 1e-8)
+
+                    # 5. Geometry-Aware Mutation on Recombined Offspring
+                    scale = torch.clamp(
+                        1.0 / (torch.sqrt(f_combined) + 1e-8), max=10.0
+                    )
+                    noise = torch.randn_like(param) * scale * ECOOP_MUTATION_NOISE
+                    param.copy_(recombined + noise)
+
+            # 6. Adam Cold-Start: clear stale momentum for the new mutant
             for p in agent.experts[new_expert].parameters():
                 if p in optimizer.state:
                     del optimizer.state[p]
 
-            active_experts += 1
             current_grace_expert = new_expert
-            grace_updates_remaining = 25
+            grace_updates_remaining = ECOOP_GRACE_UPDATES
 
         # --- LOGGING ---
         if update % 5 == 0:
             avg_reward = sum(b_rewards[a].mean().item() for a in AGENTS) / N_AGENTS
-            win_rate = global_wins / max(1, global_episodes)
+            win_rate = float(np.mean(completed_wins[-100:])) if completed_wins else 0.0
             mean_episodic_reward = (
                 float(np.mean(completed_episode_returns[-100:]))
                 if completed_episode_returns
@@ -494,14 +587,16 @@ def train(
             extractor_loot_rate = float(np.mean(completed_extractor_loot[-100:])) if completed_extractor_loot else 0.0
             avg_agents_extract = float(np.mean(completed_agents_at_extract[-100:])) if completed_agents_at_extract else 0.0
 
+            expert_usage_str = ", ".join(f"E{k}: {v}%" for k, v in last_expert_usage.items())
+
             # Console log (clean & compact)
             console_logger.info(
-                f"Update: {update}/{num_updates} | Win Rate: {win_rate:.2f} | Episodic Return: {mean_episodic_reward:.3f} | Step Reward: {avg_reward:.3f} | Active Experts: {active_experts}"
+                f"Update: {update}/{num_updates} | Win Rate: {win_rate:.2f} | Episodic Return: {mean_episodic_reward:.3f} | Step Reward: {avg_reward:.3f} | Active Experts: {active_experts}/{ECOOP_POOL_SIZE}"
             )
             # Detailed file log
             if file_logger:
                 file_logger.info(
-                    f"Update: {update}/{num_updates} | Win Rate: {win_rate:.2f} | Episodic Return: {mean_episodic_reward:.3f} | Step Reward: {avg_reward:.3f} | Scout Tag Rate: {scout_tag_rate:.2f} (Avg POIs: {scout_avg_pois:.1f}) | Hacker Hack Rate: {hacker_hack_rate:.2f} | Muscle Neutralize Rate: {muscle_neutralize_rate:.2f} | Extractor Loot Rate: {extractor_loot_rate:.2f} | Avg Agents at Extract: {avg_agents_extract:.2f}/4 | Active Experts: {active_experts}"
+                    f"Update: {update}/{num_updates} | Win Rate: {win_rate:.2f} | Episodic Return: {mean_episodic_reward:.3f} | Step Reward: {avg_reward:.3f} | Scout Tag Rate: {scout_tag_rate:.2f} (Avg POIs: {scout_avg_pois:.1f}) | Hacker Hack Rate: {hacker_hack_rate:.2f} | Muscle Neutralize Rate: {muscle_neutralize_rate:.2f} | Extractor Loot Rate: {extractor_loot_rate:.2f} | Avg Agents at Extract: {avg_agents_extract:.2f}/4 | Active: {active_experts}/{ECOOP_POOL_SIZE} | Total Spawns: {total_spawns} | Switch Rate: {last_switch_rate * 100:.1f}% | Usage: [{expert_usage_str}]"
                 )
 
     # Save checkpoint and results
@@ -512,6 +607,7 @@ def train(
             "algo": algo_name,
             "stage": stage_idx,
             "win_rate": float(win_rate) if "win_rate" in locals() else 0.0,
+            "lifetime_win_rate": float(global_wins / max(1, global_episodes)),
             "mean_reward": float(mean_episodic_reward) if "mean_episodic_reward" in locals() else 0.0,
             "mean_step_reward": float(avg_reward) if "avg_reward" in locals() else 0.0,
             "scout_interact_rate": float(scout_tag_rate) if "scout_tag_rate" in locals() else 0.0,
@@ -521,6 +617,11 @@ def train(
             "extractor_loot_rate": float(extractor_loot_rate) if "extractor_loot_rate" in locals() else 0.0,
             "avg_agents_at_extract": float(avg_agents_extract) if "avg_agents_extract" in locals() else 0.0,
             "active_experts": active_experts,
+            "max_experts": ECOOP_POOL_SIZE,
+            "total_spawns": total_spawns,
+            "expert_switch_rate": float(last_switch_rate),
+            "expert_usage_pct": last_expert_usage,
+            "spawn_history": spawn_history,
         }
         with open(os.path.join(save_ckpt_dir, "results.json"), "w") as jf:
             json.dump(results, jf, indent=4)

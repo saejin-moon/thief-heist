@@ -15,6 +15,7 @@ from constants import (
     ACTION_SPACE_SIZE,
     AGENTS,
     CLIP_COEF,
+    COOP_NUM_EXPERTS,
     ENT_COEF,
     GAE_LAMBDA,
     GAMMA,
@@ -55,10 +56,10 @@ class MappoNetwork(nn.Module):
         logits = self.actor(x_actor)
         masked_logits = logits + ((1.0 - mask) * -1e9)
         probs = Categorical(logits=masked_logits)
-        
+
         if action is None:
             action = probs.sample()
-            
+
         value = self.critic(state).squeeze(-1) if state is not None else None
         return action, probs.log_prob(action), probs.entropy(), value
 
@@ -66,12 +67,16 @@ class MappoNetwork(nn.Module):
 class CoopNetwork(nn.Module):
     """Pool of experts routed bottom-up via Critic confidence."""
 
-    def __init__(self, state_dim, num_experts=2):
+    def __init__(self, state_dim, num_experts=COOP_NUM_EXPERTS):
         super().__init__()
-        self.experts = nn.ModuleList([MappoNetwork(state_dim) for _ in range(num_experts)])
+        self.experts = nn.ModuleList(
+            [MappoNetwork(state_dim) for _ in range(num_experts)]
+        )
         self.num_experts = num_experts
 
-    def get_action_and_value(self, obs, role, mask, state, action=None, expert_idx=None):
+    def get_action_and_value(
+        self, obs, role, mask, state, action=None, expert_idx=None
+    ):
         batch_size = obs.shape[0]
 
         # 1. Decentralized Bidding / Routing
@@ -80,7 +85,7 @@ class CoopNetwork(nn.Module):
             for expert in self.experts:
                 val = expert.critic(state).squeeze(-1)
                 expert_values.append(val)
-            
+
             expert_values = torch.stack(expert_values, dim=1)  # [Batch, num_experts]
             chosen_expert = torch.argmax(expert_values, dim=1)  # [Batch]
         else:
@@ -93,11 +98,11 @@ class CoopNetwork(nn.Module):
         values = torch.zeros(batch_size, device=obs.device)
 
         for k, expert in enumerate(self.experts):
-            mask_k = (chosen_expert == k)
+            mask_k = chosen_expert == k
             if not mask_k.any():
                 continue
 
-            act_k = action[mask_k] if action is not None else None
+            act_k = action[mask_k].long() if action is not None else None
             a, lp, ent, v = expert.get_action_and_value(
                 obs[mask_k],
                 role[mask_k],
@@ -106,7 +111,7 @@ class CoopNetwork(nn.Module):
                 action=act_k,
             )
 
-            actions[mask_k] = a
+            actions[mask_k] = a.long()
             logprobs[mask_k] = lp
             entropies[mask_k] = ent
             if v is not None:
@@ -158,18 +163,22 @@ def train(
     vec_env = VectorEnv(NUM_ENVS, config=env_config)
     state_dim = vec_env.state_dim
 
-    agent = CoopNetwork(state_dim, num_experts=2).to(device)
+    agent = CoopNetwork(state_dim, num_experts=COOP_NUM_EXPERTS).to(device)
     optimizer = torch.optim.Adam(agent.parameters(), lr=LR)
 
     if load_ckpt_path and os.path.exists(load_ckpt_path):
         try:
-            agent.load_state_dict(torch.load(load_ckpt_path, map_location=device, weights_only=True))
+            agent.load_state_dict(
+                torch.load(load_ckpt_path, map_location=device, weights_only=True)
+            )
             print(f"Loaded checkpoint from {load_ckpt_path}")
             logging.info(  # noqa: LOG015
                 f"Loaded checkpoint from {load_ckpt_path}"
             )
         except Exception as e:  # noqa: BLE001
-            print(f"Warning: Could not load full checkpoint ({e}). Training from scratch.")
+            print(
+                f"Warning: Could not load full checkpoint ({e}). Training from scratch."
+            )
 
     next_obs, next_state = vec_env.reset()
     next_done = torch.zeros(NUM_ENVS).to(device)
@@ -179,24 +188,37 @@ def train(
     global_wins = 0
     current_env_returns = np.zeros(NUM_ENVS)
     completed_episode_returns = []
+    completed_wins = []
     completed_scout_interact = []
     completed_scout_pois = []
     completed_hacker_hack = []
     completed_muscle_neutralize = []
     completed_extractor_loot = []
     completed_agents_at_extract = []
+    last_expert_usage = {}
 
     for update in range(1, num_updates + 1):
-        b_obs = {a: torch.zeros((NUM_STEPS, NUM_ENVS, *OBSERVATION_SIZE)).to(device) for a in AGENTS}
-        b_role = {a: torch.zeros((NUM_STEPS, NUM_ENVS, N_AGENTS)).to(device) for a in AGENTS}
-        b_mask = {a: torch.zeros((NUM_STEPS, NUM_ENVS, ACTION_SPACE_SIZE)).to(device) for a in AGENTS}
+        b_obs = {
+            a: torch.zeros((NUM_STEPS, NUM_ENVS, *OBSERVATION_SIZE)).to(device)
+            for a in AGENTS
+        }
+        b_role = {
+            a: torch.zeros((NUM_STEPS, NUM_ENVS, N_AGENTS)).to(device) for a in AGENTS
+        }
+        b_mask = {
+            a: torch.zeros((NUM_STEPS, NUM_ENVS, ACTION_SPACE_SIZE)).to(device)
+            for a in AGENTS
+        }
         b_actions = {a: torch.zeros((NUM_STEPS, NUM_ENVS)).to(device) for a in AGENTS}
         b_logprobs = {a: torch.zeros((NUM_STEPS, NUM_ENVS)).to(device) for a in AGENTS}
         b_rewards = {a: torch.zeros((NUM_STEPS, NUM_ENVS)).to(device) for a in AGENTS}
         b_values = {a: torch.zeros((NUM_STEPS, NUM_ENVS)).to(device) for a in AGENTS}
         b_dones = torch.zeros((NUM_STEPS, NUM_ENVS)).to(device)
         b_states = torch.zeros((NUM_STEPS, NUM_ENVS, state_dim)).to(device)
-        b_experts = {a: torch.zeros((NUM_STEPS, NUM_ENVS), dtype=torch.long).to(device) for a in AGENTS}
+        b_experts = {
+            a: torch.zeros((NUM_STEPS, NUM_ENVS), dtype=torch.long).to(device)
+            for a in AGENTS
+        }
 
         # --- ROLLOUT PHASE ---
         for step in range(NUM_STEPS):
@@ -206,9 +228,15 @@ def train(
             actions_dict = {}
             with torch.no_grad():
                 stacked = next_obs["_stacked"]
-                obs_all = torch.tensor(stacked["observation"], dtype=torch.float32, device=device)
-                role_all = torch.tensor(stacked["role_id"], dtype=torch.float32, device=device)
-                mask_all = torch.tensor(stacked["action_mask"], dtype=torch.float32, device=device)
+                obs_all = torch.tensor(
+                    stacked["observation"], dtype=torch.float32, device=device
+                )
+                role_all = torch.tensor(
+                    stacked["role_id"], dtype=torch.float32, device=device
+                )
+                mask_all = torch.tensor(
+                    stacked["action_mask"], dtype=torch.float32, device=device
+                )
 
                 state_rep = b_states[step].repeat(N_AGENTS, 1)
                 actions, logprobs, _, values, chosen_expert = agent.get_action_and_value(
@@ -244,30 +272,65 @@ def train(
                 if is_done:
                     global_episodes += 1
                     scout_info = infos[e]["scout"]
-                    if scout_info.get("win", False):
+                    is_win = bool(scout_info.get("win", False))
+                    if is_win:
                         global_wins += 1
+                    completed_wins.append(float(is_win))
                     completed_episode_returns.append(float(current_env_returns[e]))
                     current_env_returns[e] = 0.0
 
-                    completed_scout_interact.append(float(scout_info.get("scout_interact_success", False)))
-                    completed_scout_pois.append(float(scout_info.get("scout_pois_tagged", 0)))
-                    completed_hacker_hack.append(float(scout_info.get("hacker_hack_success", False)))
-                    completed_muscle_neutralize.append(float(scout_info.get("muscle_neutralize_success", False)))
-                    completed_extractor_loot.append(float(scout_info.get("extractor_loot_success", False)))
-                    completed_agents_at_extract.append(float(scout_info.get("agents_at_extract", 0)))
+                    completed_scout_interact.append(
+                        float(scout_info.get("scout_interact_success", False))
+                    )
+                    completed_scout_pois.append(
+                        float(scout_info.get("scout_pois_tagged", 0))
+                    )
+                    completed_hacker_hack.append(
+                        float(scout_info.get("hacker_hack_success", False))
+                    )
+                    completed_muscle_neutralize.append(
+                        float(scout_info.get("muscle_neutralize_success", False))
+                    )
+                    completed_extractor_loot.append(
+                        float(scout_info.get("extractor_loot_success", False))
+                    )
+                    completed_agents_at_extract.append(
+                        float(scout_info.get("agents_at_extract", 0))
+                    )
 
             next_state = vec_env.state
-            next_done = torch.tensor(terms["scout"] | truncs["scout"], dtype=torch.float32).to(device)
+            next_done = torch.tensor(
+                terms["scout"] | truncs["scout"], dtype=torch.float32
+            ).to(device)
 
             for a in AGENTS:
-                b_rewards[a][step] = torch.tensor(rewards[a], dtype=torch.float32).to(device)
+                b_rewards[a][step] = torch.tensor(rewards[a], dtype=torch.float32).to(
+                    device
+                )
+
+        # Track expert utilization percentages
+        all_experts_tensor = torch.stack([b_experts[a] for a in AGENTS]).view(-1)
+        total_decisions = max(1, all_experts_tensor.numel())
+        last_expert_usage = {
+            str(k): round(
+                float((all_experts_tensor == k).sum().item()) / total_decisions * 100.0,
+                1,
+            )
+            for k in range(agent.num_experts)
+        }
 
         # --- GAE (ADVANTAGE) CALCULATION ---
         with torch.no_grad():
             stacked_next = next_obs["_stacked"]
-            next_obs_all = torch.tensor(stacked_next["observation"], dtype=torch.float32, device=device)
-            next_role_all = torch.tensor(stacked_next["role_id"], dtype=torch.float32, device=device)
-            next_mask_all = torch.tensor(stacked_next["action_mask"], dtype=torch.float32, device=device)
+            next_obs_all = torch.tensor(
+                stacked_next["observation"], dtype=torch.float32, device=device
+            )
+            next_role_all = torch.tensor(
+                stacked_next["role_id"], dtype=torch.float32, device=device
+            )
+            next_mask_all = torch.tensor(
+                stacked_next["action_mask"], dtype=torch.float32, device=device
+            )
             next_state_t = torch.tensor(next_state, dtype=torch.float32, device=device)
 
             _, _, _, next_val, _ = agent.get_action_and_value(
@@ -289,8 +352,14 @@ def train(
                         nextnonterminal = 1.0 - b_dones[t + 1]
                         nextvalues = b_values[a][t + 1]
 
-                    delta = b_rewards[a][t] + GAMMA * nextvalues * nextnonterminal - b_values[a][t]
-                    b_adv[a][t] = lastgaelam = delta + GAMMA * GAE_LAMBDA * nextnonterminal * lastgaelam
+                    delta = (
+                        b_rewards[a][t]
+                        + GAMMA * nextvalues * nextnonterminal
+                        - b_values[a][t]
+                    )
+                    b_adv[a][t] = lastgaelam = (
+                        delta + GAMMA * GAE_LAMBDA * nextnonterminal * lastgaelam
+                    )
 
         b_returns = {a: b_adv[a] + b_values[a] for a in AGENTS}
 
@@ -321,7 +390,9 @@ def train(
                 logratio = newlogprob - logprob_flat
                 ratio = logratio.exp()
                 pg_loss1 = -adv_flat * ratio
-                pg_loss2 = -adv_flat * torch.clamp(ratio, 1.0 - CLIP_COEF, 1.0 + CLIP_COEF)
+                pg_loss2 = -adv_flat * torch.clamp(
+                    ratio, 1.0 - CLIP_COEF, 1.0 + CLIP_COEF
+                )
                 pg_loss = torch.max(pg_loss1, pg_loss2).mean()
 
                 v_loss = 0.5 * ((newvalue - ret_flat) ** 2).mean()
@@ -335,18 +406,48 @@ def train(
         # --- LOGGING ---
         if update % 5 == 0:
             avg_reward = sum(b_rewards[a].mean().item() for a in AGENTS) / N_AGENTS
-            win_rate = global_wins / max(1, global_episodes)
+            win_rate = (
+                float(np.mean(completed_wins[-100:])) if completed_wins else 0.0
+            )
             mean_episodic_reward = (
                 float(np.mean(completed_episode_returns[-100:]))
                 if completed_episode_returns
                 else 0.0
             )
-            scout_tag_rate = float(np.mean(completed_scout_interact[-100:])) if completed_scout_interact else 0.0
-            scout_avg_pois = float(np.mean(completed_scout_pois[-100:])) if completed_scout_pois else 0.0
-            hacker_hack_rate = float(np.mean(completed_hacker_hack[-100:])) if completed_hacker_hack else 0.0
-            muscle_neutralize_rate = float(np.mean(completed_muscle_neutralize[-100:])) if completed_muscle_neutralize else 0.0
-            extractor_loot_rate = float(np.mean(completed_extractor_loot[-100:])) if completed_extractor_loot else 0.0
-            avg_agents_extract = float(np.mean(completed_agents_at_extract[-100:])) if completed_agents_at_extract else 0.0
+            scout_tag_rate = (
+                float(np.mean(completed_scout_interact[-100:]))
+                if completed_scout_interact
+                else 0.0
+            )
+            scout_avg_pois = (
+                float(np.mean(completed_scout_pois[-100:]))
+                if completed_scout_pois
+                else 0.0
+            )
+            hacker_hack_rate = (
+                float(np.mean(completed_hacker_hack[-100:]))
+                if completed_hacker_hack
+                else 0.0
+            )
+            muscle_neutralize_rate = (
+                float(np.mean(completed_muscle_neutralize[-100:]))
+                if completed_muscle_neutralize
+                else 0.0
+            )
+            extractor_loot_rate = (
+                float(np.mean(completed_extractor_loot[-100:]))
+                if completed_extractor_loot
+                else 0.0
+            )
+            avg_agents_extract = (
+                float(np.mean(completed_agents_at_extract[-100:]))
+                if completed_agents_at_extract
+                else 0.0
+            )
+
+            expert_usage_str = ", ".join(
+                f"E{k}: {v}%" for k, v in last_expert_usage.items()
+            )
 
             # Console log (clean & compact)
             console_logger.info(
@@ -355,7 +456,7 @@ def train(
             # Detailed file log
             if file_logger:
                 file_logger.info(
-                    f"Update: {update}/{num_updates} | Win Rate: {win_rate:.2f} | Episodic Return: {mean_episodic_reward:.3f} | Step Reward: {avg_reward:.3f} | Scout Tag Rate: {scout_tag_rate:.2f} (Avg POIs: {scout_avg_pois:.1f}) | Hacker Hack Rate: {hacker_hack_rate:.2f} | Muscle Neutralize Rate: {muscle_neutralize_rate:.2f} | Extractor Loot Rate: {extractor_loot_rate:.2f} | Avg Agents at Extract: {avg_agents_extract:.2f}/4"
+                    f"Update: {update}/{num_updates} | Win Rate: {win_rate:.2f} | Episodic Return: {mean_episodic_reward:.3f} | Step Reward: {avg_reward:.3f} | Scout Tag Rate: {scout_tag_rate:.2f} (Avg POIs: {scout_avg_pois:.1f}) | Hacker Hack Rate: {hacker_hack_rate:.2f} | Muscle Neutralize Rate: {muscle_neutralize_rate:.2f} | Extractor Loot Rate: {extractor_loot_rate:.2f} | Avg Agents at Extract: {avg_agents_extract:.2f}/4 | Expert Usage: [{expert_usage_str}]"
                 )
 
     # Save checkpoint and results
@@ -365,15 +466,32 @@ def train(
         results = {
             "algo": algo_name,
             "stage": stage_idx,
+            "num_experts": agent.num_experts,
             "win_rate": float(win_rate) if "win_rate" in locals() else 0.0,
-            "mean_reward": float(mean_episodic_reward) if "mean_episodic_reward" in locals() else 0.0,
+            "lifetime_win_rate": float(global_wins / max(1, global_episodes)),
+            "mean_reward": float(mean_episodic_reward)
+            if "mean_episodic_reward" in locals()
+            else 0.0,
             "mean_step_reward": float(avg_reward) if "avg_reward" in locals() else 0.0,
-            "scout_interact_rate": float(scout_tag_rate) if "scout_tag_rate" in locals() else 0.0,
-            "scout_avg_pois_tagged": float(scout_avg_pois) if "scout_avg_pois" in locals() else 0.0,
-            "hacker_hack_rate": float(hacker_hack_rate) if "hacker_hack_rate" in locals() else 0.0,
-            "muscle_neutralize_rate": float(muscle_neutralize_rate) if "muscle_neutralize_rate" in locals() else 0.0,
-            "extractor_loot_rate": float(extractor_loot_rate) if "extractor_loot_rate" in locals() else 0.0,
-            "avg_agents_at_extract": float(avg_agents_extract) if "avg_agents_extract" in locals() else 0.0,
+            "scout_interact_rate": float(scout_tag_rate)
+            if "scout_tag_rate" in locals()
+            else 0.0,
+            "scout_avg_pois_tagged": float(scout_avg_pois)
+            if "scout_avg_pois" in locals()
+            else 0.0,
+            "hacker_hack_rate": float(hacker_hack_rate)
+            if "hacker_hack_rate" in locals()
+            else 0.0,
+            "muscle_neutralize_rate": float(muscle_neutralize_rate)
+            if "muscle_neutralize_rate" in locals()
+            else 0.0,
+            "extractor_loot_rate": float(extractor_loot_rate)
+            if "extractor_loot_rate" in locals()
+            else 0.0,
+            "avg_agents_at_extract": float(avg_agents_extract)
+            if "avg_agents_extract" in locals()
+            else 0.0,
+            "expert_usage_pct": last_expert_usage,
         }
         with open(os.path.join(save_ckpt_dir, "results.json"), "w") as jf:
             json.dump(results, jf, indent=4)

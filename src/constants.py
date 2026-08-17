@@ -106,6 +106,7 @@ UPDATE_EPOCHS = 4
 CLIP_COEF = 0.2
 
 # Algorithm specific
+COOP_NUM_EXPERTS = 2
 MACRO_STEP = 5
 ECOOP_POOL_SIZE = 8
 ALPHA_ALARM = 1.5
@@ -113,7 +114,7 @@ GAMMA_CAUSAL = 0.95
 AFFORDANCE_COEF = 0.5
 
 # --- CURRICULUM STAGES ---
-# Based on HEIST paper Section 4.1
+# Based on HEIST paper Section 4.1 with balanced scaling
 CURRICULUM_STAGES = [
     {
         "map_size": (11, 11),
@@ -122,7 +123,7 @@ CURRICULUM_STAGES = [
         "door_count": 0,
         "max_steps": 100,
         "spawn_mode": "role",
-        "timesteps": 120_000,
+        "timesteps": 200_000,
     },
     {
         "map_size": (17, 17),
@@ -131,7 +132,7 @@ CURRICULUM_STAGES = [
         "door_count": 1,
         "max_steps": 150,
         "spawn_mode": "role",
-        "timesteps": 343_933,
+        "timesteps": 500_000,
     },
     {
         "map_size": (25, 25),
@@ -140,7 +141,7 @@ CURRICULUM_STAGES = [
         "door_count": 2,
         "max_steps": 200,
         "spawn_mode": "role",
-        "timesteps": 929_752,
+        "timesteps": 1_000_000,
     },
     {
         "map_size": (35, 35),
@@ -149,7 +150,7 @@ CURRICULUM_STAGES = [
         "door_count": 3,
         "max_steps": 250,
         "spawn_mode": "role",
-        "timesteps": 2_186_776,
+        "timesteps": 2_000_000,
     },
     {
         "map_size": (50, 50),
@@ -158,7 +159,7 @@ CURRICULUM_STAGES = [
         "door_count": 4,
         "max_steps": 300,
         "spawn_mode": "role",
-        "timesteps": 5_206_611,
+        "timesteps": 4_000_000,
     },
 ]
 
@@ -168,9 +169,11 @@ VF_COEF = 0.5
 WIN_REWARD_THRESHOLD = 5.0
 
 # E-COOP Specific
-ECOOP_EVOLUTION_START = 500
-ECOOP_EVOLUTION_INTERVAL = 200
+ECOOP_EVOLUTION_START = 40
+ECOOP_EVOLUTION_INTERVAL = 35
+ECOOP_GRACE_UPDATES = 20
 ECOOP_MUTATION_NOISE = 0.05
+ECOOP_CROSSOVER_DAMPING = 1e-4
 
 # MAHIRO / H-MAPPO Specific
 MAHIRO_INTRINSIC_REWARD_COEF = 0.05

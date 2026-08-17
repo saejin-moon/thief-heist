@@ -171,12 +171,16 @@ def train(
     global_wins = 0
     current_env_returns = np.zeros(NUM_ENVS)
     completed_episode_returns = []
+    completed_wins = []
     completed_scout_interact = []
     completed_scout_pois = []
     completed_hacker_hack = []
     completed_muscle_neutralize = []
     completed_extractor_loot = []
     completed_agents_at_extract = []
+    last_mean_goal_dist = 0.0
+    last_w_loss = 0.0
+    last_m_loss = 0.0
 
     for update in range(1, num_updates + 1):
         # Worker Buffers
@@ -216,6 +220,7 @@ def train(
 
         current_goals = {a: torch.zeros((NUM_ENVS, 2)).to(device) for a in AGENTS}
         macro_reward_acc = {a: torch.zeros(NUM_ENVS).to(device) for a in AGENTS}
+        step_goal_distances = []
 
         for step in range(NUM_STEPS):
             w_states[step] = torch.tensor(next_state, dtype=torch.float32).to(device)
@@ -268,7 +273,11 @@ def train(
                     w_goals[a][step] = current_goals[a]
 
                     w_act, w_logp, _, w_val = agent.get_worker_action_and_value(
-                        obs_all[i], role_all[i], mask_all[i], current_goals[a], state_t
+                        obs_all[i],
+                        role_all[i],
+                        mask_all[i],
+                        current_goals[a],
+                        state=state_t,
                     )
 
                     w_actions[a][step] = w_act
@@ -278,34 +287,42 @@ def train(
 
             next_obs, rewards, terms, truncs, infos = vec_env.step(actions_dict)
 
-            # Accumulate per-agent average return per env
-            step_agent_reward = sum(rewards[a] for a in AGENTS) / N_AGENTS
-            current_env_returns += step_agent_reward
-
             for e in range(NUM_ENVS):
-                # Check for termination to update tracking metrics
                 is_done = terms["scout"][e] or truncs["scout"][e]
-
                 if is_done:
                     global_episodes += 1
                     scout_info = infos[e]["scout"]
-                    if scout_info.get("win", False):
+                    is_win = bool(scout_info.get("win", False))
+                    if is_win:
                         global_wins += 1
+                    completed_wins.append(float(is_win))
                     completed_episode_returns.append(float(current_env_returns[e]))
                     current_env_returns[e] = 0.0
 
-                    completed_scout_interact.append(float(scout_info.get("scout_interact_success", False)))
-                    completed_scout_pois.append(float(scout_info.get("scout_pois_tagged", 0)))
-                    completed_hacker_hack.append(float(scout_info.get("hacker_hack_success", False)))
-                    completed_muscle_neutralize.append(float(scout_info.get("muscle_neutralize_success", False)))
-                    completed_extractor_loot.append(float(scout_info.get("extractor_loot_success", False)))
-                    completed_agents_at_extract.append(float(scout_info.get("agents_at_extract", 0)))
-            next_state = vec_env.state
-            next_done = torch.tensor(
-                terms["scout"] | truncs["scout"], dtype=torch.float32
-            ).to(device)
+                    completed_scout_interact.append(
+                        float(scout_info.get("scout_interact_success", False))
+                    )
+                    completed_scout_pois.append(
+                        float(scout_info.get("scout_pois_tagged", 0))
+                    )
+                    completed_hacker_hack.append(
+                        float(scout_info.get("hacker_hack_success", False))
+                    )
+                    completed_muscle_neutralize.append(
+                        float(scout_info.get("muscle_neutralize_success", False))
+                    )
+                    completed_extractor_loot.append(
+                        float(scout_info.get("extractor_loot_success", False))
+                    )
+                    completed_agents_at_extract.append(
+                        float(scout_info.get("agents_at_extract", 0))
+                    )
 
-            for i, a in enumerate(AGENTS):
+            # Assign Intrinsic Worker Rewards
+            step_agent_reward = sum(rewards[a] for a in AGENTS) / N_AGENTS
+            current_env_returns += step_agent_reward
+
+            for a in AGENTS:
                 base_reward = rewards[a]
 
                 # Calculate the intrinsic reward using the L2 distance between the agent position and the spatial goal.
@@ -325,6 +342,7 @@ def train(
                     [infos[e].get(a, {}).get("pos", (0, 0)) for e in range(NUM_ENVS)]
                 )
                 dist = np.sqrt((poses[:, 0] - gx) ** 2 + (poses[:, 1] - gy) ** 2)
+                step_goal_distances.extend(dist.tolist())
                 intrinsic_reward = -(dist / max(1.0, map_diag))
 
                 w_rewards[a][step] = torch.tensor(
@@ -336,6 +354,9 @@ def train(
                 macro_reward_acc[a] += torch.tensor(
                     base_reward, dtype=torch.float32
                 ).to(device)
+
+        if step_goal_distances:
+            last_mean_goal_dist = float(np.mean(step_goal_distances))
 
         # Finalize last macro reward
         for a in AGENTS:
@@ -355,13 +376,17 @@ def train(
                 mask_t = torch.tensor(
                     next_obs[a]["action_mask"], dtype=torch.float32, device=device
                 )
-                _, _, _, w_val_next = agent.get_worker_action_and_value(
-                    obs_t, role_t, mask_t, current_goals[a], state_next_t
+
+                _, _, _, val = agent.get_worker_action_and_value(
+                    obs_t,
+                    role_t,
+                    mask_t,
+                    current_goals[a],
+                    state=state_next_t,
                 )
-                w_next_vals[a] = w_val_next
+                w_next_vals[a] = val
 
             w_adv = {a: torch.zeros_like(w_rewards[a]) for a in AGENTS}
-            w_ret = {a: torch.zeros_like(w_rewards[a]) for a in AGENTS}
             for a in AGENTS:
                 lastgaelam = 0
                 for t in reversed(range(NUM_STEPS)):
@@ -371,6 +396,7 @@ def train(
                     else:
                         nextnonterminal = 1.0 - w_dones[t + 1]
                         nextvalues = w_values[a][t + 1]
+
                     delta = (
                         w_rewards[a][t]
                         + GAMMA * nextvalues * nextnonterminal
@@ -379,66 +405,91 @@ def train(
                     w_adv[a][t] = lastgaelam = (
                         delta + GAMMA * GAE_LAMBDA * nextnonterminal * lastgaelam
                     )
-                w_ret[a] = w_adv[a] + w_values[a]
 
-            # --- MANAGER ADVANTAGE COMPUTATION (GAE) ---
+            w_ret = {a: w_adv[a] + w_values[a] for a in AGENTS}
+
+        # --- MANAGER ADVANTAGE COMPUTATION (GAE) ---
+        with torch.no_grad():
             m_adv = {a: torch.zeros_like(m_rewards_buf[a]) for a in AGENTS}
-            m_ret = {a: torch.zeros_like(m_rewards_buf[a]) for a in AGENTS}
             for a in AGENTS:
                 lastgaelam = 0
                 for t in reversed(range(m_steps)):
                     if t == m_steps - 1:
                         nextnonterminal = 1.0 - next_done
-                        nextvalues = m_values_buf[a][-1]
+                        nextvalues = 0
                     else:
                         nextnonterminal = 1.0 - m_dones_buf[t + 1]
                         nextvalues = m_values_buf[a][t + 1]
+
                     delta = (
                         m_rewards_buf[a][t]
-                        + GAMMA * nextvalues * nextnonterminal
+                        + (GAMMA**MACRO_STEP) * nextvalues * nextnonterminal
                         - m_values_buf[a][t]
                     )
                     m_adv[a][t] = lastgaelam = (
-                        delta + GAMMA * GAE_LAMBDA * nextnonterminal * lastgaelam
+                        delta
+                        + (GAMMA**MACRO_STEP)
+                        * GAE_LAMBDA
+                        * nextnonterminal
+                        * lastgaelam
                     )
-                m_ret[a] = m_adv[a] + m_values_buf[a]
 
-        # --- PPO OPTIMIZATION EPOCHS ---
+            m_ret = {a: m_adv[a] + m_values_buf[a] for a in AGENTS}
+
+        # --- UPDATE PHASE (WORKER & MANAGER OPTIMIZATION) ---
+        w_states_flat = w_states.reshape(-1, state_dim)
+        m_state_flat = m_states_buf.reshape(-1, state_dim)
+
         for _epoch in range(UPDATE_EPOCHS):
             for a in AGENTS:
-                # 1. Worker Update
-                obs_flat = w_obs[a].reshape(-1, *OBSERVATION_SIZE)
-                role_flat = w_role[a].reshape(-1, N_AGENTS)
-                mask_flat = w_mask[a].reshape(-1, ACTION_SPACE_SIZE)
-                goal_flat = w_goals[a].reshape(-1, 2)
-                state_flat = w_states.reshape(-1, state_dim)
-                act_flat = w_actions[a].reshape(-1).long()
-                logp_flat = w_logprobs[a].reshape(-1)
-                adv_flat = w_adv[a].reshape(-1)
-                ret_flat = w_ret[a].reshape(-1)
+                # 1. Update Worker
+                w_obs_flat = w_obs[a].reshape(-1, *OBSERVATION_SIZE)
+                w_role_flat = w_role[a].reshape(-1, N_AGENTS)
+                w_mask_flat = w_mask[a].reshape(-1, ACTION_SPACE_SIZE)
+                w_goals_flat = w_goals[a].reshape(-1, 2)
+                w_act_flat = w_actions[a].reshape(-1)
+                w_logp_flat = w_logprobs[a].reshape(-1)
+                w_adv_flat = w_adv[a].reshape(-1)
+                w_ret_flat = w_ret[a].reshape(-1)
 
-                adv_norm = (adv_flat - adv_flat.mean()) / (adv_flat.std() + 1e-8)
-
-                _, newlogprob, entropy, newvalue = agent.get_worker_action_and_value(
-                    obs_flat, role_flat, mask_flat, goal_flat, state_flat, act_flat
+                w_adv_norm = (w_adv_flat - w_adv_flat.mean()) / (
+                    w_adv_flat.std() + 1e-8
                 )
 
-                ratio = (newlogprob - logp_flat).exp()
-                pg_loss1 = -adv_norm * ratio
-                pg_loss2 = -adv_norm * torch.clamp(ratio, 1.0 - CLIP_COEF, 1.0 + CLIP_COEF)
-                w_pg_loss = torch.max(pg_loss1, pg_loss2).mean()
-                w_v_loss = 0.5 * ((newvalue - ret_flat) ** 2).mean()
-                w_loss = w_pg_loss - ENT_COEF * entropy.mean() + VF_COEF * w_v_loss
+                _, w_newlogp, w_entropy, w_newvalue = agent.get_worker_action_and_value(
+                    w_obs_flat,
+                    w_role_flat,
+                    w_mask_flat,
+                    w_goals_flat,
+                    state=w_states_flat,
+                    action=w_act_flat,
+                )
 
-                # 2. Manager Update
-                m_state_flat = m_states_buf.reshape(-1, state_dim)
-                m_role_flat = w_role[a][0].unsqueeze(0).repeat(m_steps, 1, 1).reshape(-1, N_AGENTS)
+                w_ratio = (w_newlogp - w_logp_flat).exp()
+                w_pg1 = -w_adv_norm * w_ratio
+                w_pg2 = -w_adv_norm * torch.clamp(
+                    w_ratio, 1.0 - CLIP_COEF, 1.0 + CLIP_COEF
+                )
+                w_pg_loss = torch.max(w_pg1, w_pg2).mean()
+                w_v_loss = 0.5 * ((w_newvalue - w_ret_flat) ** 2).mean()
+                w_loss = w_pg_loss - ENT_COEF * w_entropy.mean() + VF_COEF * w_v_loss
+                last_w_loss = float(w_loss.item())
+
+                # 2. Update Manager
+                m_role_flat = (
+                    w_role[a][0]
+                    .unsqueeze(0)
+                    .repeat(m_steps, 1, 1)
+                    .reshape(-1, N_AGENTS)
+                )
                 m_act_flat = m_actions_buf[a].reshape(-1, 2)
                 m_logp_flat = m_logprobs_buf[a].reshape(-1)
                 m_adv_flat = m_adv[a].reshape(-1)
                 m_ret_flat = m_ret[a].reshape(-1)
 
-                m_adv_norm = (m_adv_flat - m_adv_flat.mean()) / (m_adv_flat.std() + 1e-8)
+                m_adv_norm = (m_adv_flat - m_adv_flat.mean()) / (
+                    m_adv_flat.std() + 1e-8
+                )
 
                 _, m_newlogp, m_entropy, m_newvalue = agent.get_manager_action_and_value(
                     m_state_flat, m_role_flat, m_act_flat
@@ -446,10 +497,13 @@ def train(
 
                 m_ratio = (m_newlogp - m_logp_flat).exp()
                 m_pg1 = -m_adv_norm * m_ratio
-                m_pg2 = -m_adv_norm * torch.clamp(m_ratio, 1.0 - CLIP_COEF, 1.0 + CLIP_COEF)
+                m_pg2 = -m_adv_norm * torch.clamp(
+                    m_ratio, 1.0 - CLIP_COEF, 1.0 + CLIP_COEF
+                )
                 m_pg_loss = torch.max(m_pg1, m_pg2).mean()
                 m_v_loss = 0.5 * ((m_newvalue - m_ret_flat) ** 2).mean()
                 m_loss = m_pg_loss - ENT_COEF * m_entropy.mean() + VF_COEF * m_v_loss
+                last_m_loss = float(m_loss.item())
 
                 total_loss = w_loss + m_loss
                 optimizer.zero_grad()
@@ -459,18 +513,44 @@ def train(
 
         if update % 5 == 0:
             avg_reward = sum(m_rewards_buf[a].mean().item() for a in AGENTS) / N_AGENTS
-            win_rate = global_wins / max(1, global_episodes)
+            win_rate = (
+                float(np.mean(completed_wins[-100:])) if completed_wins else 0.0
+            )
             mean_episodic_reward = (
                 float(np.mean(completed_episode_returns[-100:]))
                 if completed_episode_returns
                 else 0.0
             )
-            scout_tag_rate = float(np.mean(completed_scout_interact[-100:])) if completed_scout_interact else 0.0
-            scout_avg_pois = float(np.mean(completed_scout_pois[-100:])) if completed_scout_pois else 0.0
-            hacker_hack_rate = float(np.mean(completed_hacker_hack[-100:])) if completed_hacker_hack else 0.0
-            muscle_neutralize_rate = float(np.mean(completed_muscle_neutralize[-100:])) if completed_muscle_neutralize else 0.0
-            extractor_loot_rate = float(np.mean(completed_extractor_loot[-100:])) if completed_extractor_loot else 0.0
-            avg_agents_extract = float(np.mean(completed_agents_at_extract[-100:])) if completed_agents_at_extract else 0.0
+            scout_tag_rate = (
+                float(np.mean(completed_scout_interact[-100:]))
+                if completed_scout_interact
+                else 0.0
+            )
+            scout_avg_pois = (
+                float(np.mean(completed_scout_pois[-100:]))
+                if completed_scout_pois
+                else 0.0
+            )
+            hacker_hack_rate = (
+                float(np.mean(completed_hacker_hack[-100:]))
+                if completed_hacker_hack
+                else 0.0
+            )
+            muscle_neutralize_rate = (
+                float(np.mean(completed_muscle_neutralize[-100:]))
+                if completed_muscle_neutralize
+                else 0.0
+            )
+            extractor_loot_rate = (
+                float(np.mean(completed_extractor_loot[-100:]))
+                if completed_extractor_loot
+                else 0.0
+            )
+            avg_agents_extract = (
+                float(np.mean(completed_agents_at_extract[-100:]))
+                if completed_agents_at_extract
+                else 0.0
+            )
 
             # Console log (clean & compact)
             console_logger.info(
@@ -479,24 +559,43 @@ def train(
             # Detailed file log
             if file_logger:
                 file_logger.info(
-                    f"Update: {update}/{num_updates} | Win Rate: {win_rate:.2f} | Episodic Return: {mean_episodic_reward:.3f} | Step Reward: {avg_reward:.3f} | Scout Tag Rate: {scout_tag_rate:.2f} (Avg POIs: {scout_avg_pois:.1f}) | Hacker Hack Rate: {hacker_hack_rate:.2f} | Muscle Neutralize Rate: {muscle_neutralize_rate:.2f} | Extractor Loot Rate: {extractor_loot_rate:.2f} | Avg Agents at Extract: {avg_agents_extract:.2f}/4"
+                    f"Update: {update}/{num_updates} | Win Rate: {win_rate:.2f} | Episodic Return: {mean_episodic_reward:.3f} | Step Reward: {avg_reward:.3f} | Scout Tag Rate: {scout_tag_rate:.2f} (Avg POIs: {scout_avg_pois:.1f}) | Hacker Hack Rate: {hacker_hack_rate:.2f} | Muscle Neutralize Rate: {muscle_neutralize_rate:.2f} | Extractor Loot Rate: {extractor_loot_rate:.2f} | Avg Agents at Extract: {avg_agents_extract:.2f}/4 | Avg Goal Dist: {last_mean_goal_dist:.2f} | W-Loss: {last_w_loss:.4f} | M-Loss: {last_m_loss:.4f}"
                 )
 
     # Save checkpoint and results
     if save_ckpt_dir:
+        os.makedirs(save_ckpt_dir, exist_ok=True)
         torch.save(agent.state_dict(), os.path.join(save_ckpt_dir, "model.pt"))
         results = {
             "algo": algo_name,
             "stage": stage_idx,
             "win_rate": float(win_rate) if "win_rate" in locals() else 0.0,
-            "mean_reward": float(mean_episodic_reward) if "mean_episodic_reward" in locals() else 0.0,
+            "lifetime_win_rate": float(global_wins / max(1, global_episodes)),
+            "mean_reward": float(mean_episodic_reward)
+            if "mean_episodic_reward" in locals()
+            else 0.0,
             "mean_step_reward": float(avg_reward) if "avg_reward" in locals() else 0.0,
-            "scout_interact_rate": float(scout_tag_rate) if "scout_tag_rate" in locals() else 0.0,
-            "scout_avg_pois_tagged": float(scout_avg_pois) if "scout_avg_pois" in locals() else 0.0,
-            "hacker_hack_rate": float(hacker_hack_rate) if "hacker_hack_rate" in locals() else 0.0,
-            "muscle_neutralize_rate": float(muscle_neutralize_rate) if "muscle_neutralize_rate" in locals() else 0.0,
-            "extractor_loot_rate": float(extractor_loot_rate) if "extractor_loot_rate" in locals() else 0.0,
-            "avg_agents_at_extract": float(avg_agents_extract) if "avg_agents_extract" in locals() else 0.0,
+            "scout_interact_rate": float(scout_tag_rate)
+            if "scout_tag_rate" in locals()
+            else 0.0,
+            "scout_avg_pois_tagged": float(scout_avg_pois)
+            if "scout_avg_pois" in locals()
+            else 0.0,
+            "hacker_hack_rate": float(hacker_hack_rate)
+            if "hacker_hack_rate" in locals()
+            else 0.0,
+            "muscle_neutralize_rate": float(muscle_neutralize_rate)
+            if "muscle_neutralize_rate" in locals()
+            else 0.0,
+            "extractor_loot_rate": float(extractor_loot_rate)
+            if "extractor_loot_rate" in locals()
+            else 0.0,
+            "avg_agents_at_extract": float(avg_agents_extract)
+            if "avg_agents_extract" in locals()
+            else 0.0,
+            "avg_goal_distance": float(last_mean_goal_dist),
+            "worker_loss": float(last_w_loss),
+            "manager_loss": float(last_m_loss),
         }
         with open(os.path.join(save_ckpt_dir, "results.json"), "w") as jf:
             json.dump(results, jf, indent=4)
@@ -504,6 +603,8 @@ def train(
         console_logger.info(msg)
         if file_logger:
             file_logger.info(msg)
+
+    vec_env.close()
 
 
 if __name__ == "__main__":

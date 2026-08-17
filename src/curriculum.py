@@ -62,8 +62,13 @@ if __name__ == "__main__":
     parser.add_argument(
         "--algo",
         type=str,
-        required=True,
-        choices=["mappo", "coop", "marc", "hmappo", "ecoop"],
+        default="all",
+        choices=["mappo", "coop", "marc", "hmappo", "ecoop", "all"],
+        help="Algorithm to train across curriculum, or 'all' to run all benchmarks",
     )
     args = parser.parse_args()
-    run_curriculum(args.algo)
+    if args.algo == "all":
+        for algo in ["mappo", "coop", "ecoop", "hmappo", "marc"]:
+            run_curriculum(algo)
+    else:
+        run_curriculum(args.algo)
