@@ -22,6 +22,7 @@ from constants import (
     UPDATE_EPOCHS,
     VF_COEF,
 )
+from thermal_guard import check_thermal_guard
 from vec_env import VectorEnv
 
 
@@ -136,6 +137,7 @@ def train(
     completed_agents_at_extract = []
 
     for update in range(1, num_updates + 1):
+        check_thermal_guard()
         # --- ROLLOUT PHASE ---
         # We store transitions here to learn from them later
         b_obs = {

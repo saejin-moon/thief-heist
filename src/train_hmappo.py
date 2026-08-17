@@ -25,6 +25,7 @@ from constants import (
     UPDATE_EPOCHS,
     VF_COEF,
 )
+from thermal_guard import check_thermal_guard
 from vec_env import VectorEnv
 
 # Manager makes a decision every 5 steps
@@ -183,6 +184,7 @@ def train(
     last_m_loss = 0.0
 
     for update in range(1, num_updates + 1):
+        check_thermal_guard()
         # Worker Buffers
         w_obs = {
             a: torch.zeros((NUM_STEPS, NUM_ENVS, *OBSERVATION_SIZE)).to(device)

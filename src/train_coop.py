@@ -27,6 +27,7 @@ from constants import (
     UPDATE_EPOCHS,
     VF_COEF,
 )
+from thermal_guard import check_thermal_guard
 from vec_env import VectorEnv
 
 
@@ -198,6 +199,7 @@ def train(
     last_expert_usage = {}
 
     for update in range(1, num_updates + 1):
+        check_thermal_guard()
         b_obs = {
             a: torch.zeros((NUM_STEPS, NUM_ENVS, *OBSERVATION_SIZE)).to(device)
             for a in AGENTS

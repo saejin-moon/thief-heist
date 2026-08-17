@@ -2,6 +2,7 @@
 E-COOP: Evolutionary Confidence-Oriented Option Pool
 Combines decentralized Critic confidence bidding with FIM-guided genetic mutation and routing hysteresis.
 """
+import collections
 import json
 import logging
 import os
@@ -16,11 +17,13 @@ from constants import (
     AGENTS,
     CLIP_COEF,
     ECOOP_CROSSOVER_DAMPING,
+    ECOOP_CULL_WINDOW_UPDATES,
     ECOOP_EVOLUTION_INTERVAL,
     ECOOP_EVOLUTION_START,
     ECOOP_GRACE_UPDATES,
+    ECOOP_MUTANT_ENVS,
     ECOOP_MUTATION_NOISE,
-    ECOOP_POOL_SIZE,
+    ECOOP_RAMP_UPDATES,
     ENT_COEF,
     GAE_LAMBDA,
     GAMMA,
@@ -32,6 +35,7 @@ from constants import (
     UPDATE_EPOCHS,
     VF_COEF,
 )
+from thermal_guard import check_thermal_guard
 from vec_env import VectorEnv
 
 
@@ -70,12 +74,23 @@ class MappoNetwork(nn.Module):
 
 
 class EcoopNetwork(nn.Module):
-    """Dynamic pool of experts with confidence routing, hysteresis, and grace periods."""
+    """Dynamic self-regulating pool of experts with confidence routing, hysteresis, and grace periods."""
 
-    def __init__(self, state_dim, max_experts=ECOOP_POOL_SIZE):
+    def __init__(self, state_dim, num_initial_experts=1):
         super().__init__()
-        self.experts = nn.ModuleList([MappoNetwork(state_dim) for _ in range(max_experts)])
-        self.max_experts = max_experts
+        self.state_dim = state_dim
+        self.experts = nn.ModuleList([MappoNetwork(state_dim) for _ in range(max(1, num_initial_experts))])
+
+    def add_expert(self):
+        """Appends a fresh expert module on the device of existing parameters and returns its index."""
+        device = next(self.parameters()).device if list(self.parameters()) else torch.device("cpu")
+        new_mod = MappoNetwork(self.state_dim).to(device)
+        self.experts.append(new_mod)
+        return len(self.experts) - 1
+
+    def prune_experts(self, survivor_indices):
+        """Retains only the surviving expert modules in contiguous order."""
+        self.experts = nn.ModuleList([self.experts[i] for i in survivor_indices])
 
     def get_action_and_value(
         self,
@@ -88,6 +103,8 @@ class EcoopNetwork(nn.Module):
         expert_idx=None,
         previous_expert=None,
         grace_expert=None,
+        ramp_alphas=None,
+        parent_map=None,
         epsilon=0.05,
     ):
         batch_size = obs.shape[0]
@@ -95,13 +112,17 @@ class EcoopNetwork(nn.Module):
         # 1. Routing Decision
         if expert_idx is not None:
             chosen_expert = expert_idx
-        elif grace_expert is not None and grace_expert < active_experts:
-            # Routing Grace Period: unconditionally route to child during burn-in
-            chosen_expert = torch.full((batch_size,), grace_expert, dtype=torch.long, device=obs.device)
         else:
             expert_values = []
             for k in range(active_experts):
                 val = self.experts[k].critic(state).squeeze(-1)
+                # Progressive Bidding Ramp: smoothly admit fresh mutants without over-optimism whiplash
+                if ramp_alphas is not None and k in ramp_alphas and parent_map is not None and k in parent_map:
+                    alpha = ramp_alphas[k]
+                    parent_idx = parent_map[k]
+                    if parent_idx < active_experts:
+                        parent_val = self.experts[parent_idx].critic(state).squeeze(-1)
+                        val = parent_val * (1.0 - alpha) + val * alpha
                 expert_values.append(val)
             expert_values = torch.stack(expert_values, dim=1)  # [Batch, active_experts]
 
@@ -120,6 +141,15 @@ class EcoopNetwork(nn.Module):
                         chosen_expert[b] = best_idx
             else:
                 chosen_expert = torch.argmax(expert_values, dim=1)
+
+            # Option B: Environment Sharding Grace Routing
+            # Competitive specialists run on (NUM_ENVS - ECOOP_MUTANT_ENVS) envs; mutant runs on ECOOP_MUTANT_ENVS envs
+            if grace_expert is not None and grace_expert < active_experts:
+                threshold_env = max(0, NUM_ENVS - ECOOP_MUTANT_ENVS)
+                for b in range(batch_size):
+                    env_id = b % NUM_ENVS
+                    if env_id >= threshold_env:
+                        chosen_expert[b] = grace_expert
 
         # 2. Execution
         actions = torch.zeros(batch_size, dtype=torch.long, device=obs.device)
@@ -221,7 +251,7 @@ def train(
     vec_env = VectorEnv(NUM_ENVS, config=env_config)
     state_dim = vec_env.state_dim
 
-    agent = EcoopNetwork(state_dim, max_experts=ECOOP_POOL_SIZE).to(device)
+    agent = EcoopNetwork(state_dim, num_initial_experts=1).to(device)
     optimizer = torch.optim.Adam(agent.parameters(), lr=LR)
 
     active_experts = 1
@@ -229,15 +259,32 @@ def train(
     spawn_history = []
     current_grace_expert = None
     grace_updates_remaining = 0
+    mutant_parent_map = {}
+    mutant_ramp_remaining = {}
+    expert_consecutive_zero_usage = collections.defaultdict(int)
     env_previous_expert = None
 
     if load_ckpt_path and os.path.exists(load_ckpt_path):
         try:
-            agent.load_state_dict(torch.load(load_ckpt_path, map_location=device, weights_only=True))
-            print(f"Loaded checkpoint from {load_ckpt_path}")
-            logging.info(  # noqa: LOG015
-                f"Loaded checkpoint from {load_ckpt_path}"
-            )
+            ckpt = torch.load(load_ckpt_path, map_location=device, weights_only=False)
+            state_dict = ckpt["model_state"] if (isinstance(ckpt, dict) and "model_state" in ckpt) else ckpt
+            expert_indices = {int(k.split(".")[1]) for k in state_dict if k.startswith("experts.")}
+            needed_experts = max(expert_indices) + 1 if expert_indices else 1
+            while len(agent.experts) < needed_experts:
+                agent.add_expert()
+            if len(agent.experts) > needed_experts:
+                agent.prune_experts(list(range(needed_experts)))
+            agent.load_state_dict(state_dict)
+            optimizer = torch.optim.Adam(agent.parameters(), lr=LR)
+            if isinstance(ckpt, dict) and "model_state" in ckpt:
+                active_experts = int(ckpt.get("active_experts", len(agent.experts)))
+                total_spawns = int(ckpt.get("total_spawns", 0))
+                spawn_history = list(ckpt.get("spawn_history", []))
+            else:
+                active_experts = len(agent.experts)
+            msg = f"Loaded checkpoint from {load_ckpt_path} (Active specialists: {active_experts}, total spawns: {total_spawns})"
+            print(msg)
+            logging.info(msg)  # noqa: LOG015
         except Exception as e:  # noqa: BLE001
             print(f"Warning: Could not load full checkpoint ({e}). Training from scratch.")
 
@@ -260,10 +307,24 @@ def train(
     last_switch_rate = 0.0
 
     for update in range(1, num_updates + 1):
+        check_thermal_guard()
         if grace_updates_remaining > 0:
             grace_updates_remaining -= 1
             if grace_updates_remaining == 0:
                 current_grace_expert = None
+
+        # Compute Progressive Bidding Ramp alphas for all graduating mutants
+        current_ramp_alphas = {}
+        for k in list(mutant_ramp_remaining.keys()):
+            if k == current_grace_expert:
+                current_ramp_alphas[k] = 0.0
+            else:
+                rem = mutant_ramp_remaining[k]
+                alpha = 1.0 - (rem / ECOOP_RAMP_UPDATES)
+                current_ramp_alphas[k] = alpha
+                mutant_ramp_remaining[k] -= 1
+                if mutant_ramp_remaining[k] <= 0:
+                    del mutant_ramp_remaining[k]
 
         b_obs = {a: torch.zeros((NUM_STEPS, NUM_ENVS, *OBSERVATION_SIZE)).to(device) for a in AGENTS}
         b_role = {a: torch.zeros((NUM_STEPS, NUM_ENVS, N_AGENTS)).to(device) for a in AGENTS}
@@ -300,6 +361,8 @@ def train(
                     active_experts=active_experts,
                     previous_expert=env_previous_expert,
                     grace_expert=current_grace_expert,
+                    ramp_alphas=current_ramp_alphas,
+                    parent_map=mutant_parent_map,
                 )
 
                 if env_previous_expert is not None:
@@ -447,38 +510,77 @@ def train(
             or (update > ECOOP_EVOLUTION_START and (update - ECOOP_EVOLUTION_START) % ECOOP_EVOLUTION_INTERVAL == 0)
         )
 
+        all_experts_tensor = torch.stack([b_experts[a] for a in AGENTS])
+        for k in range(active_experts):
+            if (all_experts_tensor == k).any() or (k == current_grace_expert):
+                expert_consecutive_zero_usage[k] = 0
+            else:
+                expert_consecutive_zero_usage[k] += 1
+
         if do_crossover:
-            # Find best expert and track mean values for all active experts
+            # Find best expert and evaluate mean values for all active experts
+            all_values_tensor = torch.stack([b_values[a] for a in AGENTS])
+            expert_mean_vals = {}
             best_expert = 0
             best_val = -1e9
-            all_experts_tensor = torch.stack([b_experts[a] for a in AGENTS])
-            all_values_tensor = torch.stack([b_values[a] for a in AGENTS])
-
-            expert_mean_vals = {}
             for k in range(active_experts):
                 expert_vals = all_values_tensor[all_experts_tensor == k]
                 if len(expert_vals) > 0:
                     mean_v = expert_vals.mean().item()
-                    expert_mean_vals[k] = mean_v
-                    if mean_v > best_val:
-                        best_val = mean_v
-                        best_expert = k
                 else:
-                    expert_mean_vals[k] = -1e9
+                    # Evaluate actual critic value on current states rather than sentinel -1e9
+                    with torch.no_grad():
+                        states_flat = b_states.flatten(0, 1)
+                        mean_v = agent.experts[k].critic(states_flat).mean().item()
+                expert_mean_vals[k] = mean_v
+                if mean_v > best_val:
+                    best_val = mean_v
+                    best_expert = k
 
+            # Option A: Cull extinct experts (inactive for >= ECOOP_CULL_WINDOW_UPDATES)
+            culled_indices = [
+                k for k in range(active_experts)
+                if k != best_expert
+                and expert_consecutive_zero_usage[k] >= ECOOP_CULL_WINDOW_UPDATES
+                and k != current_grace_expert
+            ]
+
+            if culled_indices:
+                survivors = [k for k in range(active_experts) if k not in culled_indices]
+                cull_names = ", ".join(f"E{c}" for c in culled_indices)
+                cull_msg = f"[Evolution Event] Update: {update} | Culled {len(culled_indices)} extinct expert(s) ({cull_names}) inactive for >= {ECOOP_CULL_WINDOW_UPDATES} updates"
+                console_logger.info(cull_msg)
+                if file_logger:
+                    file_logger.info(cull_msg)
+
+                # Prune in EcoopNetwork and rebuild optimizer
+                agent.prune_experts(survivors)
+                optimizer = torch.optim.Adam(agent.parameters(), lr=LR)
+
+                survivor_mean_vals = [expert_mean_vals[old_idx] for old_idx in survivors]
+                new_zero_usage = collections.defaultdict(int)
+                new_parent_map = {}
+                new_ramp_remaining = {}
+
+                for new_idx, old_idx in enumerate(survivors):
+                    new_zero_usage[new_idx] = expert_consecutive_zero_usage[old_idx]
+                    if old_idx in mutant_parent_map and mutant_parent_map[old_idx] in survivors:
+                        new_parent_map[new_idx] = survivors.index(mutant_parent_map[old_idx])
+                    if old_idx in mutant_ramp_remaining:
+                        new_ramp_remaining[new_idx] = mutant_ramp_remaining[old_idx]
+
+                expert_consecutive_zero_usage = new_zero_usage
+                mutant_parent_map = new_parent_map
+                mutant_ramp_remaining = new_ramp_remaining
+                best_expert = survivors.index(best_expert)
+                active_experts = len(survivors)
+                expert_mean_vals = {i: survivor_mean_vals[i] for i in range(active_experts)}
+
+            # Dynamic Pool Growth: Spawn fresh mutant into newly appended slot
             parent_pool_size = active_experts
-            was_replaced = False
-            worst_expert = None
-            if active_experts < ECOOP_POOL_SIZE:
-                new_expert = active_experts
-                active_experts += 1
-            else:
-                # Pool is full -> active pruning: replace lowest-value / least-utilized expert
-                worst_expert = min(expert_mean_vals, key=expert_mean_vals.get)
-                if worst_expert == best_expert:
-                    worst_expert = (best_expert + 1) % ECOOP_POOL_SIZE
-                new_expert = worst_expert
-                was_replaced = True
+            new_expert = agent.add_expert()
+            optimizer.add_param_group({"params": agent.experts[new_expert].parameters(), "lr": LR})
+            active_experts = len(agent.experts)
 
             total_spawns += 1
             event_record = {
@@ -486,18 +588,14 @@ def train(
                 "parent_expert": best_expert,
                 "child_expert": new_expert,
                 "parent_value": float(best_val),
-                "replaced_expert": worst_expert if was_replaced else None,
+                "replaced_expert": None,
                 "active_experts": active_experts,
                 "total_spawns": total_spawns,
                 "crossover_type": "all_pool_fisher_recombination",
             }
             spawn_history.append(event_record)
 
-            if was_replaced:
-                msg = f"[Evolution Event] Update: {update} | Replaced E{worst_expert} (val={expert_mean_vals[worst_expert]:.3f}) via All-Pool Fisher Recombination (top E{best_expert}, val={best_val:.3f}) | Active: {active_experts}/{ECOOP_POOL_SIZE} | Total Spawns: {total_spawns}"
-            else:
-                msg = f"[Evolution Event] Update: {update} | Spawned E{new_expert} via All-Pool Fisher Recombination (top E{best_expert}, val={best_val:.3f}) | Active: {active_experts}/{ECOOP_POOL_SIZE} | Total Spawns: {total_spawns}"
-
+            msg = f"[Evolution Event] Update: {update} | Spawned E{new_expert} via All-Pool Fisher Recombination (top E{best_expert}, val={best_val:.3f}) | Active Pool: {active_experts} experts | Total Spawns: {total_spawns}"
             console_logger.info(msg)
             if file_logger:
                 file_logger.info(msg)
@@ -568,6 +666,8 @@ def train(
                 if p in optimizer.state:
                     del optimizer.state[p]
 
+            mutant_parent_map[new_expert] = best_expert
+            mutant_ramp_remaining[new_expert] = ECOOP_RAMP_UPDATES
             current_grace_expert = new_expert
             grace_updates_remaining = ECOOP_GRACE_UPDATES
 
@@ -591,18 +691,24 @@ def train(
 
             # Console log (clean & compact)
             console_logger.info(
-                f"Update: {update}/{num_updates} | Win Rate: {win_rate:.2f} | Episodic Return: {mean_episodic_reward:.3f} | Step Reward: {avg_reward:.3f} | Active Experts: {active_experts}/{ECOOP_POOL_SIZE}"
+                f"Update: {update}/{num_updates} | Win Rate: {win_rate:.2f} | Episodic Return: {mean_episodic_reward:.3f} | Step Reward: {avg_reward:.3f} | Active Experts: {active_experts}"
             )
             # Detailed file log
             if file_logger:
                 file_logger.info(
-                    f"Update: {update}/{num_updates} | Win Rate: {win_rate:.2f} | Episodic Return: {mean_episodic_reward:.3f} | Step Reward: {avg_reward:.3f} | Scout Tag Rate: {scout_tag_rate:.2f} (Avg POIs: {scout_avg_pois:.1f}) | Hacker Hack Rate: {hacker_hack_rate:.2f} | Muscle Neutralize Rate: {muscle_neutralize_rate:.2f} | Extractor Loot Rate: {extractor_loot_rate:.2f} | Avg Agents at Extract: {avg_agents_extract:.2f}/4 | Active: {active_experts}/{ECOOP_POOL_SIZE} | Total Spawns: {total_spawns} | Switch Rate: {last_switch_rate * 100:.1f}% | Usage: [{expert_usage_str}]"
+                    f"Update: {update}/{num_updates} | Win Rate: {win_rate:.2f} | Episodic Return: {mean_episodic_reward:.3f} | Step Reward: {avg_reward:.3f} | Scout Tag Rate: {scout_tag_rate:.2f} (Avg POIs: {scout_avg_pois:.1f}) | Hacker Hack Rate: {hacker_hack_rate:.2f} | Muscle Neutralize Rate: {muscle_neutralize_rate:.2f} | Extractor Loot Rate: {extractor_loot_rate:.2f} | Avg Agents at Extract: {avg_agents_extract:.2f}/4 | Active: {active_experts} | Total Spawns: {total_spawns} | Switch Rate: {last_switch_rate * 100:.1f}% | Usage: [{expert_usage_str}]"
                 )
 
     # Save checkpoint and results
     if save_ckpt_dir:
         os.makedirs(save_ckpt_dir, exist_ok=True)
-        torch.save(agent.state_dict(), os.path.join(save_ckpt_dir, "model.pt"))
+        checkpoint_payload = {
+            "model_state": agent.state_dict(),
+            "active_experts": active_experts,
+            "total_spawns": total_spawns,
+            "spawn_history": spawn_history,
+        }
+        torch.save(checkpoint_payload, os.path.join(save_ckpt_dir, "model.pt"))
         results = {
             "algo": algo_name,
             "stage": stage_idx,
@@ -617,7 +723,6 @@ def train(
             "extractor_loot_rate": float(extractor_loot_rate) if "extractor_loot_rate" in locals() else 0.0,
             "avg_agents_at_extract": float(avg_agents_extract) if "avg_agents_extract" in locals() else 0.0,
             "active_experts": active_experts,
-            "max_experts": ECOOP_POOL_SIZE,
             "total_spawns": total_spawns,
             "expert_switch_rate": float(last_switch_rate),
             "expert_usage_pct": last_expert_usage,

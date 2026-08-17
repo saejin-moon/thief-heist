@@ -25,6 +25,7 @@ from constants import (
     UPDATE_EPOCHS,
     VF_COEF,
 )
+from thermal_guard import check_thermal_guard
 from vec_env import VectorEnv
 
 # Controls how severely the alarm penalizes macro credit
@@ -135,6 +136,7 @@ def train(
     completed_agents_at_extract = []
 
     for update in range(1, num_updates + 1):
+        check_thermal_guard()
         b_obs = {
             a: torch.zeros((NUM_STEPS, NUM_ENVS, *OBSERVATION_SIZE)).to(device)
             for a in AGENTS
@@ -272,13 +274,13 @@ def train(
             next_obs = next_obs_new
 
         # --- MARC CAUSAL REWARD & ADVANTAGE RESTRUCTURING ---
-        # 1. Macro-Outcome Multiplier: Omega_t = (Win ? 1.0 : -0.5) * exp(-alpha * Alarm_t / 100)
+        # 1. Macro-Outcome Multiplier: Omega_t = (1.0 + 2.0 * Win_t) * exp(-alpha * Alarm_t / 100)
         alarm_weights = torch.exp(-ALPHA_ALARM * (b_alarms / 100.0))
         # Win tensor shape [NUM_STEPS, NUM_ENVS]
         win_tensor = torch.tensor(
             b_wins, dtype=torch.float32, device=device
         )  # 1 for win step, 0 otherwise
-        macro_weights = torch.where(win_tensor > 0.5, 1.0, -0.5) * alarm_weights
+        macro_weights = (1.0 + 2.0 * win_tensor) * alarm_weights
 
         # 2. Re-assign rewards with affordance bonus and macro weight
         b_shaped_rewards = {}

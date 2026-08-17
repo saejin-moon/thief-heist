@@ -18,7 +18,6 @@ from constants import (
     CAMERA,
     CURRICULUM_STAGES,
     DOOR,
-    ECOOP_POOL_SIZE,
     EXTRACT,
     LOOT,
     MACRO_STEP,
@@ -90,7 +89,7 @@ def load_model(algo: str, state_dim: int, checkpoint_path: str, device: str = "c
     elif algo == "coop":
         agent = CoopNetwork(state_dim, num_experts=2).to(device)
     elif algo == "ecoop":
-        agent = EcoopNetwork(state_dim, max_experts=ECOOP_POOL_SIZE).to(device)
+        agent = EcoopNetwork(state_dim, num_initial_experts=1).to(device)
     elif algo == "hmappo":
         agent = HierarchicalNetwork(state_dim).to(device)
     elif algo == "marc":
@@ -100,7 +99,15 @@ def load_model(algo: str, state_dim: int, checkpoint_path: str, device: str = "c
 
     if checkpoint_path and os.path.exists(checkpoint_path):
         try:
-            state_dict = torch.load(checkpoint_path, map_location=device)
+            ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
+            state_dict = ckpt["model_state"] if (isinstance(ckpt, dict) and "model_state" in ckpt) else ckpt
+            if algo == "ecoop":
+                expert_indices = {int(k.split(".")[1]) for k in state_dict if k.startswith("experts.")}
+                needed = max(expert_indices) + 1 if expert_indices else 1
+                while len(agent.experts) < needed:
+                    agent.add_expert()
+                if len(agent.experts) > needed:
+                    agent.prune_experts(list(range(needed)))
             agent.load_state_dict(state_dict)
             print(f"{GREEN}[✓] Loaded model weights from: {checkpoint_path}{RESET}")
         except Exception as e:  # noqa: BLE001
