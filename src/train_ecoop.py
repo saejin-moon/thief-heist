@@ -253,56 +253,35 @@ def compute_fim_diagonal(
     sample_role,
     sample_mask,
     sample_actions,
-    max_samples_per_role=128,
 ):
     """
-    Computes the empirical Fisher Information Matrix (FIM) diagonal from policy log-likelihood.
+    Computes the empirical Fisher Information Matrix (FIM) diagonal across 100% of the rollout buffer.
 
-    Uses balanced stratified sampling across all 4 agent roles (Scout, Hacker, Muscle, Extractor)
-    to ensure that sensitivity data equally protects combat, stealth, and hacking competencies
-    during genetic recombination and mutation.
+    Calculates policy log-likelihood gradients strictly for the Actor network across all transitions
+    collected by Scout, Hacker, Muscle, and Extractor without subsampling.
     """
     fim = {
-        name: torch.zeros_like(param) for name, param in expert_model.named_parameters()
+        name: torch.zeros_like(param)
+        for name, param in expert_model.actor.named_parameters()
     }
-    expert_model.zero_grad()
-    n_total = len(sample_obs)
-    if n_total == 0:
+    expert_model.actor.zero_grad()
+    n_eval = len(sample_obs)
+    if n_eval == 0:
         return fim
 
-    # Stratified sampling across all roles (equal representation for Scout, Hacker, Muscle, Extractor)
-    samples_per_agent = n_total // N_AGENTS
-    selected_indices = []
-    for ag_i in range(N_AGENTS):
-        ag_start = ag_i * samples_per_agent
-        perm = (
-            ag_start
-            + torch.randperm(samples_per_agent, device=sample_obs.device)[
-                :max_samples_per_role
-            ]
-        )
-        selected_indices.append(perm)
-    selected = torch.cat(selected_indices)
-    n_eval = len(selected)
-
-    o = sample_obs[selected]
-    r = sample_role[selected]
-    m = sample_mask[selected]
-    a = sample_actions[selected]
-
-    x_actor = torch.cat([o.flatten(start_dim=1), r], dim=1)
+    x_actor = torch.cat([sample_obs.flatten(start_dim=1), sample_role], dim=1)
     logits = expert_model.actor(x_actor)
-    masked_logits = logits + ((1.0 - m) * -1e9)
+    masked_logits = logits + ((1.0 - sample_mask) * -1e9)
     probs = Categorical(logits=masked_logits)
-    log_prob = probs.log_prob(a)
+    log_prob = probs.log_prob(sample_actions)
 
     for j in range(n_eval):
-        expert_model.zero_grad()
+        expert_model.actor.zero_grad()
         log_prob[j].backward(retain_graph=True)
-        for name, param in expert_model.named_parameters():
+        for name, param in expert_model.actor.named_parameters():
             if param.grad is not None:
                 fim[name] += (param.grad.data.clone() ** 2) / n_eval
-    expert_model.zero_grad()
+    expert_model.actor.zero_grad()
     return fim
 
 
@@ -819,16 +798,24 @@ def train(
                 )
                 pool_fims.append(fim_k)
 
-            # 4. Perform All-Pool Fisher-Weighted Parameter Recombination & Mutation
+            # 4. Clone Championship Critic & Recombine/Mutate strictly the Actor (Policy)
             with torch.no_grad():
-                for name, param in agent.experts[new_expert].named_parameters():
+                # 1. Directly clone the calibrated Critic from the best expert (zero noise or weight mixing)
+                agent.experts[new_expert].critic.load_state_dict(
+                    agent.experts[best_expert].critic.state_dict()
+                )
+
+                # 2. Perform All-Pool Fisher-Weighted Recombination & Mutation strictly on Actor
+                for name, param in agent.experts[new_expert].actor.named_parameters():
                     weighted_param_sum = torch.zeros_like(param)
                     weight_denom = torch.zeros_like(param)
                     f_combined = torch.zeros_like(param)
 
                     for k in range(parent_pool_size):
                         w_k = float(fitness_weights[k])
-                        param_k = dict(agent.experts[k].named_parameters())[name].data
+                        param_k = dict(agent.experts[k].actor.named_parameters())[
+                            name
+                        ].data
                         fim_k = pool_fims[k].get(name, torch.zeros_like(param))
 
                         # Effective Fisher weight = w_k * (F_k + ECOOP_CROSSOVER_DAMPING)
@@ -840,7 +827,7 @@ def train(
                     # Recombined parameter
                     recombined = weighted_param_sum / (weight_denom + 1e-8)
 
-                    # 5. Geometry-Aware Mutation on Recombined Offspring
+                    # 5. Geometry-Aware Mutation strictly on Actor Offspring
                     scale = torch.clamp(1.0 / (torch.sqrt(f_combined) + 1e-8), max=10.0)
                     noise = torch.randn_like(param) * scale * ECOOP_MUTATION_NOISE
                     param.copy_(recombined + noise)
