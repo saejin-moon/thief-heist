@@ -24,7 +24,6 @@ from constants import (
     ECOOP_HYSTERESIS_EPSILON,
     ECOOP_MUTANT_ENVS,
     ECOOP_MUTATION_NOISE,
-    ECOOP_RAMP_UPDATES,
     ENT_COEF,
     GAE_LAMBDA,
     GAMMA,
@@ -46,9 +45,7 @@ class MappoNetwork(nn.Module):
     
     Each specialist maintains:
     - Actor MLP: maps local egocentric observation + one-hot role vector -> action logits.
-    - Critic MLP: maps global centralized environment state + one-hot role vector -> state value V(s).
-    - Running Value Statistics (val_mean, val_var): tracks empirical return distribution
-      for Relative Normalized Bidding z-score computation.
+    - Critic MLP: maps global centralized environment state + one-hot role vector -> state value V(s, role).
     """
 
     def __init__(self, state_dim):
@@ -65,7 +62,7 @@ class MappoNetwork(nn.Module):
             nn.Linear(64, ACTION_SPACE_SIZE),
         )
         
-        # Centralized Critic Network: maps global state + role ID -> expected return
+        # Centralized Critic Network: maps global state + role ID -> expected return V(s, role)
         self.critic = nn.Sequential(
             nn.Linear(critic_in_dim, 64),
             nn.Tanh(),
@@ -73,32 +70,6 @@ class MappoNetwork(nn.Module):
             nn.Tanh(),
             nn.Linear(64, 1),
         )
-        
-        # Buffers for Exponential Moving Average (EMA) of return distribution
-        self.register_buffer("val_mean", torch.tensor(0.0))
-        self.register_buffer("val_var", torch.tensor(1.0))
-        self.register_buffer("val_count", torch.tensor(0.0))
-
-    def update_val_stats(self, values_tensor):
-        """
-        Updates the running mean and variance of returns observed by this expert.
-        Used for normalized z-score bidding across heterogeneous task difficulties.
-        """
-        with torch.no_grad():
-            if values_tensor.numel() > 0:
-                batch_m = values_tensor.mean()
-                batch_v = values_tensor.var(unbiased=False) if values_tensor.numel() > 1 else torch.tensor(1.0, device=values_tensor.device)
-                
-                # First update initializes buffers directly
-                if self.val_count == 0:
-                    self.val_mean.copy_(batch_m)
-                    self.val_var.copy_(torch.clamp(batch_v, min=1e-4))
-                    self.val_count.copy_(torch.tensor(1.0, device=values_tensor.device))
-                else:
-                    # Exponential moving average with decay rate alpha = 0.05
-                    alpha = 0.05
-                    self.val_mean.copy_((1.0 - alpha) * self.val_mean + alpha * batch_m)
-                    self.val_var.copy_((1.0 - alpha) * self.val_var + alpha * torch.clamp(batch_v, min=1e-4))
 
     def get_action_and_value(self, obs, role, mask, state=None, action=None):
         """
@@ -157,8 +128,6 @@ class EcoopNetwork(nn.Module):
         expert_idx=None,
         previous_expert=None,
         grace_expert=None,
-        ramp_alphas=None,
-        parent_map=None,
         epsilon=ECOOP_HYSTERESIS_EPSILON,
         deterministic=False,
     ):
@@ -167,15 +136,16 @@ class EcoopNetwork(nn.Module):
         
         If expert_idx is explicitly passed (e.g. during PPO policy loss updates), actions
         are evaluated using the exact expert that took the step during rollout.
-        Otherwise, Relative Normalized Bidding with Hysteresis selects the best expert per agent.
+        Otherwise, Direct Role-Conditioned Critic Bidding with Hysteresis selects the best expert per agent.
         """
         batch_size = obs.shape[0]
         x_critic = torch.cat([state, role], dim=1)
 
-        # 1. Relative Normalized Routing Decision
+        # 1. Routing Selection Phase
         if expert_idx is not None:
             chosen_expert = expert_idx
         else:
+            # Mask out grace expert from general competitive bidding pool
             if grace_expert is not None and grace_expert < active_experts:
                 candidate_experts = [k for k in range(active_experts) if k != grace_expert]
             else:
@@ -183,30 +153,13 @@ class EcoopNetwork(nn.Module):
 
             candidate_tensor = torch.tensor(candidate_experts, dtype=torch.long, device=obs.device)
 
-            expert_bids = []
-            for k in candidate_experts:
-                raw_val = self.experts[k].critic(x_critic).squeeze(-1)
-                mean_k = self.experts[k].val_mean
-                var_k = self.experts[k].val_var
+            # Direct Role-Conditioned Critic Bids: V_k(s, role)
+            expert_bids = torch.stack(
+                [self.experts[k].critic(x_critic).squeeze(-1) for k in candidate_experts],
+                dim=1,
+            )  # [Batch, len(candidate_experts)]
 
-                # Progressive Bidding Ramp: smoothly admit fresh mutants without over-optimism whiplash
-                if ramp_alphas is not None and k in ramp_alphas and parent_map is not None and k in parent_map:
-                    alpha = ramp_alphas[k]
-                    parent_idx = parent_map[k]
-                    if parent_idx < active_experts:
-                        parent_raw = self.experts[parent_idx].critic(x_critic).squeeze(-1)
-                        raw_val = parent_raw * (1.0 - alpha) + raw_val * alpha
-                        mean_k = self.experts[parent_idx].val_mean * (1.0 - alpha) + mean_k * alpha
-                        var_k = self.experts[parent_idx].val_var * (1.0 - alpha) + var_k * alpha
-
-                # Relative Normalized Bidding: z-score against expert's blended running distribution
-                std_k = torch.sqrt(var_k) + 1e-6
-                norm_bid = (raw_val - mean_k) / std_k
-                expert_bids.append(norm_bid)
-
-            expert_bids = torch.stack(expert_bids, dim=1)  # [Batch, len(candidate_experts)]
-
-            # Greedy Argmax with Hybrid Hysteresis for temporal policy coherence (100% GPU Vectorized)
+            # Greedy Argmax with Vectorized Hybrid Hysteresis for temporal policy coherence
             best_rel_idx = torch.argmax(expert_bids, dim=1)
             best_idx = candidate_tensor[best_rel_idx]
 
@@ -219,19 +172,23 @@ class EcoopNetwork(nn.Module):
                 prev_bid = torch.gather(expert_bids, 1, prev_rel_idx.unsqueeze(1)).squeeze(1)
                 best_bid = torch.gather(expert_bids, 1, best_rel_idx.unsqueeze(1)).squeeze(1)
 
+                # Dynamic switching threshold: require clear superiority before switching
                 switch_thresh = prev_bid + torch.clamp(epsilon * torch.abs(prev_bid), min=epsilon)
                 should_switch = (best_idx != previous_expert) & (best_bid > switch_thresh)
                 chosen_expert = torch.where(has_prev & prev_in_candidates & ~should_switch, previous_expert, best_idx)
             else:
                 chosen_expert = best_idx
 
-            # Option B: Environment Sharding Grace Routing (100% GPU Vectorized)
-            # Competitive specialists run on (NUM_ENVS - ECOOP_MUTANT_ENVS) envs; mutant runs on ECOOP_MUTANT_ENVS envs
+            # Environment Sharding Grace Routing: isolate mutant to dedicated environments
             if grace_expert is not None and grace_expert < active_experts:
                 threshold_env = max(0, NUM_ENVS - ECOOP_MUTANT_ENVS)
                 env_ids = torch.arange(batch_size, device=obs.device) % NUM_ENVS
                 is_grace_env = env_ids >= threshold_env
-                chosen_expert = torch.where(is_grace_env, torch.tensor(grace_expert, device=obs.device, dtype=chosen_expert.dtype), chosen_expert)
+                chosen_expert = torch.where(
+                    is_grace_env,
+                    torch.tensor(grace_expert, device=obs.device, dtype=chosen_expert.dtype),
+                    chosen_expert,
+                )
 
         # 2. Execution
         actions = torch.zeros(batch_size, dtype=torch.long, device=obs.device)
@@ -351,8 +308,6 @@ def train(
     spawn_history = []
     current_grace_expert = None
     grace_updates_remaining = 0
-    mutant_parent_map = {}
-    mutant_ramp_remaining = {}
     expert_consecutive_zero_usage = collections.defaultdict(int)
     env_previous_expert = None
 
@@ -399,17 +354,6 @@ def train(
     completed_extractor_loot = []
     completed_agents_at_extract = []
 
-    interval_wins = []
-    interval_episode_returns = []
-    interval_episode_steps = []
-    interval_episode_alarms = []
-    interval_scout_interact = []
-    interval_scout_pois = []
-    interval_hacker_hack = []
-    interval_muscle_neutralize = []
-    interval_muscle_guards = []
-    interval_extractor_loot = []
-    interval_agents_at_extract = []
     last_expert_usage = {}
     last_switch_rate = 0.0
 
@@ -419,19 +363,6 @@ def train(
             grace_updates_remaining -= 1
             if grace_updates_remaining == 0:
                 current_grace_expert = None
-
-        # Compute Progressive Bidding Ramp alphas for all graduating mutants
-        current_ramp_alphas = {}
-        for k in list(mutant_ramp_remaining.keys()):
-            if k == current_grace_expert:
-                current_ramp_alphas[k] = 0.0
-            else:
-                rem = mutant_ramp_remaining[k]
-                alpha = 1.0 - (rem / ECOOP_RAMP_UPDATES)
-                current_ramp_alphas[k] = alpha
-                mutant_ramp_remaining[k] -= 1
-                if mutant_ramp_remaining[k] <= 0:
-                    del mutant_ramp_remaining[k]
 
         b_obs = {a: torch.zeros((NUM_STEPS, NUM_ENVS, *OBSERVATION_SIZE)).to(device) for a in AGENTS}
         b_role = {a: torch.zeros((NUM_STEPS, NUM_ENVS, N_AGENTS)).to(device) for a in AGENTS}
@@ -468,8 +399,6 @@ def train(
                     active_experts=active_experts,
                     previous_expert=env_previous_expert,
                     grace_expert=current_grace_expert,
-                    ramp_alphas=current_ramp_alphas,
-                    parent_map=mutant_parent_map,
                 )
 
                 env_previous_expert = chosen_expert
@@ -505,8 +434,6 @@ def train(
                         global_wins += 1
                     completed_wins.append(float(is_win))
                     completed_episode_returns.append(float(current_env_returns[e]))
-                    interval_wins.append(float(is_win))
-                    interval_episode_returns.append(float(current_env_returns[e]))
                     current_env_returns[e] = 0.0
 
                     interact_succ = float(scout_info.get("scout_interact_success", False))
@@ -528,16 +455,6 @@ def train(
                     completed_agents_at_extract.append(agents_extract)
                     completed_episode_steps.append(ep_steps)
                     completed_episode_alarms.append(ep_alarm)
-
-                    interval_scout_interact.append(interact_succ)
-                    interval_scout_pois.append(pois_tagged)
-                    interval_hacker_hack.append(hack_succ)
-                    interval_muscle_neutralize.append(neutralize_succ)
-                    interval_muscle_guards.append(guards_neutralized)
-                    interval_extractor_loot.append(loot_succ)
-                    interval_agents_at_extract.append(agents_extract)
-                    interval_episode_steps.append(ep_steps)
-                    interval_episode_alarms.append(ep_alarm)
 
                     if env_previous_expert is not None:
                         for ag_i in range(N_AGENTS):
@@ -648,17 +565,9 @@ def train(
                 nn.utils.clip_grad_norm_(agent.parameters(), 0.5)
                 optimizer.step()
 
-        # Update running value stats for Relative Normalized Bidding ONCE per update across full batch
-        all_experts_flat = torch.stack([b_experts[a] for a in AGENTS]).view(-1)
-        all_returns_flat = torch.cat([b_returns[a].view(-1) for a in AGENTS])
-        for k in range(active_experts):
-            mask_k = (all_experts_flat == k)
-            if mask_k.any():
-                agent.experts[k].update_val_stats(all_returns_flat[mask_k])
-
         # --- EVOLUTIONARY CROSSOVER / FIM MUTATION & ACTIVE PRUNING ---
         min_updates_remaining = round(
-            ECOOP_GRACE_UPDATES + ECOOP_RAMP_UPDATES + (ECOOP_EVOLUTION_INTERVAL / 2.0)
+            ECOOP_GRACE_UPDATES + (ECOOP_EVOLUTION_INTERVAL / 2.0)
         )
         do_crossover = (
             (update % ECOOP_EVOLUTION_INTERVAL == 0)
@@ -710,7 +619,7 @@ def train(
                 if file_logger:
                     file_logger.info(cull_msg)
 
-                # Prune culled parameters from optimizer state without resetting survivor momentum
+                # Prune culled parameters from optimizer state and rebuild optimizer param_groups
                 for culled_idx in culled_indices:
                     for p in agent.experts[culled_idx].parameters():
                         if p in optimizer.state:
@@ -728,19 +637,11 @@ def train(
 
                 survivor_mean_vals = [expert_mean_vals[old_idx] for old_idx in survivors]
                 new_zero_usage = collections.defaultdict(int)
-                new_parent_map = {}
-                new_ramp_remaining = {}
 
                 for new_idx, old_idx in enumerate(survivors):
                     new_zero_usage[new_idx] = expert_consecutive_zero_usage[old_idx]
-                    if old_idx in mutant_parent_map and mutant_parent_map[old_idx] in survivors:
-                        new_parent_map[new_idx] = survivors.index(mutant_parent_map[old_idx])
-                    if old_idx in mutant_ramp_remaining:
-                        new_ramp_remaining[new_idx] = mutant_ramp_remaining[old_idx]
 
                 expert_consecutive_zero_usage = new_zero_usage
-                mutant_parent_map = new_parent_map
-                mutant_ramp_remaining = new_ramp_remaining
                 best_expert = survivors.index(best_expert)
                 active_experts = len(survivors)
                 expert_mean_vals = {i: survivor_mean_vals[i] for i in range(active_experts)}
@@ -748,9 +649,6 @@ def train(
             # Dynamic Pool Growth: Spawn fresh mutant into newly appended slot
             parent_pool_size = active_experts
             new_expert = agent.add_expert()
-            agent.experts[new_expert].val_mean.copy_(agent.experts[best_expert].val_mean)
-            agent.experts[new_expert].val_var.copy_(agent.experts[best_expert].val_var)
-            agent.experts[new_expert].val_count.copy_(agent.experts[best_expert].val_count)
             optimizer.add_param_group({"params": agent.experts[new_expert].parameters(), "lr": LR})
             active_experts = len(agent.experts)
 
@@ -838,8 +736,6 @@ def train(
                 if p in optimizer.state:
                     del optimizer.state[p]
 
-            mutant_parent_map[new_expert] = best_expert
-            mutant_ramp_remaining[new_expert] = ECOOP_RAMP_UPDATES
             current_grace_expert = new_expert
             grace_updates_remaining = ECOOP_GRACE_UPDATES
 
