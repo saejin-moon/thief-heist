@@ -87,7 +87,9 @@ def _build_other_actions_onehot(actions_dict, device):
         others = []
         for j, other_a in enumerate(AGENTS):
             if i != j:
-                onehot = F.one_hot(actions_dict[other_a].long(), num_classes=ACTION_SPACE_SIZE).float()
+                onehot = F.one_hot(
+                    actions_dict[other_a].long(), num_classes=ACTION_SPACE_SIZE
+                ).float()
                 others.append(onehot)
         other_onehots[a] = torch.cat(others, dim=-1).to(device)
     return other_onehots
@@ -268,11 +270,17 @@ def train(
                     interval_episode_returns.append(float(current_env_returns[e]))
                     current_env_returns[e] = 0.0
 
-                    interact_succ = float(scout_info.get("scout_interact_success", False))
+                    interact_succ = float(
+                        scout_info.get("scout_interact_success", False)
+                    )
                     pois_tagged = float(scout_info.get("scout_pois_tagged", 0))
                     hack_succ = float(scout_info.get("hacker_hack_success", False))
-                    neutralize_succ = float(scout_info.get("muscle_neutralize_success", False))
-                    guards_neutralized = float(scout_info.get("muscle_guards_neutralized", 0))
+                    neutralize_succ = float(
+                        scout_info.get("muscle_neutralize_success", False)
+                    )
+                    guards_neutralized = float(
+                        scout_info.get("muscle_guards_neutralized", 0)
+                    )
                     loot_succ = float(scout_info.get("extractor_loot_success", False))
                     agents_extract = float(scout_info.get("agents_at_extract", 0))
                     ep_steps = float(scout_info.get("steps", 0))
@@ -403,8 +411,12 @@ def train(
                 pg_loss = torch.max(pg_loss1, pg_loss2).mean()
 
                 # Critic Forward (Q-value on taken actions)
-                q_vals_all = agent.get_q_values(b_states_flat, other_act_flat, role_flat)
-                q_taken_new = q_vals_all.gather(1, action_flat.long().unsqueeze(1)).squeeze(1)
+                q_vals_all = agent.get_q_values(
+                    b_states_flat, other_act_flat, role_flat
+                )
+                q_taken_new = q_vals_all.gather(
+                    1, action_flat.long().unsqueeze(1)
+                ).squeeze(1)
 
                 v_loss = 0.5 * ((q_taken_new - ret_flat) ** 2).mean()
                 loss = pg_loss - ENT_COEF * entropy.mean() + VF_COEF * v_loss
@@ -416,9 +428,7 @@ def train(
 
         # --- LOGGING ---
         if update % 5 == 0:
-            win_rate = (
-                float(np.mean(completed_wins[-25:])) if completed_wins else 0.0
-            )
+            win_rate = float(np.mean(completed_wins[-25:])) if completed_wins else 0.0
             mean_episodic_reward = (
                 float(np.mean(completed_episode_returns[-25:]))
                 if completed_episode_returns
@@ -490,20 +500,48 @@ def train(
         results = {
             "algo": algo_name,
             "stage": stage_idx,
-            "win_rate": float(np.mean(completed_wins[-100:])) if completed_wins else 0.0,
+            "win_rate": float(np.mean(completed_wins[-100:]))
+            if completed_wins
+            else 0.0,
             "lifetime_win_rate": float(global_wins / max(1, global_episodes)),
-            "mean_reward": float(np.mean(completed_episode_returns[-100:])) if completed_episode_returns else 0.0,
-            "avg_episode_steps": float(np.mean(completed_episode_steps[-100:])) if completed_episode_steps else 0.0,
-            "max_stage_steps": int(max_stage_steps) if "max_stage_steps" in locals() else 150,
-            "avg_alarm": float(np.mean(completed_episode_alarms[-100:])) if completed_episode_alarms else 0.0,
-            "scout_interact_rate": float(np.mean(completed_scout_interact[-100:])) if completed_scout_interact else 0.0,
-            "scout_avg_pois_tagged": float(np.mean(completed_scout_pois[-100:])) if completed_scout_pois else 0.0,
-            "hacker_hack_rate": float(np.mean(completed_hacker_hack[-100:])) if completed_hacker_hack else 0.0,
-            "muscle_neutralize_rate": float(np.mean(completed_muscle_neutralize[-100:])) if completed_muscle_neutralize else 0.0,
-            "muscle_avg_guards_neutralized": float(np.mean(completed_muscle_guards[-100:])) if completed_muscle_guards else 0.0,
-            "total_stage_guards": int(total_stage_guards) if "total_stage_guards" in locals() else 0,
-            "extractor_loot_rate": float(np.mean(completed_extractor_loot[-100:])) if completed_extractor_loot else 0.0,
-            "avg_agents_at_extract": float(np.mean(completed_agents_at_extract[-100:])) if completed_agents_at_extract else 0.0,
+            "mean_reward": float(np.mean(completed_episode_returns[-100:]))
+            if completed_episode_returns
+            else 0.0,
+            "avg_episode_steps": float(np.mean(completed_episode_steps[-100:]))
+            if completed_episode_steps
+            else 0.0,
+            "max_stage_steps": int(max_stage_steps)
+            if "max_stage_steps" in locals()
+            else 150,
+            "avg_alarm": float(np.mean(completed_episode_alarms[-100:]))
+            if completed_episode_alarms
+            else 0.0,
+            "scout_interact_rate": float(np.mean(completed_scout_interact[-100:]))
+            if completed_scout_interact
+            else 0.0,
+            "scout_avg_pois_tagged": float(np.mean(completed_scout_pois[-100:]))
+            if completed_scout_pois
+            else 0.0,
+            "hacker_hack_rate": float(np.mean(completed_hacker_hack[-100:]))
+            if completed_hacker_hack
+            else 0.0,
+            "muscle_neutralize_rate": float(np.mean(completed_muscle_neutralize[-100:]))
+            if completed_muscle_neutralize
+            else 0.0,
+            "muscle_avg_guards_neutralized": float(
+                np.mean(completed_muscle_guards[-100:])
+            )
+            if completed_muscle_guards
+            else 0.0,
+            "total_stage_guards": int(total_stage_guards)
+            if "total_stage_guards" in locals()
+            else 0,
+            "extractor_loot_rate": float(np.mean(completed_extractor_loot[-100:]))
+            if completed_extractor_loot
+            else 0.0,
+            "avg_agents_at_extract": float(np.mean(completed_agents_at_extract[-100:]))
+            if completed_agents_at_extract
+            else 0.0,
         }
         with open(os.path.join(save_ckpt_dir, "results.json"), "w") as jf:
             json.dump(results, jf, indent=4)

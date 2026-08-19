@@ -232,11 +232,17 @@ def train(
                     interval_episode_returns.append(float(current_env_returns[e]))
                     current_env_returns[e] = 0.0
 
-                    interact_succ = float(scout_info.get("scout_interact_success", False))
+                    interact_succ = float(
+                        scout_info.get("scout_interact_success", False)
+                    )
                     pois_tagged = float(scout_info.get("scout_pois_tagged", 0))
                     hack_succ = float(scout_info.get("hacker_hack_success", False))
-                    neutralize_succ = float(scout_info.get("muscle_neutralize_success", False))
-                    guards_neutralized = float(scout_info.get("muscle_guards_neutralized", 0))
+                    neutralize_succ = float(
+                        scout_info.get("muscle_neutralize_success", False)
+                    )
+                    guards_neutralized = float(
+                        scout_info.get("muscle_guards_neutralized", 0)
+                    )
                     loot_succ = float(scout_info.get("extractor_loot_success", False))
                     agents_extract = float(scout_info.get("agents_at_extract", 0))
                     ep_steps = float(scout_info.get("steps", 0))
@@ -274,9 +280,7 @@ def train(
 
         # --- ADVANTAGE COMPUTATION (GAE) ---
         with torch.no_grad():
-            state_next_t = torch.tensor(
-                next_state, dtype=torch.float32, device=device
-            )
+            state_next_t = torch.tensor(next_state, dtype=torch.float32, device=device)
             stacked = next_obs["_stacked"]
             obs_all = torch.tensor(
                 stacked["observation"], dtype=torch.float32, device=device
@@ -315,8 +319,7 @@ def train(
                         - b_values[a][t]
                     )
                     b_advantages[a][t] = lastgaelam = (
-                        delta
-                        + GAMMA * GAE_LAMBDA * nextnonterminal * lastgaelam
+                        delta + GAMMA * GAE_LAMBDA * nextnonterminal * lastgaelam
                     )
         b_returns = {a: b_advantages[a] + b_values[a] for a in AGENTS}
 
@@ -360,9 +363,7 @@ def train(
 
         # --- LOGGING ---
         if update % 5 == 0:
-            win_rate = (
-                float(np.mean(completed_wins[-25:])) if completed_wins else 0.0
-            )
+            win_rate = float(np.mean(completed_wins[-25:])) if completed_wins else 0.0
             mean_episodic_reward = (
                 float(np.mean(completed_episode_returns[-25:]))
                 if completed_episode_returns
@@ -434,20 +435,48 @@ def train(
         results = {
             "algo": algo_name,
             "stage": stage_idx,
-            "win_rate": float(np.mean(completed_wins[-100:])) if completed_wins else 0.0,
+            "win_rate": float(np.mean(completed_wins[-100:]))
+            if completed_wins
+            else 0.0,
             "lifetime_win_rate": float(global_wins / max(1, global_episodes)),
-            "mean_reward": float(np.mean(completed_episode_returns[-100:])) if completed_episode_returns else 0.0,
-            "avg_episode_steps": float(np.mean(completed_episode_steps[-100:])) if completed_episode_steps else 0.0,
-            "max_stage_steps": int(max_stage_steps) if "max_stage_steps" in locals() else 150,
-            "avg_alarm": float(np.mean(completed_episode_alarms[-100:])) if completed_episode_alarms else 0.0,
-            "scout_interact_rate": float(np.mean(completed_scout_interact[-100:])) if completed_scout_interact else 0.0,
-            "scout_avg_pois_tagged": float(np.mean(completed_scout_pois[-100:])) if completed_scout_pois else 0.0,
-            "hacker_hack_rate": float(np.mean(completed_hacker_hack[-100:])) if completed_hacker_hack else 0.0,
-            "muscle_neutralize_rate": float(np.mean(completed_muscle_neutralize[-100:])) if completed_muscle_neutralize else 0.0,
-            "muscle_avg_guards_neutralized": float(np.mean(completed_muscle_guards[-100:])) if completed_muscle_guards else 0.0,
-            "total_stage_guards": int(total_stage_guards) if "total_stage_guards" in locals() else 0,
-            "extractor_loot_rate": float(np.mean(completed_extractor_loot[-100:])) if completed_extractor_loot else 0.0,
-            "avg_agents_at_extract": float(np.mean(completed_agents_at_extract[-100:])) if completed_agents_at_extract else 0.0,
+            "mean_reward": float(np.mean(completed_episode_returns[-100:]))
+            if completed_episode_returns
+            else 0.0,
+            "avg_episode_steps": float(np.mean(completed_episode_steps[-100:]))
+            if completed_episode_steps
+            else 0.0,
+            "max_stage_steps": int(max_stage_steps)
+            if "max_stage_steps" in locals()
+            else 150,
+            "avg_alarm": float(np.mean(completed_episode_alarms[-100:]))
+            if completed_episode_alarms
+            else 0.0,
+            "scout_interact_rate": float(np.mean(completed_scout_interact[-100:]))
+            if completed_scout_interact
+            else 0.0,
+            "scout_avg_pois_tagged": float(np.mean(completed_scout_pois[-100:]))
+            if completed_scout_pois
+            else 0.0,
+            "hacker_hack_rate": float(np.mean(completed_hacker_hack[-100:]))
+            if completed_hacker_hack
+            else 0.0,
+            "muscle_neutralize_rate": float(np.mean(completed_muscle_neutralize[-100:]))
+            if completed_muscle_neutralize
+            else 0.0,
+            "muscle_avg_guards_neutralized": float(
+                np.mean(completed_muscle_guards[-100:])
+            )
+            if completed_muscle_guards
+            else 0.0,
+            "total_stage_guards": int(total_stage_guards)
+            if "total_stage_guards" in locals()
+            else 0,
+            "extractor_loot_rate": float(np.mean(completed_extractor_loot[-100:]))
+            if completed_extractor_loot
+            else 0.0,
+            "avg_agents_at_extract": float(np.mean(completed_agents_at_extract[-100:]))
+            if completed_agents_at_extract
+            else 0.0,
         }
         with open(os.path.join(save_ckpt_dir, "results.json"), "w") as jf:
             json.dump(results, jf, indent=4)

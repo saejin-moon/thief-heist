@@ -11,13 +11,17 @@ def get_gpu_temperature():
     """Returns the maximum GPU temperature in Celsius, or None if unavailable."""
     try:
         gpu_out = subprocess.check_output(
-            ["nvidia-smi", "--query-gpu=temperature.gpu", "--format=csv,noheader,nounits"],
+            [
+                "nvidia-smi",
+                "--query-gpu=temperature.gpu",
+                "--format=csv,noheader,nounits",
+            ],
             encoding="utf-8",
             timeout=2.0,
         )
         temps = [float(x.strip()) for x in gpu_out.strip().split("\n") if x.strip()]
         return max(temps) if temps else None
-    except (subprocess.SubprocessError, OSError, ValueError):
+    except subprocess.SubprocessError, OSError, ValueError:
         return None
 
 
@@ -29,7 +33,7 @@ def get_cpu_temperature():
         try:
             with open(p) as f:
                 temps.append(float(f.read().strip()) / 1000.0)
-        except (OSError, ValueError):
+        except OSError, ValueError:
             continue
 
     # 2. Check /sys/class/thermal
@@ -37,7 +41,7 @@ def get_cpu_temperature():
         try:
             with open(p) as f:
                 temps.append(float(f.read().strip()) / 1000.0)
-        except (OSError, ValueError):
+        except OSError, ValueError:
             continue
 
     return max(temps) if temps else None

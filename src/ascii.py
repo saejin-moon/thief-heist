@@ -103,9 +103,15 @@ def load_model(algo: str, state_dim: int, checkpoint_path: str, device: str = "c
     if checkpoint_path and os.path.exists(checkpoint_path):
         try:
             ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
-            state_dict = ckpt["model_state"] if (isinstance(ckpt, dict) and "model_state" in ckpt) else ckpt
+            state_dict = (
+                ckpt["model_state"]
+                if (isinstance(ckpt, dict) and "model_state" in ckpt)
+                else ckpt
+            )
             if algo == "ecoop":
-                expert_indices = {int(k.split(".")[1]) for k in state_dict if k.startswith("experts.")}
+                expert_indices = {
+                    int(k.split(".")[1]) for k in state_dict if k.startswith("experts.")
+                }
                 needed = max(expert_indices) + 1 if expert_indices else 1
                 while len(agent.experts) < needed:
                     agent.add_expert()
@@ -114,9 +120,13 @@ def load_model(algo: str, state_dim: int, checkpoint_path: str, device: str = "c
             agent.load_state_dict(state_dict)
             print(f"{GREEN}[✓] Loaded model weights from: {checkpoint_path}{RESET}")
         except Exception as e:  # noqa: BLE001
-            print(f"{YELLOW}[!] Failed to load checkpoint ({e}). Using initialized policy.{RESET}")
+            print(
+                f"{YELLOW}[!] Failed to load checkpoint ({e}). Using initialized policy.{RESET}"
+            )
     else:
-        print(f"{YELLOW}[!] No checkpoint found at '{checkpoint_path}'. Using uninitialized policy.{RESET}")
+        print(
+            f"{YELLOW}[!] No checkpoint found at '{checkpoint_path}'. Using uninitialized policy.{RESET}"
+        )
 
     agent.eval()
     return agent
@@ -158,7 +168,9 @@ def render_ascii_frame(
     sys.stdout.write("\033[H\033[J")
 
     # Header
-    print(f"{BOLD}{BRIGHT_BLUE}╔════════════════════════════════════════════════════════════════════╗{RESET}")
+    print(
+        f"{BOLD}{BRIGHT_BLUE}╔════════════════════════════════════════════════════════════════════╗{RESET}"
+    )
     print(
         f"{BOLD}{BRIGHT_BLUE}║ {BRIGHT_WHITE}HEIST DEBUGGER{BRIGHT_BLUE} │ Algo: {BRIGHT_CYAN}{algo.upper():<7}{BRIGHT_BLUE} │ Stage: {BRIGHT_YELLOW}{stage} ({h}x{w}){BRIGHT_BLUE} │ Step: {BRIGHT_WHITE}{step_num:03d}/{env.config.get('max_steps', 100):<3d}{BRIGHT_BLUE} ║{RESET}"
     )
@@ -167,14 +179,28 @@ def render_ascii_frame(
     )
 
     # Objectives Status
-    term_status = f"{BRIGHT_GREEN}[✓] Hacked{RESET}" if env.terminal_disabled else f"{GRAY}[ ] Locked (Progress: {env.hack_progress}/3){RESET}"
-    loot_status = f"{BRIGHT_GREEN}[✓] Secured{RESET}" if env.loot_acquired else f"{GRAY}[ ] In Vault{RESET}"
-    ext_status = f"{BRIGHT_GREEN}[✓] Triggered ({env.extraction_countdown}s){RESET}" if env.extraction_triggered else f"{GRAY}[ ] Inactive{RESET}"
+    term_status = (
+        f"{BRIGHT_GREEN}[✓] Hacked{RESET}"
+        if env.terminal_disabled
+        else f"{GRAY}[ ] Locked (Progress: {env.hack_progress}/3){RESET}"
+    )
+    loot_status = (
+        f"{BRIGHT_GREEN}[✓] Secured{RESET}"
+        if env.loot_acquired
+        else f"{GRAY}[ ] In Vault{RESET}"
+    )
+    ext_status = (
+        f"{BRIGHT_GREEN}[✓] Triggered ({env.extraction_countdown}s){RESET}"
+        if env.extraction_triggered
+        else f"{GRAY}[ ] Inactive{RESET}"
+    )
 
     print(
         f"{BOLD}{BRIGHT_BLUE}║ {WHITE}Terminal: {term_status}  │ Loot: {loot_status}  │ Escape: {ext_status} {BRIGHT_BLUE}║{RESET}"
     )
-    print(f"{BOLD}{BRIGHT_BLUE}╠════════════════════════════════════════════════════════════════════╣{RESET}")
+    print(
+        f"{BOLD}{BRIGHT_BLUE}╠════════════════════════════════════════════════════════════════════╣{RESET}"
+    )
 
     # Build character grid
     char_grid = []
@@ -191,10 +217,18 @@ def render_ascii_frame(
             if tile == WALL:
                 row.append(f"{BLUE}█{RESET}")
             elif tile == TERMINAL:
-                glyph = f"{DIM}T{RESET}" if env.terminal_disabled else f"{BRIGHT_BLUE}{BOLD}T{RESET}"
+                glyph = (
+                    f"{DIM}T{RESET}"
+                    if env.terminal_disabled
+                    else f"{BRIGHT_BLUE}{BOLD}T{RESET}"
+                )
                 row.append(glyph)
             elif tile == LOOT:
-                glyph = f"{DIM}${RESET}" if env.loot_acquired else f"{BRIGHT_YELLOW}{BOLD}${RESET}"
+                glyph = (
+                    f"{DIM}${RESET}"
+                    if env.loot_acquired
+                    else f"{BRIGHT_YELLOW}{BOLD}${RESET}"
+                )
                 row.append(glyph)
             elif tile == EXTRACT:
                 row.append(f"{BRIGHT_GREEN}{BOLD}X{RESET}")
@@ -225,7 +259,9 @@ def render_ascii_frame(
     for row in char_grid:
         print("  " + "".join(row))
 
-    print(f"{BOLD}{BRIGHT_BLUE}╠════════════════════════════════════════════════════════════════════╣{RESET}")
+    print(
+        f"{BOLD}{BRIGHT_BLUE}╠════════════════════════════════════════════════════════════════════╣{RESET}"
+    )
 
     # Agent Action Breakdown
     for agent in AGENTS:
@@ -238,8 +274,12 @@ def render_ascii_frame(
             f"  {color}{BOLD}{agent.capitalize():<9}{RESET} pos: {pos!s:<8} action: {BRIGHT_WHITE}{act_name:<9}{RESET} reward: {rew:+6.3f}"
         )
 
-    print(f"{BOLD}{BRIGHT_BLUE}╚════════════════════════════════════════════════════════════════════╝{RESET}")
-    print(f"  {WHITE}Total Episode Return (Per-Agent Avg): {BOLD}{BRIGHT_GREEN if total_reward >= 0 else BRIGHT_RED}{total_reward:+.3f}{RESET}")
+    print(
+        f"{BOLD}{BRIGHT_BLUE}╚════════════════════════════════════════════════════════════════════╝{RESET}"
+    )
+    print(
+        f"  {WHITE}Total Episode Return (Per-Agent Avg): {BOLD}{BRIGHT_GREEN if total_reward >= 0 else BRIGHT_RED}{total_reward:+.3f}{RESET}"
+    )
     sys.stdout.flush()
 
 
@@ -284,53 +324,100 @@ def run_playback(
         with torch.no_grad():
             if algo == "mappo":
                 for a in AGENTS:
-                    o = torch.tensor(obs[a]["observation"], dtype=torch.float32).unsqueeze(0)
-                    r = torch.tensor(obs[a]["role_id"], dtype=torch.float32).unsqueeze(0)
-                    m = torch.tensor(obs[a]["action_mask"], dtype=torch.float32).unsqueeze(0)
+                    o = torch.tensor(
+                        obs[a]["observation"], dtype=torch.float32
+                    ).unsqueeze(0)
+                    r = torch.tensor(obs[a]["role_id"], dtype=torch.float32).unsqueeze(
+                        0
+                    )
+                    m = torch.tensor(
+                        obs[a]["action_mask"], dtype=torch.float32
+                    ).unsqueeze(0)
                     act, _, _, _ = agent_model.get_action_and_value(o, r, m, state_t)
                     actions[a] = int(act.item())
             elif algo == "coop":
                 for a in AGENTS:
-                    o = torch.tensor(obs[a]["observation"], dtype=torch.float32).unsqueeze(0)
-                    r = torch.tensor(obs[a]["role_id"], dtype=torch.float32).unsqueeze(0)
-                    m = torch.tensor(obs[a]["action_mask"], dtype=torch.float32).unsqueeze(0)
+                    o = torch.tensor(
+                        obs[a]["observation"], dtype=torch.float32
+                    ).unsqueeze(0)
+                    r = torch.tensor(obs[a]["role_id"], dtype=torch.float32).unsqueeze(
+                        0
+                    )
+                    m = torch.tensor(
+                        obs[a]["action_mask"], dtype=torch.float32
+                    ).unsqueeze(0)
                     act, _, _, _, _ = agent_model.get_action_and_value(o, r, m, state_t)
                     actions[a] = int(act.item())
             elif algo == "ecoop":
                 for a in AGENTS:
-                    o = torch.tensor(obs[a]["observation"], dtype=torch.float32).unsqueeze(0)
-                    r = torch.tensor(obs[a]["role_id"], dtype=torch.float32).unsqueeze(0)
-                    m = torch.tensor(obs[a]["action_mask"], dtype=torch.float32).unsqueeze(0)
+                    o = torch.tensor(
+                        obs[a]["observation"], dtype=torch.float32
+                    ).unsqueeze(0)
+                    r = torch.tensor(obs[a]["role_id"], dtype=torch.float32).unsqueeze(
+                        0
+                    )
+                    m = torch.tensor(
+                        obs[a]["action_mask"], dtype=torch.float32
+                    ).unsqueeze(0)
                     act, _, _, _, _ = agent_model.get_action_and_value(
-                        o, r, m, state_t, active_experts=len(agent_model.experts), deterministic=True
+                        o,
+                        r,
+                        m,
+                        state_t,
+                        active_experts=len(agent_model.experts),
+                        deterministic=True,
                     )
                     actions[a] = int(act.item())
             elif algo == "hmappo":
                 if (step_num - 1) % MACRO_STEP == 0:
                     for a in AGENTS:
-                        r = torch.tensor(obs[a]["role_id"], dtype=torch.float32).unsqueeze(0)
-                        m_act, _, _, _ = agent_model.get_manager_action_and_value(state_t, r)
+                        r = torch.tensor(
+                            obs[a]["role_id"], dtype=torch.float32
+                        ).unsqueeze(0)
+                        m_act, _, _, _ = agent_model.get_manager_action_and_value(
+                            state_t, r
+                        )
                         current_goals[a] = m_act.squeeze(0)
 
                 for a in AGENTS:
-                    o = torch.tensor(obs[a]["observation"], dtype=torch.float32).unsqueeze(0)
-                    r = torch.tensor(obs[a]["role_id"], dtype=torch.float32).unsqueeze(0)
-                    m = torch.tensor(obs[a]["action_mask"], dtype=torch.float32).unsqueeze(0)
+                    o = torch.tensor(
+                        obs[a]["observation"], dtype=torch.float32
+                    ).unsqueeze(0)
+                    r = torch.tensor(obs[a]["role_id"], dtype=torch.float32).unsqueeze(
+                        0
+                    )
+                    m = torch.tensor(
+                        obs[a]["action_mask"], dtype=torch.float32
+                    ).unsqueeze(0)
                     g = current_goals[a].unsqueeze(0)
-                    act, _, _, _ = agent_model.get_worker_action_and_value(o, r, m, g, state_t)
+                    act, _, _, _ = agent_model.get_worker_action_and_value(
+                        o, r, m, g, state_t
+                    )
                     actions[a] = int(act.item())
             elif algo == "marc":
                 for a in AGENTS:
-                    o = torch.tensor(obs[a]["observation"], dtype=torch.float32).unsqueeze(0)
-                    r = torch.tensor(obs[a]["role_id"], dtype=torch.float32).unsqueeze(0)
-                    m = torch.tensor(obs[a]["action_mask"], dtype=torch.float32).unsqueeze(0)
+                    o = torch.tensor(
+                        obs[a]["observation"], dtype=torch.float32
+                    ).unsqueeze(0)
+                    r = torch.tensor(obs[a]["role_id"], dtype=torch.float32).unsqueeze(
+                        0
+                    )
+                    m = torch.tensor(
+                        obs[a]["action_mask"], dtype=torch.float32
+                    ).unsqueeze(0)
                     act, _, _, _ = agent_model.get_action_and_value(o, r, m, state_t)
                     actions[a] = int(act.item())
             elif algo == "coma":
                 for a in AGENTS:
-                    o = torch.tensor(obs[a]["observation"], dtype=torch.float32).unsqueeze(0)
-                    r = torch.tensor(obs[a]["role_id"], dtype=torch.float32).unsqueeze(0)
-                    m = torch.tensor(obs[a]["action_mask"], dtype=torch.float32).unsqueeze(0)
+                    o = torch.tensor(
+                        obs[a]["observation"], dtype=torch.float32
+                    ).unsqueeze(0)
+                    r = torch.tensor(obs[a]["role_id"], dtype=torch.float32).unsqueeze(
+                        0
+                    )
+                    m = torch.tensor(
+                        obs[a]["action_mask"], dtype=torch.float32
+                    ).unsqueeze(0)
                     act, _, _, _ = agent_model.get_action(o, r, m)
                     actions[a] = int(act.item())
 
@@ -370,14 +457,20 @@ def run_playback(
             )
             is_win = infos.get("scout", {}).get("win", False)
             if is_win:
-                print(f"\n{BOLD}{BRIGHT_GREEN}★★★ HEIST SUCCESSFUL! The team escaped with the loot! ★★★{RESET}\n")
+                print(
+                    f"\n{BOLD}{BRIGHT_GREEN}★★★ HEIST SUCCESSFUL! The team escaped with the loot! ★★★{RESET}\n"
+                )
             else:
-                print(f"\n{BOLD}{BRIGHT_RED}✘ HEIST FAILED! (Caught, timed out, or max alarm reached) ✘{RESET}\n")
+                print(
+                    f"\n{BOLD}{BRIGHT_RED}✘ HEIST FAILED! (Caught, timed out, or max alarm reached) ✘{RESET}\n"
+                )
             break
 
 
 def main():
-    parser = argparse.ArgumentParser(description="HEIST ASCII Terminal Visualizer & Debugger")
+    parser = argparse.ArgumentParser(
+        description="HEIST ASCII Terminal Visualizer & Debugger"
+    )
     parser.add_argument(
         "--algo",
         type=str,

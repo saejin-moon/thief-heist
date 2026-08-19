@@ -2,7 +2,7 @@ import os
 import sys
 import unittest
 
-sys.path.insert(0, os.path.abspath('src'))
+sys.path.insert(0, os.path.abspath("src"))
 
 from constants import ACTION_SPACE_SIZE, AGENTS, INTERACT
 from env import HeistEnv, manhattan
@@ -16,7 +16,7 @@ class TestHeistEnv(unittest.TestCase):
             "camera_count": 1,
             "door_count": 1,
             "max_steps": 50,
-            "spawn_mode": "role"
+            "spawn_mode": "role",
         }
         self.env = HeistEnv(self.config)
 

@@ -183,12 +183,17 @@ MAX_CPU_TEMP = 85.0
 ECOOP_EVOLUTION_INTERVAL = 125
 ECOOP_GRACE_UPDATES = 15
 ECOOP_RAMP_UPDATES = 15
-ECOOP_CULL_WINDOW_UPDATES = 20  # Consecutive 0% usage updates before an expert goes extinct
-ECOOP_MUTATION_NOISE = 0.03     # Calibrated micro-exploration along flat Fisher manifolds
+ECOOP_CULL_WINDOW_UPDATES = (
+    20  # Consecutive 0% usage updates before an expert goes extinct
+)
+ECOOP_MUTATION_NOISE = 0.03  # Calibrated micro-exploration along flat Fisher manifolds
 ECOOP_CROSSOVER_DAMPING = 1e-4
-ECOOP_MUTANT_ENVS = 1          # Number of dedicated exploration envs during burn-in grace period
-ECOOP_HYSTERESIS_EPSILON = 0.10  # Decisive threshold to enforce temporal policy coherence
+ECOOP_MUTANT_ENVS = (
+    1  # Number of dedicated exploration envs during burn-in grace period
+)
+ECOOP_HYSTERESIS_EPSILON = (
+    0.10  # Decisive threshold to enforce temporal policy coherence
+)
 
 # MAHIRO / H-MAPPO Specific
 MAHIRO_INTRINSIC_REWARD_COEF = 0.015
-

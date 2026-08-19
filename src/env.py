@@ -96,7 +96,9 @@ class HeistEnv(ParallelEnv):
         self.terminal_disabled = False
         self.loot_acquired = False
         self.extraction_triggered = False
-        self.extraction_countdown = int(self.config.get("max_steps", 300) * EXTRACTION_COUNTDOWN_RATIO)
+        self.extraction_countdown = int(
+            self.config.get("max_steps", 300) * EXTRACTION_COUNTDOWN_RATIO
+        )
         self.hack_progress = 0
         self.tagged_pois = set()
         self._prev_extract_dist = {}
@@ -120,7 +122,9 @@ class HeistEnv(ParallelEnv):
         self.room_rects = map_data.get("room_rects", [])
 
         # 1. Spawn agents clustered in a dedicated entry room
-        empty_tiles = [tuple(int(x) for x in c) for c in np.argwhere(self.grid == EMPTY)]
+        empty_tiles = [
+            tuple(int(x) for x in c) for c in np.argwhere(self.grid == EMPTY)
+        ]
         self.rng.shuffle(empty_tiles)
         used = set()
         self.agent_positions = self._spawn_agents(used, empty_tiles)
@@ -136,8 +140,7 @@ class HeistEnv(ParallelEnv):
                 p
                 for p in guard_candidates
                 if all(
-                    manhattan(p, apos) >= dist
-                    for apos in self.agent_positions.values()
+                    manhattan(p, apos) >= dist for apos in self.agent_positions.values()
                 )
             ]
             if len(filtered) >= self.config["guard_count"]:
@@ -177,9 +180,7 @@ class HeistEnv(ParallelEnv):
             # 1. Prefer a room with no static POIs or cameras
             for rr, rc, rh, rw in shuffled_rooms:
                 room_coords = {
-                    (r, c)
-                    for r in range(rr, rr + rh)
-                    for c in range(rc, rc + rw)
+                    (r, c) for r in range(rr, rr + rh) for c in range(rc, rc + rw)
                 }
                 non_empty = [
                     self.terminal_pos,
@@ -367,15 +368,15 @@ class HeistEnv(ParallelEnv):
                 + self.camera_positions
                 + self.door_positions
             ):
-                if p not in self.tagged_pois and manhattan(pos, p) <= SCOUT_TAG_DISTANCE:
+                if (
+                    p not in self.tagged_pois
+                    and manhattan(pos, p) <= SCOUT_TAG_DISTANCE
+                ):
                     self.tagged_pois.add(p)
                     rewards["scout"] += REWARD_TAG
                     return
         elif agent == "hacker":
-            if (
-                not self.terminal_disabled
-                and manhattan(pos, self.terminal_pos) <= 1
-            ):
+            if not self.terminal_disabled and manhattan(pos, self.terminal_pos) <= 1:
                 self.hack_progress += 1
                 self._add_alarm(ALARM_HACK_TURN, rewards)
                 if self.hack_progress >= HACK_TURNS:
@@ -532,14 +533,14 @@ class HeistEnv(ParallelEnv):
                 + self.camera_positions
                 + self.door_positions
             ):
-                if p not in self.tagged_pois and manhattan(pos, p) <= SCOUT_TAG_DISTANCE:
+                if (
+                    p not in self.tagged_pois
+                    and manhattan(pos, p) <= SCOUT_TAG_DISTANCE
+                ):
                     mask[INTERACT] = 1
                     break
         elif agent == "hacker":
-            if (
-                not self.terminal_disabled
-                and manhattan(pos, self.terminal_pos) <= 1
-            ):
+            if not self.terminal_disabled and manhattan(pos, self.terminal_pos) <= 1:
                 mask[INTERACT] = 1
             for dr, dc in ACTION_DELTAS.values():
                 if (
@@ -632,7 +633,7 @@ class HeistEnv(ParallelEnv):
         max_h, max_w = MAP_SIZE
         grid_len = max_h * max_w
         padded_grid = np.full((max_h, max_w), WALL, dtype=np.int32)
-        padded_grid[:self.map_h, :self.map_w] = self.grid
+        padded_grid[: self.map_h, : self.map_w] = self.grid
         self._state_buffer[idx : idx + grid_len] = padded_grid.ravel()
         idx += grid_len
         for a in self.possible_agents:

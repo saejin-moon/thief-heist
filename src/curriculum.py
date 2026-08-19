@@ -45,11 +45,15 @@ def run_curriculum(algo_name, stages_to_run=None):
         prev_ckpt = os.path.join(base_dir, f"stage_{first_stage - 1}", "model.pt")
         if os.path.exists(prev_ckpt):
             load_ckpt_path = prev_ckpt
-            print(f"Found preceding checkpoint for Stage {first_stage} at {load_ckpt_path}")
+            print(
+                f"Found preceding checkpoint for Stage {first_stage} at {load_ckpt_path}"
+            )
 
     for stage_idx in stages_to_run:
         if stage_idx < 0 or stage_idx >= len(CURRICULUM_STAGES):
-            print(f"Warning: Stage {stage_idx} out of bounds (0-{len(CURRICULUM_STAGES) - 1}). Skipping.")
+            print(
+                f"Warning: Stage {stage_idx} out of bounds (0-{len(CURRICULUM_STAGES) - 1}). Skipping."
+            )
             continue
 
         stage_config = CURRICULUM_STAGES[stage_idx]
@@ -105,7 +109,9 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    selected_stages = [args.stage] if args.stage is not None else parse_stages(args.stages)
+    selected_stages = (
+        [args.stage] if args.stage is not None else parse_stages(args.stages)
+    )
 
     if args.algo == "all":
         for algo in ["mappo", "coop", "ecoop", "hmappo", "marc", "coma"]:
