@@ -625,7 +625,9 @@ def train(
                         if p in optimizer.state:
                             del optimizer.state[p]
                 agent.prune_experts(survivors)
-                optimizer.param_groups = [{"params": expert.parameters(), "lr": LR} for expert in agent.experts]
+                optimizer.param_groups.clear()
+                for exp in agent.experts:
+                    optimizer.add_param_group({"params": exp.parameters(), "lr": LR})
                 env_previous_expert = None
 
                 if current_grace_expert is not None:
