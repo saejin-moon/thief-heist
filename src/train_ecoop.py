@@ -650,11 +650,11 @@ def train(
 
         # Update running value stats for Relative Normalized Bidding ONCE per update across full batch
         all_experts_flat = torch.stack([b_experts[a] for a in AGENTS]).view(-1)
-        all_rewards_flat = torch.cat([b_rewards[a].view(-1) for a in AGENTS])
+        all_returns_flat = torch.cat([b_returns[a].view(-1) for a in AGENTS])
         for k in range(active_experts):
             mask_k = (all_experts_flat == k)
             if mask_k.any():
-                agent.experts[k].update_val_stats(all_rewards_flat[mask_k])
+                agent.experts[k].update_val_stats(all_returns_flat[mask_k])
 
         # --- EVOLUTIONARY CROSSOVER / FIM MUTATION & ACTIVE PRUNING ---
         min_updates_remaining = round(
@@ -689,7 +689,7 @@ def train(
                         sample_states = torch.cat([b_states.flatten(0, 1) for _ in AGENTS], dim=0)
                         x_critic_eval = torch.cat([sample_states, sample_roles], dim=1)
                         mean_v = agent.experts[k].critic(x_critic_eval).mean().item()
-                    expert_mean_vals[k] = mean_v
+                expert_mean_vals[k] = mean_v
                 if mean_v > best_val:
                     best_val = mean_v
                     best_expert = k
