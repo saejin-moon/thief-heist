@@ -13,6 +13,7 @@ from constants import (
     AGENTS,
     ALPHA_ALARM,
     CLIP_COEF,
+    CURRICULUM_STAGES,
     ENT_COEF,
     GAE_LAMBDA,
     GAMMA,
@@ -88,7 +89,7 @@ def train(
         os.makedirs(log_dir, exist_ok=True)
         file_logger = logging.getLogger(f"file_{algo_name}_{stage_idx}")
         file_logger.setLevel(logging.INFO)
-        file_handler = logging.FileHandler(os.path.join(log_dir, "train.log"))
+        file_handler = logging.FileHandler(os.path.join(log_dir, "train.log"), mode="w")
         file_handler.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
         file_logger.handlers = [file_handler]
         file_logger.propagate = False
@@ -99,14 +100,7 @@ def train(
         file_logger.info(msg)
 
     if env_config is None:
-        env_config = {
-            "map_size": (11, 11),
-            "guard_count": 0,
-            "camera_count": 0,
-            "door_count": 0,
-            "max_steps": 100,
-            "spawn_mode": "role",
-        }
+        env_config = dict(CURRICULUM_STAGES[stage_idx])
     vec_env = VectorEnv(NUM_ENVS, config=env_config)
     state_dim = vec_env.state_dim
 
@@ -128,12 +122,27 @@ def train(
     current_env_returns = np.zeros(NUM_ENVS)
     completed_episode_returns = []
     completed_wins = []
+    completed_episode_steps = []
+    completed_episode_alarms = []
     completed_scout_interact = []
     completed_scout_pois = []
     completed_hacker_hack = []
     completed_muscle_neutralize = []
+    completed_muscle_guards = []
     completed_extractor_loot = []
     completed_agents_at_extract = []
+
+    interval_wins = []
+    interval_episode_returns = []
+    interval_episode_steps = []
+    interval_episode_alarms = []
+    interval_scout_interact = []
+    interval_scout_pois = []
+    interval_hacker_hack = []
+    interval_muscle_neutralize = []
+    interval_muscle_guards = []
+    interval_extractor_loot = []
+    interval_agents_at_extract = []
 
     for update in range(1, num_updates + 1):
         check_thermal_guard()
@@ -222,26 +231,39 @@ def train(
                         global_wins += 1
                     completed_wins.append(float(is_win))
                     completed_episode_returns.append(float(current_env_returns[e]))
+                    interval_wins.append(float(is_win))
+                    interval_episode_returns.append(float(current_env_returns[e]))
                     current_env_returns[e] = 0.0
 
-                    completed_scout_interact.append(
-                        float(scout_info.get("scout_interact_success", False))
-                    )
-                    completed_scout_pois.append(
-                        float(scout_info.get("scout_pois_tagged", 0))
-                    )
-                    completed_hacker_hack.append(
-                        float(scout_info.get("hacker_hack_success", False))
-                    )
-                    completed_muscle_neutralize.append(
-                        float(scout_info.get("muscle_neutralize_success", False))
-                    )
-                    completed_extractor_loot.append(
-                        float(scout_info.get("extractor_loot_success", False))
-                    )
-                    completed_agents_at_extract.append(
-                        float(scout_info.get("agents_at_extract", 0))
-                    )
+                    interact_succ = float(scout_info.get("scout_interact_success", False))
+                    pois_tagged = float(scout_info.get("scout_pois_tagged", 0))
+                    hack_succ = float(scout_info.get("hacker_hack_success", False))
+                    neutralize_succ = float(scout_info.get("muscle_neutralize_success", False))
+                    guards_neutralized = float(scout_info.get("muscle_guards_neutralized", 0))
+                    loot_succ = float(scout_info.get("extractor_loot_success", False))
+                    agents_extract = float(scout_info.get("agents_at_extract", 0))
+                    ep_steps = float(scout_info.get("steps", 0))
+                    ep_alarm = float(scout_info.get("alarm", 0.0))
+
+                    completed_scout_interact.append(interact_succ)
+                    completed_scout_pois.append(pois_tagged)
+                    completed_hacker_hack.append(hack_succ)
+                    completed_muscle_neutralize.append(neutralize_succ)
+                    completed_muscle_guards.append(guards_neutralized)
+                    completed_extractor_loot.append(loot_succ)
+                    completed_agents_at_extract.append(agents_extract)
+                    completed_episode_steps.append(ep_steps)
+                    completed_episode_alarms.append(ep_alarm)
+
+                    interval_scout_interact.append(interact_succ)
+                    interval_scout_pois.append(pois_tagged)
+                    interval_hacker_hack.append(hack_succ)
+                    interval_muscle_neutralize.append(neutralize_succ)
+                    interval_muscle_guards.append(guards_neutralized)
+                    interval_extractor_loot.append(loot_succ)
+                    interval_agents_at_extract.append(agents_extract)
+                    interval_episode_steps.append(ep_steps)
+                    interval_episode_alarms.append(ep_alarm)
 
             # The team unlocked an affordance if an agent interacted and the mask volume increased.
             mask_new = next_obs_new["_stacked"]["action_mask"]
@@ -358,54 +380,71 @@ def train(
                 optimizer.step()
 
         if update % 5 == 0:
-            avg_reward = sum(b_rewards[a].mean().item() for a in AGENTS) / N_AGENTS
             win_rate = (
-                float(np.mean(completed_wins[-100:])) if completed_wins else 0.0
+                float(np.mean(completed_wins[-25:])) if completed_wins else 0.0
             )
             mean_episodic_reward = (
-                float(np.mean(completed_episode_returns[-100:]))
+                float(np.mean(completed_episode_returns[-25:]))
                 if completed_episode_returns
                 else 0.0
             )
+            max_stage_steps = env_config.get("max_steps", 150)
+            total_stage_guards = env_config.get("guard_count", 0)
+            avg_steps = (
+                float(np.mean(completed_episode_steps[-25:]))
+                if completed_episode_steps
+                else 0.0
+            )
+            avg_alarm = (
+                float(np.mean(completed_episode_alarms[-25:]))
+                if completed_episode_alarms
+                else 0.0
+            )
+            avg_muscle_guards = (
+                float(np.mean(completed_muscle_guards[-25:]))
+                if completed_muscle_guards
+                else 0.0
+            )
+
             scout_tag_rate = (
-                float(np.mean(completed_scout_interact[-100:]))
+                float(np.mean(completed_scout_interact[-25:]))
                 if completed_scout_interact
                 else 0.0
             )
             scout_avg_pois = (
-                float(np.mean(completed_scout_pois[-100:]))
+                float(np.mean(completed_scout_pois[-25:]))
                 if completed_scout_pois
                 else 0.0
             )
             hacker_hack_rate = (
-                float(np.mean(completed_hacker_hack[-100:]))
+                float(np.mean(completed_hacker_hack[-25:]))
                 if completed_hacker_hack
                 else 0.0
             )
             muscle_neutralize_rate = (
-                float(np.mean(completed_muscle_neutralize[-100:]))
+                float(np.mean(completed_muscle_neutralize[-25:]))
                 if completed_muscle_neutralize
                 else 0.0
             )
             extractor_loot_rate = (
-                float(np.mean(completed_extractor_loot[-100:]))
+                float(np.mean(completed_extractor_loot[-25:]))
                 if completed_extractor_loot
                 else 0.0
             )
             avg_agents_extract = (
-                float(np.mean(completed_agents_at_extract[-100:]))
+                float(np.mean(completed_agents_at_extract[-25:]))
                 if completed_agents_at_extract
                 else 0.0
             )
 
             # Console log (clean & compact)
             console_logger.info(
-                f"Update: {update}/{num_updates} | Win Rate: {win_rate:.2f} | Episodic Return: {mean_episodic_reward:.3f} | Step Reward: {avg_reward:.3f}"
+                f"Update: {update}/{num_updates} | Win Rate: {win_rate:.2f} | Episodic Return: {mean_episodic_reward:.3f} | Steps: {avg_steps:.1f}/{max_stage_steps} | Alarm: {avg_alarm:.1f}/100"
             )
             # Detailed file log
             if file_logger:
                 file_logger.info(
-                    f"Update: {update}/{num_updates} | Win Rate: {win_rate:.2f} | Episodic Return: {mean_episodic_reward:.3f} | Step Reward: {avg_reward:.3f} | Scout Tag Rate: {scout_tag_rate:.2f} (Avg POIs: {scout_avg_pois:.1f}) | Hacker Hack Rate: {hacker_hack_rate:.2f} | Muscle Neutralize Rate: {muscle_neutralize_rate:.2f} | Extractor Loot Rate: {extractor_loot_rate:.2f} | Avg Agents at Extract: {avg_agents_extract:.2f}/4"
+                    f"Update: {update}/{num_updates} | Win Rate: {win_rate:.2f} | Episodic Return: {mean_episodic_reward:.3f} | Steps: {avg_steps:.1f}/{max_stage_steps} | Alarm: {avg_alarm:.1f}/100 | Scout Tag Rate: {scout_tag_rate:.2f} (Avg POIs: {scout_avg_pois:.1f}) | Hacker Hack Rate: {hacker_hack_rate:.2f} | Muscle Neutralize Rate: {muscle_neutralize_rate:.2f} (Avg Guards: {avg_muscle_guards:.1f}/{total_stage_guards}) | Extractor Loot Rate: {extractor_loot_rate:.2f} | Avg Agents at Extract: {avg_agents_extract:.2f}/4"
                 )
 
     # Save checkpoint and results
@@ -415,30 +454,20 @@ def train(
         results = {
             "algo": algo_name,
             "stage": stage_idx,
-            "win_rate": float(win_rate) if "win_rate" in locals() else 0.0,
+            "win_rate": float(np.mean(completed_wins[-100:])) if completed_wins else 0.0,
             "lifetime_win_rate": float(global_wins / max(1, global_episodes)),
-            "mean_reward": float(mean_episodic_reward)
-            if "mean_episodic_reward" in locals()
-            else 0.0,
-            "mean_step_reward": float(avg_reward) if "avg_reward" in locals() else 0.0,
-            "scout_interact_rate": float(scout_tag_rate)
-            if "scout_tag_rate" in locals()
-            else 0.0,
-            "scout_avg_pois_tagged": float(scout_avg_pois)
-            if "scout_avg_pois" in locals()
-            else 0.0,
-            "hacker_hack_rate": float(hacker_hack_rate)
-            if "hacker_hack_rate" in locals()
-            else 0.0,
-            "muscle_neutralize_rate": float(muscle_neutralize_rate)
-            if "muscle_neutralize_rate" in locals()
-            else 0.0,
-            "extractor_loot_rate": float(extractor_loot_rate)
-            if "extractor_loot_rate" in locals()
-            else 0.0,
-            "avg_agents_at_extract": float(avg_agents_extract)
-            if "avg_agents_extract" in locals()
-            else 0.0,
+            "mean_reward": float(np.mean(completed_episode_returns[-100:])) if completed_episode_returns else 0.0,
+            "avg_episode_steps": float(np.mean(completed_episode_steps[-100:])) if completed_episode_steps else 0.0,
+            "max_stage_steps": int(max_stage_steps) if "max_stage_steps" in locals() else 150,
+            "avg_alarm": float(np.mean(completed_episode_alarms[-100:])) if completed_episode_alarms else 0.0,
+            "scout_interact_rate": float(np.mean(completed_scout_interact[-100:])) if completed_scout_interact else 0.0,
+            "scout_avg_pois_tagged": float(np.mean(completed_scout_pois[-100:])) if completed_scout_pois else 0.0,
+            "hacker_hack_rate": float(np.mean(completed_hacker_hack[-100:])) if completed_hacker_hack else 0.0,
+            "muscle_neutralize_rate": float(np.mean(completed_muscle_neutralize[-100:])) if completed_muscle_neutralize else 0.0,
+            "muscle_avg_guards_neutralized": float(np.mean(completed_muscle_guards[-100:])) if completed_muscle_guards else 0.0,
+            "total_stage_guards": int(total_stage_guards) if "total_stage_guards" in locals() else 0,
+            "extractor_loot_rate": float(np.mean(completed_extractor_loot[-100:])) if completed_extractor_loot else 0.0,
+            "avg_agents_at_extract": float(np.mean(completed_agents_at_extract[-100:])) if completed_agents_at_extract else 0.0,
         }
         with open(os.path.join(save_ckpt_dir, "results.json"), "w") as jf:
             json.dump(results, jf, indent=4)

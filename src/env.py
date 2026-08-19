@@ -34,6 +34,7 @@ class HeistEnv(ParallelEnv):
             "camera_count": 3,
             "door_count": 4,
             "max_steps": 300,
+            "alarm_max": ALARM_MAX,
             "spawn_mode": "role",
         }
         if config:
@@ -91,10 +92,11 @@ class HeistEnv(ParallelEnv):
 
         self.current_step = 0
         self.alarm = 0.0
+        self.alarm_max = float(self.config.get("alarm_max", ALARM_MAX))
         self.terminal_disabled = False
         self.loot_acquired = False
         self.extraction_triggered = False
-        self.extraction_countdown = EXTRACTION_COUNTDOWN
+        self.extraction_countdown = int(self.config.get("max_steps", 300) * EXTRACTION_COUNTDOWN_RATIO)
         self.hack_progress = 0
         self.tagged_pois = set()
         self._prev_extract_dist = {}
@@ -274,8 +276,6 @@ class HeistEnv(ParallelEnv):
                 d_cur = manhattan(self.agent_positions[a], self.extract_pos)
                 d_prev = self._prev_extract_dist.get(a, d_cur)
                 rewards[a] += CONVERGE_BONUS * (d_prev - d_cur)
-                if d_cur <= CONVERGE_RADIUS:
-                    rewards[a] += 0.05
                 self._prev_extract_dist[a] = d_cur
 
         # 6. Win / Loss States
@@ -289,7 +289,7 @@ class HeistEnv(ParallelEnv):
                 for a in self.agents
             )
         )
-        lose = self.alarm >= ALARM_MAX
+        lose = self.alarm >= self.alarm_max
 
         if win:
             rewards = {a: REWARD_WIN for a in self.agents}
@@ -308,10 +308,12 @@ class HeistEnv(ParallelEnv):
         episode_metrics = {
             "win": bool(win),
             "alarm": float(self.alarm),
+            "steps": int(self.current_step),
             "scout_pois_tagged": len(self.tagged_pois),
             "scout_interact_success": bool(len(self.tagged_pois) > 0),
             "hacker_hack_success": bool(self.terminal_disabled),
             "muscle_neutralize_success": bool(len(self._rewarded_guards) > 0),
+            "muscle_guards_neutralized": len(self._rewarded_guards),
             "extractor_loot_success": bool(self.loot_acquired),
             "agents_at_extract": agents_at_extract,
         }
@@ -365,14 +367,13 @@ class HeistEnv(ParallelEnv):
                 + self.camera_positions
                 + self.door_positions
             ):
-                if p not in self.tagged_pois and manhattan(pos, p) <= 3:
+                if p not in self.tagged_pois and manhattan(pos, p) <= SCOUT_TAG_DISTANCE:
                     self.tagged_pois.add(p)
                     rewards["scout"] += REWARD_TAG
                     return
         elif agent == "hacker":
             if (
                 not self.terminal_disabled
-                and self.terminal_pos in self.tagged_pois
                 and manhattan(pos, self.terminal_pos) <= 1
             ):
                 self.hack_progress += 1
@@ -381,7 +382,7 @@ class HeistEnv(ParallelEnv):
                     self.terminal_disabled = True
                     rewards["hacker"] += REWARD_TASK
                 else:
-                    rewards["hacker"] += 0.5
+                    rewards["hacker"] += REWARD_HACK_PROGRESS
                 return
             for dr, dc in ACTION_DELTAS.values():
                 nr, nc = pos[0] + dr, pos[1] + dc
@@ -392,7 +393,7 @@ class HeistEnv(ParallelEnv):
                 ):
                     self.grid[nr, nc] = EMPTY
                     self._add_alarm(ALARM_BYPASS, rewards)
-                    rewards["hacker"] += 0.2
+                    rewards["hacker"] += REWARD_BYPASS
                     return
         elif agent == "muscle":
             for gi, gpos in enumerate(self.guard_positions):
@@ -505,8 +506,10 @@ class HeistEnv(ParallelEnv):
         return False
 
     def _add_alarm(self, amount, rewards):
+        scale = min(1.0, 17.0 / max(self.map_h, self.map_w))
+        scaled_amount = amount * scale
         prev = self.alarm
-        self.alarm = min(self.alarm + amount, ALARM_MAX)
+        self.alarm = min(self.alarm + scaled_amount, ALARM_MAX)
         if self.alarm - prev > 0:
             for a in self.agents:
                 rewards[a] -= 0.01 * (self.alarm - prev)
@@ -529,13 +532,12 @@ class HeistEnv(ParallelEnv):
                 + self.camera_positions
                 + self.door_positions
             ):
-                if manhattan(pos, p) <= 1:
+                if p not in self.tagged_pois and manhattan(pos, p) <= SCOUT_TAG_DISTANCE:
                     mask[INTERACT] = 1
                     break
         elif agent == "hacker":
             if (
                 not self.terminal_disabled
-                and self.terminal_pos in self.tagged_pois
                 and manhattan(pos, self.terminal_pos) <= 1
             ):
                 mask[INTERACT] = 1
@@ -586,7 +588,10 @@ class HeistEnv(ParallelEnv):
                 vr - pad : vr + pad + 1, vc - pad : vc + pad + 1
             ]
 
-            # Role-specific waypoint projections
+            # 1. Apply Fog-of-War to terrain and physical entities
+            obs_masked = np.where(explored, obs, FOG)
+
+            # 2. Role-specific HUD waypoint projections (perimeter compass visible through fog)
             target_pois = []
             if agent == "hacker" and not self.terminal_disabled:
                 if self.terminal_pos in self.tagged_pois:
@@ -603,13 +608,13 @@ class HeistEnv(ParallelEnv):
             for poi in target_pois:
                 dr, dc = poi[0] - r, poi[1] - c
                 if abs(dr) > pad or abs(dc) > pad:
-                    obs[
+                    obs_masked[
                         pad + int(np.clip(dr, -pad, pad)),
                         pad + int(np.clip(dc, -pad, pad)),
                     ] = WAYPOINT
 
             obs_dict[agent] = {
-                "observation": np.where(explored, obs, FOG),
+                "observation": obs_masked,
                 "action_mask": self._action_mask(agent),
                 "role_id": ROLE_ONEHOT_ARRAYS[agent],
             }

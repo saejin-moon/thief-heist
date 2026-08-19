@@ -1,13 +1,16 @@
 """
-CO-OP: Confidence-Oriented Option Pool
-Decentralized bottom-up routing across specialized experts via Critic confidence bidding.
+Counterfactual Multi-Agent Policy Gradients (COMA) for HEIST.
+Based on Foerster et al. (AAAI 2018): "Counterfactual Multi-Agent Policy Gradients".
+CleanRL single-file philosophy.
 """
+
 import json
 import logging
 import os
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from torch import nn
 from torch.distributions.categorical import Categorical
 
@@ -15,7 +18,6 @@ from constants import (
     ACTION_SPACE_SIZE,
     AGENTS,
     CLIP_COEF,
-    COOP_NUM_EXPERTS,
     CURRICULUM_STAGES,
     ENT_COEF,
     GAE_LAMBDA,
@@ -32,11 +34,16 @@ from thermal_guard import check_thermal_guard
 from vec_env import VectorEnv
 
 
-class MappoNetwork(nn.Module):
-    """Base Actor-Critic network representing an individual Expert."""
+class ComaNetwork(nn.Module):
+    """
+    COMA Actor-Critic Network.
+    - Decentralized Actor: pi(u^a | obs^a, role^a)
+    - Centralized Counterfactual Critic: Q(s, (., u^{-a}), role^a) -> R^|U|
+    """
 
     def __init__(self, state_dim):
         super().__init__()
+        # Actor sees: 7x7 local view (49) + Role One-Hot (4)
         actor_in_dim = (OBSERVATION_SIZE[0] * OBSERVATION_SIZE[1]) + N_AGENTS
         self.actor = nn.Sequential(
             nn.Linear(actor_in_dim, 64),
@@ -45,88 +52,52 @@ class MappoNetwork(nn.Module):
             nn.Tanh(),
             nn.Linear(64, ACTION_SPACE_SIZE),
         )
+
+        # Critic sees: Global State + (N_AGENTS - 1) other agents' one-hot actions + Role
+        critic_in_dim = state_dim + ((N_AGENTS - 1) * ACTION_SPACE_SIZE) + N_AGENTS
         self.critic = nn.Sequential(
-            nn.Linear(state_dim, 64),
+            nn.Linear(critic_in_dim, 128),
             nn.Tanh(),
-            nn.Linear(64, 64),
+            nn.Linear(128, 128),
             nn.Tanh(),
-            nn.Linear(64, 1),
+            nn.Linear(128, ACTION_SPACE_SIZE),  # Outputs Q-values for all |U| actions
         )
 
-    def get_action_and_value(self, obs, role, mask, state=None, action=None):
+    def get_action(self, obs, role, mask, action=None):
         x_actor = torch.cat([obs.flatten(start_dim=1), role], dim=1)
         logits = self.actor(x_actor)
         masked_logits = logits + ((1.0 - mask) * -1e9)
         probs = Categorical(logits=masked_logits)
-
         if action is None:
             action = probs.sample()
+        return action, probs.log_prob(action), probs.entropy(), probs.probs
 
-        value = self.critic(state).squeeze(-1) if state is not None else None
-        return action, probs.log_prob(action), probs.entropy(), value
+    def get_q_values(self, state, other_actions_onehot, role):
+        x_critic = torch.cat([state, other_actions_onehot, role], dim=1)
+        return self.critic(x_critic)
 
 
-class CoopNetwork(nn.Module):
-    """Pool of experts routed bottom-up via Critic confidence."""
-
-    def __init__(self, state_dim, num_experts=COOP_NUM_EXPERTS):
-        super().__init__()
-        self.experts = nn.ModuleList(
-            [MappoNetwork(state_dim) for _ in range(num_experts)]
-        )
-        self.num_experts = num_experts
-
-    def get_action_and_value(
-        self, obs, role, mask, state, action=None, expert_idx=None
-    ):
-        batch_size = obs.shape[0]
-
-        # 1. Decentralized Bidding / Routing
-        if expert_idx is None:
-            expert_values = []
-            for expert in self.experts:
-                val = expert.critic(state).squeeze(-1)
-                expert_values.append(val)
-
-            expert_values = torch.stack(expert_values, dim=1)  # [Batch, num_experts]
-            chosen_expert = torch.argmax(expert_values, dim=1)  # [Batch]
-        else:
-            chosen_expert = expert_idx
-
-        # 2. Execution by Chosen Expert
-        actions = torch.zeros(batch_size, dtype=torch.long, device=obs.device)
-        logprobs = torch.zeros(batch_size, device=obs.device)
-        entropies = torch.zeros(batch_size, device=obs.device)
-        values = torch.zeros(batch_size, device=obs.device)
-
-        for k, expert in enumerate(self.experts):
-            mask_k = chosen_expert == k
-            if not mask_k.any():
-                continue
-
-            act_k = action[mask_k].long() if action is not None else None
-            a, lp, ent, v = expert.get_action_and_value(
-                obs[mask_k],
-                role[mask_k],
-                mask[mask_k],
-                state[mask_k] if state is not None else None,
-                action=act_k,
-            )
-
-            actions[mask_k] = a.long()
-            logprobs[mask_k] = lp
-            entropies[mask_k] = ent
-            if v is not None:
-                values[mask_k] = v
-
-        return actions, logprobs, entropies, values, chosen_expert
+def _build_other_actions_onehot(actions_dict, device):
+    """
+    Builds the (N_AGENTS - 1) one-hot action representations for each agent.
+    Returns: dict mapping agent name -> tensor of shape [NUM_ENVS, (N_AGENTS - 1) * ACTION_SPACE_SIZE]
+    """
+    other_onehots = {}
+    for i, a in enumerate(AGENTS):
+        others = []
+        for j, other_a in enumerate(AGENTS):
+            if i != j:
+                onehot = F.one_hot(actions_dict[other_a].long(), num_classes=ACTION_SPACE_SIZE).float()
+                others.append(onehot)
+        other_onehots[a] = torch.cat(others, dim=-1).to(device)
+    return other_onehots
 
 
 def train(
-    algo_name="coop",
+    algo_name="coma",
     stage_idx=0,
     env_config=None,
-    total_timesteps=120_000,
+    total_timesteps=1000,
     load_ckpt_path=None,
     save_ckpt_dir=None,
     log_dir=None,
@@ -158,22 +129,12 @@ def train(
     vec_env = VectorEnv(NUM_ENVS, config=env_config)
     state_dim = vec_env.state_dim
 
-    agent = CoopNetwork(state_dim, num_experts=COOP_NUM_EXPERTS).to(device)
+    agent = ComaNetwork(state_dim).to(device)
     optimizer = torch.optim.Adam(agent.parameters(), lr=LR)
 
     if load_ckpt_path and os.path.exists(load_ckpt_path):
-        try:
-            agent.load_state_dict(
-                torch.load(load_ckpt_path, map_location=device, weights_only=True)
-            )
-            print(f"Loaded checkpoint from {load_ckpt_path}")
-            logging.info(  # noqa: LOG015
-                f"Loaded checkpoint from {load_ckpt_path}"
-            )
-        except Exception as e:  # noqa: BLE001
-            print(
-                f"Warning: Could not load full checkpoint ({e}). Training from scratch."
-            )
+        agent.load_state_dict(torch.load(load_ckpt_path, map_location=device))
+        logging.info(f"Loaded checkpoint from {load_ckpt_path}")  # noqa: LOG015
 
     next_obs, next_state = vec_env.reset()
     next_done = torch.zeros(NUM_ENVS).to(device)
@@ -205,10 +166,13 @@ def train(
     interval_muscle_guards = []
     interval_extractor_loot = []
     interval_agents_at_extract = []
-    last_expert_usage = {}
+
+    other_act_dim = (N_AGENTS - 1) * ACTION_SPACE_SIZE
 
     for update in range(1, num_updates + 1):
         check_thermal_guard()
+
+        # --- ROLLOUT BUFFER ---
         b_obs = {
             a: torch.zeros((NUM_STEPS, NUM_ENVS, *OBSERVATION_SIZE)).to(device)
             for a in AGENTS
@@ -222,16 +186,19 @@ def train(
         }
         b_actions = {a: torch.zeros((NUM_STEPS, NUM_ENVS)).to(device) for a in AGENTS}
         b_logprobs = {a: torch.zeros((NUM_STEPS, NUM_ENVS)).to(device) for a in AGENTS}
-        b_rewards = {a: torch.zeros((NUM_STEPS, NUM_ENVS)).to(device) for a in AGENTS}
-        b_values = {a: torch.zeros((NUM_STEPS, NUM_ENVS)).to(device) for a in AGENTS}
-        b_dones = torch.zeros((NUM_STEPS, NUM_ENVS)).to(device)
-        b_states = torch.zeros((NUM_STEPS, NUM_ENVS, state_dim)).to(device)
-        b_experts = {
-            a: torch.zeros((NUM_STEPS, NUM_ENVS), dtype=torch.long).to(device)
+        b_probs = {
+            a: torch.zeros((NUM_STEPS, NUM_ENVS, ACTION_SPACE_SIZE)).to(device)
             for a in AGENTS
         }
+        b_other_actions = {
+            a: torch.zeros((NUM_STEPS, NUM_ENVS, other_act_dim)).to(device)
+            for a in AGENTS
+        }
+        b_rewards = {a: torch.zeros((NUM_STEPS, NUM_ENVS)).to(device) for a in AGENTS}
+        b_q_taken = {a: torch.zeros((NUM_STEPS, NUM_ENVS)).to(device) for a in AGENTS}
+        b_dones = torch.zeros((NUM_STEPS, NUM_ENVS)).to(device)
+        b_states = torch.zeros((NUM_STEPS, NUM_ENVS, state_dim)).to(device)
 
-        # --- ROLLOUT PHASE ---
         for step in range(NUM_STEPS):
             b_states[step] = torch.tensor(next_state, dtype=torch.float32).to(device)
             b_dones[step] = next_done
@@ -249,32 +216,41 @@ def train(
                     stacked["action_mask"], dtype=torch.float32, device=device
                 )
 
-                state_rep = b_states[step].repeat(N_AGENTS, 1)
-                actions, logprobs, _, values, chosen_expert = agent.get_action_and_value(
+                # 1. Sample actions from decentralized actors
+                actions, logprobs, _, probs = agent.get_action(
                     obs_all.flatten(0, 1),
                     role_all.flatten(0, 1),
                     mask_all.flatten(0, 1),
-                    state_rep,
                 )
-
                 actions = actions.view(N_AGENTS, NUM_ENVS)
                 logprobs = logprobs.view(N_AGENTS, NUM_ENVS)
-                values = values.view(N_AGENTS, NUM_ENVS)
-                experts_unflattened = chosen_expert.view(N_AGENTS, NUM_ENVS)
+                probs = probs.view(N_AGENTS, NUM_ENVS, ACTION_SPACE_SIZE)
 
+                step_actions_dict = {}
                 for i, a in enumerate(AGENTS):
-                    b_experts[a][step] = experts_unflattened[i]
                     b_obs[a][step] = obs_all[i]
                     b_role[a][step] = role_all[i]
                     b_mask[a][step] = mask_all[i]
                     b_actions[a][step] = actions[i]
                     b_logprobs[a][step] = logprobs[i]
-                    b_values[a][step] = values[i]
+                    b_probs[a][step] = probs[i]
                     actions_dict[a] = actions[i].cpu().numpy()
+                    step_actions_dict[a] = actions[i]
 
+                # 2. Build other agents' one-hot actions and evaluate Q(s, u)
+                other_onehots = _build_other_actions_onehot(step_actions_dict, device)
+                for a in AGENTS:
+                    b_other_actions[a][step] = other_onehots[a]
+                    q_vals = agent.get_q_values(
+                        b_states[step], other_onehots[a], b_role[a][step]
+                    )
+                    b_q_taken[a][step] = q_vals.gather(
+                        1, b_actions[a][step].long().unsqueeze(1)
+                    ).squeeze(1)
+
+            # Step environment
             next_obs, rewards, terms, truncs, infos = vec_env.step(actions_dict)
 
-            # Accumulate per-agent average return per env
             step_agent_reward = sum(rewards[a] for a in AGENTS) / N_AGENTS
             current_env_returns += step_agent_reward
 
@@ -332,19 +308,9 @@ def train(
                     device
                 )
 
-        # Track expert utilization percentages
-        all_experts_tensor = torch.stack([b_experts[a] for a in AGENTS]).view(-1)
-        total_decisions = max(1, all_experts_tensor.numel())
-        last_expert_usage = {
-            str(k): round(
-                float((all_experts_tensor == k).sum().item()) / total_decisions * 100.0,
-                1,
-            )
-            for k in range(agent.num_experts)
-        }
-
-        # --- GAE (ADVANTAGE) CALCULATION ---
+        # --- COUNTERFACTUAL ADVANTAGE & TD(lambda) CRITIC TARGETS ---
         with torch.no_grad():
+            # Estimate next state Q-values for bootstrap
             stacked_next = next_obs["_stacked"]
             next_obs_all = torch.tensor(
                 stacked_next["observation"], dtype=torch.float32, device=device
@@ -357,37 +323,58 @@ def train(
             )
             next_state_t = torch.tensor(next_state, dtype=torch.float32, device=device)
 
-            _, _, _, next_val, _ = agent.get_action_and_value(
+            next_act, _, _, _ = agent.get_action(
                 next_obs_all.flatten(0, 1),
                 next_role_all.flatten(0, 1),
                 next_mask_all.flatten(0, 1),
-                next_state_t.repeat(N_AGENTS, 1),
             )
-            next_val = next_val.view(N_AGENTS, NUM_ENVS)
+            next_act = next_act.view(N_AGENTS, NUM_ENVS)
+            next_act_dict = {a: next_act[i] for i, a in enumerate(AGENTS)}
+            next_other_onehots = _build_other_actions_onehot(next_act_dict, device)
 
-            b_adv = {a: torch.zeros_like(b_rewards[a]) for a in AGENTS}
+            next_q_taken = {}
             for i, a in enumerate(AGENTS):
+                q_next_vals = agent.get_q_values(
+                    next_state_t, next_other_onehots[a], next_role_all[i]
+                )
+                next_q_taken[a] = q_next_vals.gather(
+                    1, next_act[i].long().unsqueeze(1)
+                ).squeeze(1)
+
+            # TD(lambda) returns and counterfactual advantage calculation
+            b_returns = {a: torch.zeros_like(b_rewards[a]) for a in AGENTS}
+            b_adv = {a: torch.zeros_like(b_rewards[a]) for a in AGENTS}
+
+            for a in AGENTS:
                 lastgaelam = 0
                 for t in reversed(range(NUM_STEPS)):
                     if t == NUM_STEPS - 1:
                         nextnonterminal = 1.0 - next_done
-                        nextvalues = next_val[i]
+                        nextq = next_q_taken[a]
                     else:
                         nextnonterminal = 1.0 - b_dones[t + 1]
-                        nextvalues = b_values[a][t + 1]
+                        nextq = b_q_taken[a][t + 1]
 
+                    # TD-error: delta = r + gamma * Q(s_{t+1}, u_{t+1}) - Q(s_t, u_t)
                     delta = (
                         b_rewards[a][t]
-                        + GAMMA * nextvalues * nextnonterminal
-                        - b_values[a][t]
+                        + GAMMA * nextq * nextnonterminal
+                        - b_q_taken[a][t]
                     )
-                    b_adv[a][t] = lastgaelam = (
+                    lastgaelam = (
                         delta + GAMMA * GAE_LAMBDA * nextnonterminal * lastgaelam
                     )
+                    b_returns[a][t] = lastgaelam + b_q_taken[a][t]
 
-        b_returns = {a: b_adv[a] + b_values[a] for a in AGENTS}
+                    # Counterfactual baseline: b(s, u^{-a}) = sum_{u'} pi(u'|s) * Q(s, (u', u^{-a}))
+                    q_vals_t = agent.get_q_values(
+                        b_states[t], b_other_actions[a][t], b_role[a][t]
+                    )
+                    cf_baseline = (b_probs[a][t] * q_vals_t).sum(dim=-1)
+                    # Counterfactual advantage: A^a(s, u) = Q(s, (u^a, u^{-a})) - b(s, u^{-a})
+                    b_adv[a][t] = b_q_taken[a][t] - cf_baseline
 
-        # --- UPDATE PHASE (PPO) ---
+        # --- UPDATE PHASE (PPO / COMA) ---
         b_states_flat = b_states.reshape(-1, state_dim)
         for _epoch in range(UPDATE_EPOCHS):
             for a in AGENTS:
@@ -396,19 +383,15 @@ def train(
                 mask_flat = b_mask[a].reshape(-1, ACTION_SPACE_SIZE)
                 action_flat = b_actions[a].reshape(-1)
                 logprob_flat = b_logprobs[a].reshape(-1)
+                other_act_flat = b_other_actions[a].reshape(-1, other_act_dim)
                 adv_flat = b_adv[a].reshape(-1)
                 ret_flat = b_returns[a].reshape(-1)
-                experts_flat = b_experts[a].reshape(-1)
 
                 adv_flat = (adv_flat - adv_flat.mean()) / (adv_flat.std() + 1e-8)
 
-                _, newlogprob, entropy, newvalue, _ = agent.get_action_and_value(
-                    obs_flat,
-                    role_flat,
-                    mask_flat,
-                    b_states_flat,
-                    action=action_flat,
-                    expert_idx=experts_flat,
+                # Actor Forward
+                _, newlogprob, entropy, newprobs = agent.get_action(
+                    obs_flat, role_flat, mask_flat, action=action_flat
                 )
 
                 logratio = newlogprob - logprob_flat
@@ -419,7 +402,11 @@ def train(
                 )
                 pg_loss = torch.max(pg_loss1, pg_loss2).mean()
 
-                v_loss = 0.5 * ((newvalue - ret_flat) ** 2).mean()
+                # Critic Forward (Q-value on taken actions)
+                q_vals_all = agent.get_q_values(b_states_flat, other_act_flat, role_flat)
+                q_taken_new = q_vals_all.gather(1, action_flat.long().unsqueeze(1)).squeeze(1)
+
+                v_loss = 0.5 * ((q_taken_new - ret_flat) ** 2).mean()
                 loss = pg_loss - ENT_COEF * entropy.mean() + VF_COEF * v_loss
 
                 optimizer.zero_grad()
@@ -486,10 +473,6 @@ def train(
                 else 0.0
             )
 
-            expert_usage_str = ", ".join(
-                f"E{k}: {v}%" for k, v in last_expert_usage.items()
-            )
-
             # Console log (clean & compact)
             console_logger.info(
                 f"Update: {update}/{num_updates} | Win Rate: {win_rate:.2f} | Episodic Return: {mean_episodic_reward:.3f} | Steps: {avg_steps:.1f}/{max_stage_steps} | Alarm: {avg_alarm:.1f}/100"
@@ -497,7 +480,7 @@ def train(
             # Detailed file log
             if file_logger:
                 file_logger.info(
-                    f"Update: {update}/{num_updates} | Win Rate: {win_rate:.2f} | Episodic Return: {mean_episodic_reward:.3f} | Steps: {avg_steps:.1f}/{max_stage_steps} | Alarm: {avg_alarm:.1f}/100 | Scout Tag Rate: {scout_tag_rate:.2f} (Avg POIs: {scout_avg_pois:.1f}) | Hacker Hack Rate: {hacker_hack_rate:.2f} | Muscle Neutralize Rate: {muscle_neutralize_rate:.2f} (Avg Guards: {avg_muscle_guards:.1f}/{total_stage_guards}) | Extractor Loot Rate: {extractor_loot_rate:.2f} | Avg Agents at Extract: {avg_agents_extract:.2f}/4 | Expert Usage: [{expert_usage_str}]"
+                    f"Update: {update}/{num_updates} | Win Rate: {win_rate:.2f} | Episodic Return: {mean_episodic_reward:.3f} | Steps: {avg_steps:.1f}/{max_stage_steps} | Alarm: {avg_alarm:.1f}/100 | Scout Tag Rate: {scout_tag_rate:.2f} (Avg POIs: {scout_avg_pois:.1f}) | Hacker Hack Rate: {hacker_hack_rate:.2f} | Muscle Neutralize Rate: {muscle_neutralize_rate:.2f} (Avg Guards: {avg_muscle_guards:.1f}/{total_stage_guards}) | Extractor Loot Rate: {extractor_loot_rate:.2f} | Avg Agents at Extract: {avg_agents_extract:.2f}/4"
                 )
 
     # Save checkpoint and results
@@ -507,7 +490,6 @@ def train(
         results = {
             "algo": algo_name,
             "stage": stage_idx,
-            "num_experts": agent.num_experts,
             "win_rate": float(np.mean(completed_wins[-100:])) if completed_wins else 0.0,
             "lifetime_win_rate": float(global_wins / max(1, global_episodes)),
             "mean_reward": float(np.mean(completed_episode_returns[-100:])) if completed_episode_returns else 0.0,
@@ -522,7 +504,6 @@ def train(
             "total_stage_guards": int(total_stage_guards) if "total_stage_guards" in locals() else 0,
             "extractor_loot_rate": float(np.mean(completed_extractor_loot[-100:])) if completed_extractor_loot else 0.0,
             "avg_agents_at_extract": float(np.mean(completed_agents_at_extract[-100:])) if completed_agents_at_extract else 0.0,
-            "expert_usage_pct": last_expert_usage,
         }
         with open(os.path.join(save_ckpt_dir, "results.json"), "w") as jf:
             json.dump(results, jf, indent=4)

@@ -28,6 +28,7 @@ from constants import (
     WALL,
 )
 from env import HeistEnv
+from train_coma import ComaNetwork
 from train_coop import CoopNetwork
 from train_ecoop import EcoopNetwork
 from train_hmappo import HierarchicalNetwork
@@ -94,6 +95,8 @@ def load_model(algo: str, state_dim: int, checkpoint_path: str, device: str = "c
         agent = HierarchicalNetwork(state_dim).to(device)
     elif algo == "marc":
         agent = MarcNetwork(state_dim).to(device)
+    elif algo == "coma":
+        agent = ComaNetwork(state_dim).to(device)
     else:
         raise ValueError(f"Unknown algorithm: {algo}")
 
@@ -286,12 +289,21 @@ def run_playback(
                     m = torch.tensor(obs[a]["action_mask"], dtype=torch.float32).unsqueeze(0)
                     act, _, _, _ = agent_model.get_action_and_value(o, r, m, state_t)
                     actions[a] = int(act.item())
-            elif algo in ("coop", "ecoop"):
+            elif algo == "coop":
                 for a in AGENTS:
                     o = torch.tensor(obs[a]["observation"], dtype=torch.float32).unsqueeze(0)
                     r = torch.tensor(obs[a]["role_id"], dtype=torch.float32).unsqueeze(0)
                     m = torch.tensor(obs[a]["action_mask"], dtype=torch.float32).unsqueeze(0)
                     act, _, _, _, _ = agent_model.get_action_and_value(o, r, m, state_t)
+                    actions[a] = int(act.item())
+            elif algo == "ecoop":
+                for a in AGENTS:
+                    o = torch.tensor(obs[a]["observation"], dtype=torch.float32).unsqueeze(0)
+                    r = torch.tensor(obs[a]["role_id"], dtype=torch.float32).unsqueeze(0)
+                    m = torch.tensor(obs[a]["action_mask"], dtype=torch.float32).unsqueeze(0)
+                    act, _, _, _, _ = agent_model.get_action_and_value(
+                        o, r, m, state_t, active_experts=len(agent_model.experts), deterministic=True
+                    )
                     actions[a] = int(act.item())
             elif algo == "hmappo":
                 if (step_num - 1) % MACRO_STEP == 0:
@@ -313,6 +325,13 @@ def run_playback(
                     r = torch.tensor(obs[a]["role_id"], dtype=torch.float32).unsqueeze(0)
                     m = torch.tensor(obs[a]["action_mask"], dtype=torch.float32).unsqueeze(0)
                     act, _, _, _ = agent_model.get_action_and_value(o, r, m, state_t)
+                    actions[a] = int(act.item())
+            elif algo == "coma":
+                for a in AGENTS:
+                    o = torch.tensor(obs[a]["observation"], dtype=torch.float32).unsqueeze(0)
+                    r = torch.tensor(obs[a]["role_id"], dtype=torch.float32).unsqueeze(0)
+                    m = torch.tensor(obs[a]["action_mask"], dtype=torch.float32).unsqueeze(0)
+                    act, _, _, _ = agent_model.get_action(o, r, m)
                     actions[a] = int(act.item())
 
         render_ascii_frame(
