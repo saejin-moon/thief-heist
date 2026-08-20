@@ -1070,25 +1070,36 @@ def train(
                 f"E{k}: {last_expert_usage.get(k, 0.0)}%" for k in range(active_experts)
             )
 
-            status_str = (
+            # Compact console log (clean standard output)
+            console_str = (
                 f"Update: {update}/{num_updates} | "
                 f"Win Rate: {avg_win:.2f} | "
                 f"Episodic Return: {avg_rew:.3f} | "
                 f"Steps: {avg_steps:.1f}/{stage_max_steps} | "
                 f"Alarm: {avg_alarm:.1f}/{stage_alarm_max:.0f} | "
-                f"Scout Tag Rate: {avg_scout_int:.2f} (Avg POIs: {avg_scout_pois:.1f}) | "
-                f"Hacker Hack Rate: {avg_hacker_hack:.2f} | "
-                f"Muscle Neutralize Rate: {avg_muscle_neut:.2f} (Avg Guards: {avg_muscle_guards:.1f}/{stage_guards}) | "
-                f"Extractor Loot Rate: {avg_extractor_loot:.2f} | "
-                f"Avg Agents at Extract: {avg_agents_extract:.2f}/4 | "
-                f"Active: {active_experts} | "
-                f"Total Spawns: {total_spawns} | "
-                f"Switch Rate: {last_switch_rate:.1f}% | "
-                f"Usage: [{usage_str}]"
+                f"Active Experts: {active_experts}"
             )
-            console_logger.info(status_str)
+            console_logger.info(console_str)
+
+            # Comprehensive file log (full sub-task breakdown matching E-COOP)
             if file_logger:
-                file_logger.info(status_str)
+                file_str = (
+                    f"Update: {update}/{num_updates} | "
+                    f"Win Rate: {avg_win:.2f} | "
+                    f"Episodic Return: {avg_rew:.3f} | "
+                    f"Steps: {avg_steps:.1f}/{stage_max_steps} | "
+                    f"Alarm: {avg_alarm:.1f}/{stage_alarm_max:.0f} | "
+                    f"Scout Tag Rate: {avg_scout_int:.2f} (Avg POIs: {avg_scout_pois:.1f}) | "
+                    f"Hacker Hack Rate: {avg_hacker_hack:.2f} | "
+                    f"Muscle Neutralize Rate: {avg_muscle_neut:.2f} (Avg Guards: {avg_muscle_guards:.1f}/{stage_guards}) | "
+                    f"Extractor Loot Rate: {avg_extractor_loot:.2f} | "
+                    f"Avg Agents at Extract: {avg_agents_extract:.2f}/4 | "
+                    f"Active: {active_experts} | "
+                    f"Total Spawns: {total_spawns} | "
+                    f"Switch Rate: {last_switch_rate:.1f}% | "
+                    f"Usage: [{usage_str}]"
+                )
+                file_logger.info(file_str)
 
     vec_env.close()
 
