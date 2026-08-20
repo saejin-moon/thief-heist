@@ -446,6 +446,7 @@ def train(
             )
             max_stage_steps = env_config.get("max_steps", 150)
             total_stage_guards = env_config.get("guard_count", 0)
+            stage_alarm_max = env_config.get("alarm_max", 100.0)
             avg_steps = (
                 float(np.mean(completed_episode_steps[-25:]))
                 if completed_episode_steps
@@ -499,12 +500,12 @@ def train(
 
             # Console log (clean & compact)
             console_logger.info(
-                f"Update: {update}/{num_updates} | Win Rate: {win_rate:.2f} | Episodic Return: {mean_episodic_reward:.3f} | Steps: {avg_steps:.1f}/{max_stage_steps} | Alarm: {avg_alarm:.1f}/100"
+                f"Update: {update}/{num_updates} | Win Rate: {win_rate:.2f} | Episodic Return: {mean_episodic_reward:.3f} | Steps: {avg_steps:.1f}/{max_stage_steps} | Alarm: {avg_alarm:.1f}/{stage_alarm_max:.0f}"
             )
             # Detailed file log
             if file_logger:
                 file_logger.info(
-                    f"Update: {update}/{num_updates} | Win Rate: {win_rate:.2f} | Episodic Return: {mean_episodic_reward:.3f} | Steps: {avg_steps:.1f}/{max_stage_steps} | Alarm: {avg_alarm:.1f}/100 | Scout Tag Rate: {scout_tag_rate:.2f} (Avg POIs: {scout_avg_pois:.1f}) | Hacker Hack Rate: {hacker_hack_rate:.2f} | Muscle Neutralize Rate: {muscle_neutralize_rate:.2f} (Avg Guards: {avg_muscle_guards:.1f}/{total_stage_guards}) | Extractor Loot Rate: {extractor_loot_rate:.2f} | Avg Agents at Extract: {avg_agents_extract:.2f}/4 | Expert Usage: [{expert_usage_str}]"
+                    f"Update: {update}/{num_updates} | Win Rate: {win_rate:.2f} | Episodic Return: {mean_episodic_reward:.3f} | Steps: {avg_steps:.1f}/{max_stage_steps} | Alarm: {avg_alarm:.1f}/{stage_alarm_max:.0f} | Scout Tag Rate: {scout_tag_rate:.2f} (Avg POIs: {scout_avg_pois:.1f}) | Hacker Hack Rate: {hacker_hack_rate:.2f} | Muscle Neutralize Rate: {muscle_neutralize_rate:.2f} (Avg Guards: {avg_muscle_guards:.1f}/{total_stage_guards}) | Extractor Loot Rate: {extractor_loot_rate:.2f} | Avg Agents at Extract: {avg_agents_extract:.2f}/4 | Expert Usage: [{expert_usage_str}]"
                 )
 
     # Save checkpoint and results
@@ -531,6 +532,9 @@ def train(
             "avg_alarm": float(np.mean(completed_episode_alarms[-100:]))
             if completed_episode_alarms
             else 0.0,
+            "stage_alarm_max": float(stage_alarm_max)
+            if "stage_alarm_max" in locals()
+            else 100.0,
             "scout_interact_rate": float(np.mean(completed_scout_interact[-100:]))
             if completed_scout_interact
             else 0.0,
