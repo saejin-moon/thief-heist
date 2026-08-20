@@ -85,6 +85,7 @@ class HeistEnv(ParallelEnv):
             6 + (MAP_SIZE[0] * MAP_SIZE[1]) + (N_AGENTS * 2) + (12 * 2) + 12,
             dtype=np.float32,
         )
+        self.time_bleed = TOTAL_TIME_BLEED / float(self.config.get("max_steps", 300))
 
     def reset(self, seed=None, _options=None):
         if seed is not None:
@@ -93,6 +94,7 @@ class HeistEnv(ParallelEnv):
         self.current_step = 0
         self.alarm = 0.0
         self.alarm_max = float(self.config.get("alarm_max", ALARM_MAX))
+        self.time_bleed = TOTAL_TIME_BLEED / float(self.config.get("max_steps", 300))
         self.terminal_disabled = False
         self.loot_acquired = False
         self.extraction_triggered = False
@@ -227,7 +229,7 @@ class HeistEnv(ParallelEnv):
 
     def step(self, actions):
         self.current_step += 1
-        rewards = {a: REWARD_TIME_BLEED for a in self.agents}
+        rewards = {a: self.time_bleed for a in self.agents}
 
         # 1. Agent Actions
         for agent in list(self.agents):

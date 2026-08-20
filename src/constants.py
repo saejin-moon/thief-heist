@@ -59,6 +59,7 @@ REWARD_TASK = 2.0
 REWARD_TAG = 1.0
 REWARD_BYPASS = 1.0
 REWARD_HACK_PROGRESS = 0.5
+TOTAL_TIME_BLEED = -2.0
 REWARD_TIME_BLEED = -0.005
 CONVERGE_BONUS = 0.20
 CONVERGE_RADIUS = 4
@@ -123,50 +124,50 @@ CURRICULUM_STAGES = [
         "guard_count": 0,
         "camera_count": 0,
         "door_count": 0,
-        "max_steps": 150,
+        "max_steps": 300,
         "alarm_max": 100.0,
         "spawn_mode": "role",
-        "timesteps": 200_000,
+        "timesteps": 500_000,
     },
     {
         "map_size": (17, 17),
         "guard_count": 1,
         "camera_count": 0,
         "door_count": 1,
-        "max_steps": 250,
+        "max_steps": 500,
         "alarm_max": 100.0,
         "spawn_mode": "role",
-        "timesteps": 500_000,
+        "timesteps": 1_000_000,
     },
     {
         "map_size": (25, 25),
         "guard_count": 2,
         "camera_count": 1,
         "door_count": 2,
-        "max_steps": 400,
+        "max_steps": 900,
         "alarm_max": 125.0,
         "spawn_mode": "role",
-        "timesteps": 1_000_000,
+        "timesteps": 2_000_000,
     },
     {
         "map_size": (35, 35),
         "guard_count": 3,
         "camera_count": 2,
         "door_count": 3,
-        "max_steps": 900,
+        "max_steps": 2000,
         "alarm_max": 150.0,
         "spawn_mode": "role",
-        "timesteps": 2_000_000,
+        "timesteps": 5_000_000,
     },
     {
         "map_size": (50, 50),
         "guard_count": 4,
         "camera_count": 3,
         "door_count": 4,
-        "max_steps": 1500,
+        "max_steps": 10000,
         "alarm_max": 175.0,
         "spawn_mode": "role",
-        "timesteps": 4_000_000,
+        "timesteps": 10_000_000,
     },
 ]
 
