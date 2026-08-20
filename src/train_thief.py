@@ -137,12 +137,21 @@ class ThiefNetwork(nn.Module):
         if expert_idx is not None:
             chosen_expert = expert_idx
         else:
-            # Mask out incubating grace expert from general competitive bidding pool
-            if grace_expert is not None and grace_expert < active_experts:
-                candidate_experts = [
-                    k for k in range(active_experts) if k != grace_expert
-                ]
+            # Parse incubating grace experts (supports list/tuple or single index)
+            if grace_expert is not None:
+                grace_list = (
+                    list(grace_expert)
+                    if isinstance(grace_expert, (list, tuple, set))
+                    else [grace_expert]
+                )
+                grace_set = {g for g in grace_list if g < active_experts}
             else:
+                grace_list = []
+                grace_set = set()
+
+            # Candidate experts for general competitive bidding
+            candidate_experts = [k for k in range(active_experts) if k not in grace_set]
+            if not candidate_experts:
                 candidate_experts = list(range(active_experts))
 
             if len(candidate_experts) == 1:
@@ -195,18 +204,28 @@ class ThiefNetwork(nn.Module):
             else:
                 chosen_expert = best_idx
 
-            # Sandbox Incubation Routing: Isolate incubating mutant to dedicated sandbox environments
-            if grace_expert is not None and grace_expert < active_experts:
-                threshold_env = max(0, NUM_ENVS - THIEF_MUTANT_ENVS)
+            # Sandbox Incubation Routing: Isolate each incubating mutant into dedicated sandbox environments
+            if grace_list:
                 env_ids = torch.arange(batch_size, device=obs.device) % NUM_ENVS
-                is_grace_env = env_ids >= threshold_env
-                chosen_expert = torch.where(
-                    is_grace_env,
-                    torch.tensor(
-                        grace_expert, device=obs.device, dtype=chosen_expert.dtype
-                    ),
-                    chosen_expert,
+                envs_per_mutant = max(1, (NUM_ENVS // 2) // len(grace_list))
+                total_sandbox_envs = min(
+                    NUM_ENVS - 2, len(grace_list) * envs_per_mutant
                 )
+                start_sandbox_env = NUM_ENVS - total_sandbox_envs
+
+                for m_idx, g_exp in enumerate(grace_list):
+                    if g_exp >= active_experts:
+                        continue
+                    m_start = start_sandbox_env + (m_idx * envs_per_mutant)
+                    m_end = m_start + envs_per_mutant
+                    is_m_env = (env_ids >= m_start) & (env_ids < m_end)
+                    chosen_expert = torch.where(
+                        is_m_env,
+                        torch.tensor(
+                            g_exp, device=obs.device, dtype=chosen_expert.dtype
+                        ),
+                        chosen_expert,
+                    )
 
         # 2. Execution Phase
         actions = torch.zeros(batch_size, dtype=torch.long, device=obs.device)
@@ -292,7 +311,7 @@ def check_deficit_trigger(
     b_state,
     update,
     last_spawn_update,
-    current_grace_expert,
+    current_grace_experts,
     device,
 ):
     """
@@ -301,7 +320,7 @@ def check_deficit_trigger(
     """
     if update <= THIEF_WARMUP_UPDATES:
         return False, None
-    if current_grace_expert is not None:
+    if current_grace_experts:
         return False, None
     if active_experts >= THIEF_MAX_EXPERTS:
         return False, None
@@ -468,40 +487,48 @@ def recombine_and_mutate_thief(
             device,
         )
 
-    # Apply Targeted Mutation + Riemannian Fisher Noise to Actor
-    child_actor_params = []
+    # Spawn K diverse mutants (doubling the active pool from K to 2K, capped at THIEF_MAX_EXPERTS)
+    num_mutants = max(1, min(active_experts, THIEF_MAX_EXPERTS - active_experts))
+    child_indices = []
     noise_scale = THIEF_MUTATION_NOISE
     targeted_lr = THIEF_TARGETED_LR
 
-    for p_idx, (r_p, eff_f) in enumerate(
-        zip(recombined_actor_params, effective_fishers)
-    ):
-        f_safe = torch.clamp(eff_f, min=1e-6)
-        inv_f_sqrt = 1.0 / torch.sqrt(f_safe + 1e-4)
-        inv_f_scaled = inv_f_sqrt / (inv_f_sqrt.mean() + 1e-8)
-        inv_f_damped = torch.clamp(inv_f_scaled, max=10.0)
+    for m in range(num_mutants):
+        child_actor_params = []
+        for p_idx, (r_p, eff_f) in enumerate(
+            zip(recombined_actor_params, effective_fishers)
+        ):
+            f_safe = torch.clamp(eff_f, min=1e-6)
+            inv_f_sqrt = 1.0 / torch.sqrt(f_safe + 1e-4)
+            inv_f_scaled = inv_f_sqrt / (inv_f_sqrt.mean() + 1e-8)
+            inv_f_damped = torch.clamp(inv_f_scaled, max=10.0)
 
-        noise = torch.randn_like(r_p) * noise_scale * inv_f_damped
-        mutated_p = r_p + noise
+            # Distinct Gaussian noise draw per mutant
+            noise = torch.randn_like(r_p) * noise_scale * inv_f_damped
+            mutated_p = r_p + noise
 
-        if deficit_grads is not None:
-            mutated_p = mutated_p - (targeted_lr * deficit_grads[p_idx])
+            if deficit_grads is not None:
+                # Targeted gradient shift scaled slightly per mutant for diverse failure-resolution trajectories
+                m_scale = 1.0 + (0.25 * m)
+                mutated_p = mutated_p - (targeted_lr * m_scale * deficit_grads[p_idx])
 
-        child_actor_params.append(mutated_p)
+            child_actor_params.append(mutated_p)
 
-    # Instantiate child expert
-    child_idx = agent.add_expert()
-    for p, c_p in zip(agent.experts[child_idx].actor.parameters(), child_actor_params):
-        p.data.copy_(c_p)
-    for p, c_p in zip(
-        agent.experts[child_idx].critic.parameters(), recombined_critic_params
-    ):
-        p.data.copy_(c_p)
+        # Instantiate and populate child expert
+        c_idx = agent.add_expert()
+        for p, c_p in zip(agent.experts[c_idx].actor.parameters(), child_actor_params):
+            p.data.copy_(c_p)
+        for p, c_p in zip(
+            agent.experts[c_idx].critic.parameters(), recombined_critic_params
+        ):
+            p.data.copy_(c_p)
+
+        child_indices.append(c_idx)
 
     best_parent_idx = int(np.argmax(parent_values))
     best_parent_val = float(parent_values[best_parent_idx])
 
-    return child_idx, best_parent_idx, best_parent_val
+    return child_indices, best_parent_idx, best_parent_val
 
 
 def train(
@@ -548,7 +575,7 @@ def train(
     active_experts = THIEF_INITIAL_EXPERTS
     total_spawns = 0
     spawn_history = []
-    current_grace_expert = None
+    current_grace_experts = None
     grace_counter = 0
     last_spawn_update = 0
     expert_consecutive_zero_usage = collections.defaultdict(int)
@@ -664,7 +691,7 @@ def train(
                         state_rep,
                         active_experts=active_experts,
                         previous_expert=env_previous_expert,
-                        grace_expert=current_grace_expert,
+                        grace_expert=current_grace_experts,
                     )
                 )
 
@@ -774,7 +801,7 @@ def train(
                 state_rep,
                 active_experts=active_experts,
                 previous_expert=env_previous_expert,
-                grace_expert=current_grace_expert,
+                grace_expert=current_grace_experts,
             )
             next_values = next_values.view(N_AGENTS, NUM_ENVS)
 
@@ -900,17 +927,18 @@ def train(
                 optimizer.step()
 
         # Lifecycle Step A: Sandbox Incubation Progression
-        if current_grace_expert is not None:
+        if current_grace_experts:
             grace_counter += 1
             if grace_counter >= THIEF_ISOLATION_UPDATES:
+                spawned_names = ", ".join(f"E{i}" for i in current_grace_experts)
                 msg = (
-                    f"[Incubation Event] Update: {update} | Mutant E{current_grace_expert} "
-                    f"completed {THIEF_ISOLATION_UPDATES} sandbox updates. Calibrated Critic promoted to general bidding pool!"
+                    f"[Incubation Event] Update: {update} | Mutants ({spawned_names}) "
+                    f"completed {THIEF_ISOLATION_UPDATES} sandbox updates. Calibrated Critics promoted to general bidding pool!"
                 )
                 console_logger.info(msg)
                 if file_logger:
                     file_logger.info(msg)
-                current_grace_expert = None
+                current_grace_experts = None
                 grace_counter = 0
 
         # Lifecycle Step B: Dynamic Deficit Spawning Check (post-update 100)
@@ -922,13 +950,12 @@ def train(
             flat_states,
             update,
             last_spawn_update,
-            current_grace_expert,
+            current_grace_experts,
             device,
         )
 
         if deficit_triggered:
-            total_spawns += 1
-            child_idx, best_parent, parent_val = recombine_and_mutate_thief(
+            child_indices, best_parent, parent_val = recombine_and_mutate_thief(
                 agent,
                 active_experts,
                 flat_obs,
@@ -941,36 +968,40 @@ def train(
                 deficit_mask,
                 device,
             )
-            active_experts += 1
-            current_grace_expert = child_idx
+            old_count = active_experts
+            active_experts += len(child_indices)
+            current_grace_experts = list(child_indices)
             grace_counter = 0
             last_spawn_update = update
+            total_spawns += len(child_indices)
 
             optimizer = torch.optim.Adam(agent.parameters(), lr=LR, eps=1e-5)
 
-            spawn_history.append(
-                {
-                    "update": update,
-                    "parent_expert": best_parent,
-                    "child_expert": child_idx,
-                    "parent_value": parent_val,
-                    "active_experts": active_experts,
-                    "total_spawns": total_spawns,
-                    "trigger": "critic_deficit_dynamic",
-                }
-            )
+            for c_idx in child_indices:
+                spawn_history.append(
+                    {
+                        "update": update,
+                        "parent_expert": best_parent,
+                        "child_expert": c_idx,
+                        "parent_value": parent_val,
+                        "active_experts": active_experts,
+                        "total_spawns": total_spawns,
+                        "trigger": "critic_deficit_dynamic",
+                    }
+                )
 
+            spawned_names = ", ".join(f"E{i}" for i in child_indices)
             msg = (
                 f"[Deficit Evolution Event] Update: {update} | Triggered Dynamic Deficit Spawn! "
-                f"Spawned E{child_idx} via Deficit-Targeted Fisher Recombination (top parent E{best_parent}, val={parent_val:.3f}) | "
-                f"Active Pool: {active_experts} experts | Total Spawns: {total_spawns} | Entering 20-update Sandbox Incubation"
+                f"Doubled pool from {old_count} -> {active_experts} experts via Multi-Offspring Sexual Fisher Recombination "
+                f"({spawned_names} spawned from top parent E{best_parent}, val={parent_val:.3f}) | Entering 20-update Sandbox Incubation"
             )
             console_logger.info(msg)
             if file_logger:
                 file_logger.info(msg)
 
         # Lifecycle Step C: Extinction Culling
-        if current_grace_expert is None and active_experts > 2:
+        if current_grace_experts is None and active_experts > 2:
             culled_indices = [
                 k
                 for k in range(1, active_experts)
