@@ -510,8 +510,8 @@ def recombine_and_mutate_thief(
             device,
         )
 
-    # Spawn K diverse mutants (doubling the active pool from K to 2K, capped at THIEF_MAX_EXPERTS)
-    num_mutants = max(1, min(active_experts, THIEF_MAX_EXPERTS - active_experts))
+    # Spawn K diverse mutants (always doubling the active pool from K to 2K)
+    num_mutants = active_experts
     child_indices = []
     noise_scale = THIEF_MUTATION_NOISE
     targeted_lr = THIEF_TARGETED_LR
