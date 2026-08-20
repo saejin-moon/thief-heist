@@ -92,7 +92,7 @@ if __name__ == "__main__":
         "--algo",
         type=str,
         default="all",
-        choices=["mappo", "coop", "marc", "hmappo", "ecoop", "coma", "all"],
+        choices=["mappo", "coop", "marc", "hmappo", "ecoop", "coma", "thief", "all"],
         help="Algorithm to train across curriculum, or 'all' to run all benchmarks",
     )
     parser.add_argument(
@@ -114,7 +114,7 @@ if __name__ == "__main__":
     )
 
     if args.algo == "all":
-        for algo in ["mappo", "coop", "ecoop", "hmappo", "marc", "coma"]:
+        for algo in ["thief", "ecoop", "mappo", "hmappo", "coop", "marc", "coma"]:
             run_curriculum(algo, stages_to_run=selected_stages)
     else:
         run_curriculum(args.algo, stages_to_run=selected_stages)

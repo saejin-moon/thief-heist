@@ -1,0 +1,1196 @@
+"""
+THIEF: Targeted Hysteresis-routed Incubated Evolution via Fisher-geometry.
+CleanRL-style implementation of decentralized value-bidding multi-agent RL with
+deficit-triggered dynamic spawning, failure-targeted gradient mutation,
+all-pool Fisher information geometry recombination, and sandbox critic incubation.
+"""
+
+import collections
+import json
+import logging
+import os
+
+import numpy as np
+import torch
+from torch import nn
+from torch.distributions.categorical import Categorical
+
+from constants import *
+from thermal_guard import check_thermal_guard
+from vec_env import VectorEnv
+
+
+class MappoActor(nn.Module):
+    def __init__(self):
+        super().__init__()
+        in_dim = (OBSERVATION_SIZE[0] * OBSERVATION_SIZE[1]) + N_AGENTS
+        self.network = nn.Sequential(
+            nn.Linear(in_dim, 64),
+            nn.Tanh(),
+            nn.Linear(64, 64),
+            nn.Tanh(),
+            nn.Linear(64, ACTION_SPACE_SIZE),
+        )
+
+    def forward(self, x):
+        return self.network(x)
+
+
+class MappoCritic(nn.Module):
+    def __init__(self, state_dim):
+        super().__init__()
+        in_dim = state_dim + N_AGENTS
+        self.network = nn.Sequential(
+            nn.Linear(in_dim, 64),
+            nn.Tanh(),
+            nn.Linear(64, 64),
+            nn.Tanh(),
+            nn.Linear(64, 1),
+        )
+
+    def forward(self, x):
+        return self.network(x)
+
+
+class MappoNetwork(nn.Module):
+    def __init__(self, state_dim):
+        super().__init__()
+        self.actor = MappoActor()
+        self.critic = MappoCritic(state_dim)
+
+    def get_action_and_value(
+        self, obs, role, mask, state=None, action=None, deterministic=False
+    ):
+        x_actor = torch.cat([obs.flatten(1), role], dim=1)
+        logits = self.actor(x_actor)
+        masked_logits = logits + ((1.0 - mask) * -1e9)
+        probs = Categorical(logits=masked_logits)
+
+        if action is None:
+            if deterministic:
+                action = masked_logits.argmax(dim=-1)
+            else:
+                action = probs.sample()
+
+        log_prob = probs.log_prob(action)
+        entropy = probs.entropy()
+
+        value = None
+        if state is not None:
+            x_critic = torch.cat([state, role], dim=1)
+            value = self.critic(x_critic).squeeze(-1)
+
+        return action, log_prob, entropy, value
+
+
+class ThiefNetwork(nn.Module):
+    """
+    Modular Specialist Pool for THIEF.
+    Routes actions based on decentralized Critic confidence bidding with dynamic
+    temporal hysteresis, isolates exploration in sandbox incubation environments,
+    and supports dynamic addition and culling of specialist sub-networks.
+    """
+
+    def __init__(self, state_dim, num_initial_experts=THIEF_INITIAL_EXPERTS):
+        super().__init__()
+        self.state_dim = state_dim
+        self.experts = nn.ModuleList(
+            [MappoNetwork(state_dim) for _ in range(max(1, num_initial_experts))]
+        )
+
+    def add_expert(self):
+        """Appends a fresh expert module onto the device of existing parameters and returns its index."""
+        device = (
+            next(self.parameters()).device
+            if list(self.parameters())
+            else torch.device("cpu")
+        )
+        new_mod = MappoNetwork(self.state_dim).to(device)
+        self.experts.append(new_mod)
+        return len(self.experts) - 1
+
+    def prune_experts(self, survivor_indices):
+        """Retains only the surviving expert modules in contiguous order."""
+        self.experts = nn.ModuleList([self.experts[i] for i in survivor_indices])
+
+    def get_action_and_value(
+        self,
+        obs,
+        role,
+        mask,
+        state,
+        active_experts,
+        action=None,
+        expert_idx=None,
+        previous_expert=None,
+        grace_expert=None,
+        epsilon=THIEF_HYSTERESIS_EPSILON,
+        deterministic=False,
+    ):
+        """
+        Executes routing and policy forward passes across the expert pool.
+        """
+        batch_size = obs.shape[0]
+        x_critic = torch.cat([state, role], dim=1)
+
+        # 1. Routing Selection Phase
+        if expert_idx is not None:
+            chosen_expert = expert_idx
+        else:
+            # Mask out incubating grace expert from general competitive bidding pool
+            if grace_expert is not None and grace_expert < active_experts:
+                candidate_experts = [
+                    k for k in range(active_experts) if k != grace_expert
+                ]
+            else:
+                candidate_experts = list(range(active_experts))
+
+            if len(candidate_experts) == 1:
+                best_idx = torch.full(
+                    (batch_size,),
+                    candidate_experts[0],
+                    dtype=torch.long,
+                    device=obs.device,
+                )
+            else:
+                bids = torch.stack(
+                    [self.experts[k].critic(x_critic) for k in candidate_experts],
+                    dim=-1,
+                ).squeeze(1)
+
+                best_candidate_idx = bids.argmax(dim=-1)
+                best_idx = torch.tensor(candidate_experts, device=obs.device)[
+                    best_candidate_idx
+                ]
+
+            if previous_expert is not None:
+                has_prev = (previous_expert >= 0) & (previous_expert < active_experts)
+                prev_in_candidates = torch.tensor(
+                    [p.item() in candidate_experts for p in previous_expert],
+                    device=obs.device,
+                    dtype=torch.bool,
+                )
+
+                v_bids_all = torch.stack(
+                    [self.experts[k].critic(x_critic) for k in range(active_experts)],
+                    dim=-1,
+                ).squeeze(1)
+
+                v_prev = v_bids_all.gather(
+                    1, previous_expert.clamp(0, active_experts - 1).unsqueeze(1)
+                ).squeeze(1)
+                v_best = v_bids_all.gather(1, best_idx.unsqueeze(1)).squeeze(1)
+
+                dynamic_barrier = torch.max(
+                    torch.full_like(v_prev, epsilon),
+                    epsilon * torch.abs(v_prev),
+                )
+                should_switch = v_best > (v_prev + dynamic_barrier)
+
+                chosen_expert = torch.where(
+                    has_prev & prev_in_candidates & ~should_switch,
+                    previous_expert,
+                    best_idx,
+                )
+            else:
+                chosen_expert = best_idx
+
+            # Sandbox Incubation Routing: Isolate incubating mutant to dedicated sandbox environments
+            if grace_expert is not None and grace_expert < active_experts:
+                threshold_env = max(0, NUM_ENVS - THIEF_MUTANT_ENVS)
+                env_ids = torch.arange(batch_size, device=obs.device) % NUM_ENVS
+                is_grace_env = env_ids >= threshold_env
+                chosen_expert = torch.where(
+                    is_grace_env,
+                    torch.tensor(
+                        grace_expert, device=obs.device, dtype=chosen_expert.dtype
+                    ),
+                    chosen_expert,
+                )
+
+        # 2. Execution Phase
+        actions = torch.zeros(batch_size, dtype=torch.long, device=obs.device)
+        logprobs = torch.zeros(batch_size, device=obs.device)
+        entropies = torch.zeros(batch_size, device=obs.device)
+        values = torch.zeros(batch_size, device=obs.device)
+
+        for k in range(active_experts):
+            mask_k = chosen_expert == k
+            if not mask_k.any():
+                continue
+
+            act_k = action[mask_k].long() if action is not None else None
+            a, lp, ent, v = self.experts[k].get_action_and_value(
+                obs[mask_k],
+                role[mask_k],
+                mask[mask_k],
+                state[mask_k] if state is not None else None,
+                action=act_k,
+                deterministic=deterministic,
+            )
+            actions[mask_k] = a
+            logprobs[mask_k] = lp
+            entropies[mask_k] = ent
+            if v is not None:
+                values[mask_k] = v
+
+        return actions, logprobs, entropies, values, chosen_expert
+
+
+def compute_fim_diagonal(agent, expert_idx, b_obs, b_role, b_mask, b_actions, device):
+    """
+    Computes the exact diagonal of the empirical Fisher Information Matrix (FIM)
+    strictly for Actor parameters across 100% of the rollout buffer transitions.
+    """
+    actor = agent.experts[expert_idx].actor
+    x_actor = torch.cat([b_obs.flatten(1), b_role], dim=1).to(device)
+    b_mask_dev = b_mask.to(device)
+    b_actions_dev = b_actions.to(device)
+    total_samples = x_actor.shape[0]
+
+    fisher_diag = [
+        torch.zeros_like(p, device=device)
+        for p in actor.parameters()
+        if p.requires_grad
+    ]
+
+    chunk_size = 256
+    for start in range(0, total_samples, chunk_size):
+        end = min(start + chunk_size, total_samples)
+        sub_x = x_actor[start:end]
+        sub_mask = b_mask_dev[start:end]
+        sub_actions = b_actions_dev[start:end]
+
+        logits = actor(sub_x)
+        masked_logits = logits + ((1.0 - sub_mask) * -1e9)
+        dist = Categorical(logits=masked_logits)
+        log_probs = dist.log_prob(sub_actions)
+
+        for i in range(len(sub_actions)):
+            actor.zero_grad()
+            log_probs[i].backward(retain_graph=(i < len(sub_actions) - 1))
+            with torch.no_grad():
+                for f_p, p in zip(
+                    fisher_diag,
+                    [p for p in actor.parameters() if p.requires_grad],
+                ):
+                    if p.grad is not None:
+                        f_p.add_(p.grad.data.pow(2))
+
+    with torch.no_grad():
+        for f_p in fisher_diag:
+            f_p.div_(total_samples)
+
+    return fisher_diag
+
+
+def check_deficit_trigger(
+    agent,
+    active_experts,
+    b_obs,
+    b_role,
+    b_state,
+    update,
+    last_spawn_update,
+    current_grace_expert,
+    device,
+):
+    """
+    Online rollout deficit detection: checks whether the collective expert pool
+    encounters a competence deficit where all active experts bid below THIEF_DEFICIT_THRESHOLD.
+    """
+    if update <= THIEF_WARMUP_UPDATES:
+        return False, None
+    if current_grace_expert is not None:
+        return False, None
+    if active_experts >= THIEF_MAX_EXPERTS:
+        return False, None
+    if (update - last_spawn_update) < THIEF_MIN_SPAWN_COOLDOWN:
+        return False, None
+
+    x_critic = torch.cat([b_state, b_role], dim=1).to(device)
+    with torch.no_grad():
+        bids = torch.stack(
+            [agent.experts[k].critic(x_critic) for k in range(active_experts)],
+            dim=-1,
+        ).squeeze(1)
+        v_max = bids.max(dim=-1).values
+
+    deficit_mask = v_max < THIEF_DEFICIT_THRESHOLD
+    deficit_count = deficit_mask.sum().item()
+    deficit_ratio = deficit_count / float(len(v_max))
+
+    if deficit_ratio >= THIEF_DEFICIT_RATIO_TRIGGER and deficit_count >= 32:
+        return True, deficit_mask
+
+    return False, None
+
+
+def compute_deficit_gradient(
+    recombined_actor,
+    b_obs,
+    b_role,
+    b_mask,
+    b_actions,
+    b_returns,
+    b_values,
+    deficit_mask,
+    device,
+):
+    """
+    Computes the normalized policy deficit gradient strictly on the subset of
+    transitions where all active experts failed to output confident value bids.
+    """
+    sub_obs = b_obs[deficit_mask].to(device)
+    sub_role = b_role[deficit_mask].to(device)
+    sub_mask = b_mask[deficit_mask].to(device)
+    sub_actions = b_actions[deficit_mask].to(device)
+    sub_returns = b_returns[deficit_mask].to(device)
+    sub_values = b_values[deficit_mask].to(device)
+
+    x_actor = torch.cat([sub_obs.flatten(1), sub_role], dim=1)
+    logits = recombined_actor(x_actor)
+    masked_logits = logits + ((1.0 - sub_mask) * -1e9)
+    dist = Categorical(logits=masked_logits)
+    log_probs = dist.log_prob(sub_actions)
+
+    deficit_adv = sub_returns - sub_values
+    deficit_loss = -(log_probs * deficit_adv).mean()
+
+    recombined_actor.zero_grad()
+    deficit_loss.backward()
+
+    deficit_grads = []
+    with torch.no_grad():
+        for p in recombined_actor.parameters():
+            if p.grad is not None:
+                g = p.grad.data.clone()
+                g_norm = g.norm() + 1e-8
+                deficit_grads.append(g / g_norm)
+            else:
+                deficit_grads.append(torch.zeros_like(p))
+
+    return deficit_grads
+
+
+def recombine_and_mutate_thief(
+    agent,
+    active_experts,
+    b_obs,
+    b_role,
+    b_mask,
+    b_actions,
+    b_returns,
+    b_values,
+    b_state,
+    deficit_mask,
+    device,
+):
+    """
+    Executes THIEF Evolutionary Operator:
+    1. Multi-parent empirical return fitness weighting.
+    2. All-Pool Full-Buffer Fisher Information Matrix evaluation on Actors.
+    3. Geometry-aware Fisher crossover across all active parents.
+    4. Recombined Critic initialization (clean pool baseline, no E0 carbon copy).
+    5. Deficit-directed gradient mutation on failure transitions + Riemannian noise.
+    """
+    x_critic = torch.cat([b_state, b_role], dim=1).to(device)
+    with torch.no_grad():
+        parent_values = [
+            agent.experts[k].critic(x_critic).mean().item()
+            for k in range(active_experts)
+        ]
+
+    val_tensor = torch.tensor(parent_values, device=device)
+    val_norm = val_tensor - val_tensor.max()
+    weights = torch.softmax(val_norm / 1.0, dim=0).cpu().numpy()
+
+    # Compute FIM for each active parent Actor
+    fims = [
+        compute_fim_diagonal(agent, k, b_obs, b_role, b_mask, b_actions, device)
+        for k in range(active_experts)
+    ]
+
+    # Recombine Actor Parameters
+    actor_params = [
+        [p.data for p in agent.experts[k].actor.parameters()]
+        for k in range(active_experts)
+    ]
+    recombined_actor_params = []
+    effective_fishers = []
+    damping = THIEF_CROSSOVER_DAMPING
+
+    for p_idx in range(len(actor_params[0])):
+        weighted_p_sum = torch.zeros_like(actor_params[0][p_idx])
+        weight_sum = torch.zeros_like(actor_params[0][p_idx])
+        eff_f = torch.zeros_like(actor_params[0][p_idx])
+
+        for k in range(active_experts):
+            w = weights[k]
+            f = fims[k][p_idx]
+            eff_f += w * f
+            inv_var = w * (f + damping)
+            weighted_p_sum += inv_var * actor_params[k][p_idx]
+            weight_sum += inv_var
+
+        recomb_p = weighted_p_sum / (weight_sum + 1e-8)
+        recombined_actor_params.append(recomb_p)
+        effective_fishers.append(eff_f)
+
+    # Recombine Critic Parameters (clean weighted average across parent pool)
+    critic_params = [
+        [p.data for p in agent.experts[k].critic.parameters()]
+        for k in range(active_experts)
+    ]
+    recombined_critic_params = []
+    for p_idx in range(len(critic_params[0])):
+        w_crit = torch.zeros_like(critic_params[0][p_idx])
+        for k in range(active_experts):
+            w_crit += weights[k] * critic_params[k][p_idx]
+        recombined_critic_params.append(w_crit)
+
+    # Build temporary recombined Actor to compute deficit gradient
+    temp_actor = MappoActor().to(device)
+    for p, r_p in zip(temp_actor.parameters(), recombined_actor_params):
+        p.data.copy_(r_p)
+
+    deficit_grads = None
+    if deficit_mask is not None and deficit_mask.sum().item() >= 32:
+        deficit_grads = compute_deficit_gradient(
+            temp_actor,
+            b_obs,
+            b_role,
+            b_mask,
+            b_actions,
+            b_returns,
+            b_values,
+            deficit_mask,
+            device,
+        )
+
+    # Apply Targeted Mutation + Riemannian Fisher Noise to Actor
+    child_actor_params = []
+    noise_scale = THIEF_MUTATION_NOISE
+    targeted_lr = THIEF_TARGETED_LR
+
+    for p_idx, (r_p, eff_f) in enumerate(
+        zip(recombined_actor_params, effective_fishers)
+    ):
+        f_safe = torch.clamp(eff_f, min=1e-6)
+        inv_f_sqrt = 1.0 / torch.sqrt(f_safe + 1e-4)
+        inv_f_scaled = inv_f_sqrt / (inv_f_sqrt.mean() + 1e-8)
+        inv_f_damped = torch.clamp(inv_f_scaled, max=10.0)
+
+        noise = torch.randn_like(r_p) * noise_scale * inv_f_damped
+        mutated_p = r_p + noise
+
+        if deficit_grads is not None:
+            mutated_p = mutated_p - (targeted_lr * deficit_grads[p_idx])
+
+        child_actor_params.append(mutated_p)
+
+    # Instantiate child expert
+    child_idx = agent.add_expert()
+    for p, c_p in zip(agent.experts[child_idx].actor.parameters(), child_actor_params):
+        p.data.copy_(c_p)
+    for p, c_p in zip(
+        agent.experts[child_idx].critic.parameters(), recombined_critic_params
+    ):
+        p.data.copy_(c_p)
+
+    best_parent_idx = int(np.argmax(parent_values))
+    best_parent_val = float(parent_values[best_parent_idx])
+
+    return child_idx, best_parent_idx, best_parent_val
+
+
+def train(
+    algo_name="thief",
+    stage_idx=0,
+    env_config=None,
+    total_timesteps=200_000,
+    load_ckpt_path=None,
+    save_ckpt_dir=None,
+    log_dir=None,
+):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    console_logger = logging.getLogger(f"console_{algo_name}_{stage_idx}")
+    console_logger.setLevel(logging.INFO)
+    console_logger.handlers = [logging.StreamHandler()]
+    console_logger.propagate = False
+
+    file_logger = None
+    if log_dir is not None:
+        os.makedirs(log_dir, exist_ok=True)
+        file_logger = logging.getLogger(f"file_{algo_name}_{stage_idx}")
+        file_logger.setLevel(logging.INFO)
+        file_handler = logging.FileHandler(os.path.join(log_dir, "train.log"), mode="w")
+        file_handler.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
+        file_logger.handlers = [file_handler]
+        file_logger.propagate = False
+
+    msg = f"Training {algo_name} Stage {stage_idx} on {device} (2 Experts Initial | Deficit Spawning | Targeted Mutation | Sandbox Incubation)..."
+    console_logger.info(msg)
+    if file_logger:
+        file_logger.info(msg)
+
+    if env_config is None:
+        env_config = dict(CURRICULUM_STAGES[stage_idx])
+    vec_env = VectorEnv(NUM_ENVS, config=env_config)
+    state_dim = vec_env.state_dim
+
+    agent = ThiefNetwork(state_dim, num_initial_experts=THIEF_INITIAL_EXPERTS).to(
+        device
+    )
+    optimizer = torch.optim.Adam(agent.parameters(), lr=LR, eps=1e-5)
+
+    active_experts = THIEF_INITIAL_EXPERTS
+    total_spawns = 0
+    spawn_history = []
+    current_grace_expert = None
+    grace_counter = 0
+    last_spawn_update = 0
+    expert_consecutive_zero_usage = collections.defaultdict(int)
+    env_previous_expert = None
+
+    if load_ckpt_path and os.path.exists(load_ckpt_path):
+        try:
+            ckpt = torch.load(load_ckpt_path, map_location=device, weights_only=False)
+            state_dict = (
+                ckpt["model_state"]
+                if (isinstance(ckpt, dict) and "model_state" in ckpt)
+                else ckpt
+            )
+            expert_indices = {
+                int(k.split(".")[1]) for k in state_dict if k.startswith("experts.")
+            }
+            needed_experts = (
+                max(expert_indices) + 1 if expert_indices else THIEF_INITIAL_EXPERTS
+            )
+            while len(agent.experts) < needed_experts:
+                agent.add_expert()
+            if len(agent.experts) > needed_experts:
+                agent.prune_experts(list(range(needed_experts)))
+            agent.load_state_dict(state_dict)
+            optimizer = torch.optim.Adam(agent.parameters(), lr=LR, eps=1e-5)
+            if isinstance(ckpt, dict) and "model_state" in ckpt:
+                active_experts = int(ckpt.get("active_experts", len(agent.experts)))
+                total_spawns = int(ckpt.get("total_spawns", 0))
+                spawn_history = list(ckpt.get("spawn_history", []))
+            else:
+                active_experts = len(agent.experts)
+            msg = f"Loaded checkpoint from {load_ckpt_path} (Active specialists: {active_experts}, total spawns: {total_spawns})"
+            console_logger.info(msg)
+            if file_logger:
+                file_logger.info(msg)
+        except Exception as e:  # noqa: BLE001
+            print(f"Warning: Could not load full checkpoint ({e}). Initializing fresh.")
+
+    next_obs, next_state = vec_env.reset()
+    next_done = torch.zeros(NUM_ENVS).to(device)
+
+    num_updates = total_timesteps // (NUM_ENVS * NUM_STEPS)
+    global_episodes = 0
+    global_wins = 0
+    current_env_returns = np.zeros(NUM_ENVS)
+    completed_episode_returns = []
+    completed_wins = []
+    completed_episode_steps = []
+    completed_episode_alarms = []
+    completed_scout_interact = []
+    completed_scout_pois = []
+    completed_hacker_hack = []
+    completed_muscle_neutralize = []
+    completed_muscle_guards = []
+    completed_extractor_loot = []
+    completed_agents_at_extract = []
+
+    last_expert_usage = {}
+    last_switch_rate = 0.0
+
+    for update in range(1, num_updates + 1):
+        check_thermal_guard()
+
+        b_obs = {
+            a: torch.zeros((NUM_STEPS, NUM_ENVS, *OBSERVATION_SIZE)).to(device)
+            for a in AGENTS
+        }
+        b_role = {
+            a: torch.zeros((NUM_STEPS, NUM_ENVS, N_AGENTS)).to(device) for a in AGENTS
+        }
+        b_mask = {
+            a: torch.zeros((NUM_STEPS, NUM_ENVS, ACTION_SPACE_SIZE)).to(device)
+            for a in AGENTS
+        }
+        b_actions = {a: torch.zeros((NUM_STEPS, NUM_ENVS)).to(device) for a in AGENTS}
+        b_logprobs = {a: torch.zeros((NUM_STEPS, NUM_ENVS)).to(device) for a in AGENTS}
+        b_rewards = {a: torch.zeros((NUM_STEPS, NUM_ENVS)).to(device) for a in AGENTS}
+        b_values = {a: torch.zeros((NUM_STEPS, NUM_ENVS)).to(device) for a in AGENTS}
+        b_dones = torch.zeros((NUM_STEPS, NUM_ENVS)).to(device)
+        b_states = torch.zeros((NUM_STEPS, NUM_ENVS, state_dim)).to(device)
+        b_experts = {
+            a: torch.zeros((NUM_STEPS, NUM_ENVS), dtype=torch.long).to(device)
+            for a in AGENTS
+        }
+
+        total_switches = 0
+        total_switch_opportunities = 0
+
+        # --- ROLLOUT PHASE ---
+        for step in range(NUM_STEPS):
+            b_states[step] = torch.tensor(next_state, dtype=torch.float32).to(device)
+            b_dones[step] = next_done
+
+            actions_dict = {}
+            with torch.no_grad():
+                stacked = next_obs["_stacked"]
+                obs_all = torch.tensor(
+                    stacked["observation"], dtype=torch.float32, device=device
+                )
+                role_all = torch.tensor(
+                    stacked["role_id"], dtype=torch.float32, device=device
+                )
+                mask_all = torch.tensor(
+                    stacked["action_mask"], dtype=torch.float32, device=device
+                )
+
+                state_rep = b_states[step].repeat(N_AGENTS, 1)
+                actions, logprobs, _, values, chosen_expert = (
+                    agent.get_action_and_value(
+                        obs_all.flatten(0, 1),
+                        role_all.flatten(0, 1),
+                        mask_all.flatten(0, 1),
+                        state_rep,
+                        active_experts=active_experts,
+                        previous_expert=env_previous_expert,
+                        grace_expert=current_grace_expert,
+                    )
+                )
+
+                if env_previous_expert is not None:
+                    valid_prev = env_previous_expert >= 0
+                    switches = (chosen_expert != env_previous_expert) & valid_prev
+                    total_switches += switches.sum().item()
+                    total_switch_opportunities += valid_prev.sum().item()
+
+                env_previous_expert = chosen_expert
+
+                actions = actions.view(N_AGENTS, NUM_ENVS)
+                logprobs = logprobs.view(N_AGENTS, NUM_ENVS)
+                values = values.view(N_AGENTS, NUM_ENVS)
+                experts_unflattened = chosen_expert.view(N_AGENTS, NUM_ENVS)
+
+                for i, a in enumerate(AGENTS):
+                    b_experts[a][step] = experts_unflattened[i]
+                    b_obs[a][step] = obs_all[i]
+                    b_role[a][step] = role_all[i]
+                    b_mask[a][step] = mask_all[i]
+                    b_actions[a][step] = actions[i]
+                    b_logprobs[a][step] = logprobs[i]
+                    b_values[a][step] = values[i]
+                    actions_dict[a] = actions[i].cpu().numpy()
+
+            next_obs, rewards, terms, truncs, infos = vec_env.step(actions_dict)
+
+            # Accumulate per-agent average return per env
+            step_agent_reward = sum(rewards[a] for a in AGENTS) / N_AGENTS
+            current_env_returns += step_agent_reward
+
+            for e in range(NUM_ENVS):
+                is_done = terms["scout"][e] or truncs["scout"][e]
+                if is_done:
+                    global_episodes += 1
+                    scout_info = infos[e]["scout"]
+                    is_win = bool(scout_info.get("win", False))
+                    if is_win:
+                        global_wins += 1
+                    completed_wins.append(float(is_win))
+                    completed_episode_returns.append(float(current_env_returns[e]))
+                    current_env_returns[e] = 0.0
+
+                    interact_succ = float(
+                        scout_info.get("scout_interact_success", False)
+                    )
+                    pois_tagged = float(scout_info.get("scout_pois_tagged", 0))
+                    hack_succ = float(scout_info.get("hacker_hack_success", False))
+                    neutralize_succ = float(
+                        scout_info.get("muscle_neutralize_success", False)
+                    )
+                    guards_neutralized = float(
+                        scout_info.get("muscle_guards_neutralized", 0)
+                    )
+                    loot_succ = float(scout_info.get("extractor_loot_success", False))
+                    agents_extract = float(scout_info.get("agents_at_extract", 0))
+                    ep_steps = float(scout_info.get("steps", 0))
+                    ep_alarm = float(scout_info.get("alarm", 0.0))
+
+                    completed_scout_interact.append(interact_succ)
+                    completed_scout_pois.append(pois_tagged)
+                    completed_hacker_hack.append(hack_succ)
+                    completed_muscle_neutralize.append(neutralize_succ)
+                    completed_muscle_guards.append(guards_neutralized)
+                    completed_extractor_loot.append(loot_succ)
+                    completed_agents_at_extract.append(agents_extract)
+                    completed_episode_steps.append(ep_steps)
+                    completed_episode_alarms.append(ep_alarm)
+
+                    if env_previous_expert is not None:
+                        for ag_i in range(N_AGENTS):
+                            env_previous_expert[ag_i * NUM_ENVS + e] = -1
+
+            next_state = vec_env.state
+            next_done = torch.tensor(
+                terms["scout"] | truncs["scout"], dtype=torch.float32
+            ).to(device)
+
+            for a in AGENTS:
+                b_rewards[a][step] = torch.tensor(rewards[a], dtype=torch.float32).to(
+                    device
+                )
+
+        # GAE Calculation
+        with torch.no_grad():
+            stacked = next_obs["_stacked"]
+            obs_all = torch.tensor(
+                stacked["observation"], dtype=torch.float32, device=device
+            )
+            role_all = torch.tensor(
+                stacked["role_id"], dtype=torch.float32, device=device
+            )
+            mask_all = torch.tensor(
+                stacked["action_mask"], dtype=torch.float32, device=device
+            )
+            state_rep = (
+                torch.tensor(next_state, dtype=torch.float32)
+                .to(device)
+                .repeat(N_AGENTS, 1)
+            )
+
+            _, _, _, next_values, _ = agent.get_action_and_value(
+                obs_all.flatten(0, 1),
+                role_all.flatten(0, 1),
+                mask_all.flatten(0, 1),
+                state_rep,
+                active_experts=active_experts,
+                previous_expert=env_previous_expert,
+                grace_expert=current_grace_expert,
+            )
+            next_values = next_values.view(N_AGENTS, NUM_ENVS)
+
+            b_advantages = {
+                a: torch.zeros_like(b_rewards[a]).to(device) for a in AGENTS
+            }
+            b_returns = {a: torch.zeros_like(b_rewards[a]).to(device) for a in AGENTS}
+
+            for a_idx, a in enumerate(AGENTS):
+                lastgaelam = 0
+                for t in reversed(range(NUM_STEPS)):
+                    if t == NUM_STEPS - 1:
+                        nextnonterminal = 1.0 - next_done
+                        nextvalues = next_values[a_idx]
+                    else:
+                        nextnonterminal = 1.0 - b_dones[t + 1]
+                        nextvalues = b_values[a][t + 1]
+
+                    delta = (
+                        b_rewards[a][t]
+                        + GAMMA * nextvalues * nextnonterminal
+                        - b_values[a][t]
+                    )
+                    b_advantages[a][t] = lastgaelam = (
+                        delta + GAMMA * GAE_LAMBDA * nextnonterminal * lastgaelam
+                    )
+                b_returns[a] = b_advantages[a] + b_values[a]
+
+        # Flatten transitions across all roles and environments
+        flat_obs = torch.cat([b_obs[a].flatten(0, 1) for a in AGENTS], dim=0)
+        flat_role = torch.cat([b_role[a].flatten(0, 1) for a in AGENTS], dim=0)
+        flat_mask = torch.cat([b_mask[a].flatten(0, 1) for a in AGENTS], dim=0)
+        flat_actions = torch.cat([b_actions[a].flatten(0, 1) for a in AGENTS], dim=0)
+        flat_logprobs = torch.cat([b_logprobs[a].flatten(0, 1) for a in AGENTS], dim=0)
+        flat_advantages = torch.cat(
+            [b_advantages[a].flatten(0, 1) for a in AGENTS], dim=0
+        )
+        flat_returns = torch.cat([b_returns[a].flatten(0, 1) for a in AGENTS], dim=0)
+        flat_values = torch.cat([b_values[a].flatten(0, 1) for a in AGENTS], dim=0)
+        flat_states = b_states.repeat(N_AGENTS, 1, 1).flatten(0, 1)
+        flat_experts = torch.cat([b_experts[a].flatten(0, 1) for a in AGENTS], dim=0)
+
+        total_samples = flat_obs.shape[0]
+        usage_counts = torch.bincount(flat_experts, minlength=active_experts)
+        last_expert_usage = {
+            k: round(float(usage_counts[k].item() / total_samples) * 100, 1)
+            for k in range(active_experts)
+        }
+
+        last_switch_rate = (
+            (total_switches / total_switch_opportunities) * 100
+            if total_switch_opportunities > 0
+            else 0.0
+        )
+
+        for k in range(active_experts):
+            if usage_counts[k] == 0:
+                expert_consecutive_zero_usage[k] += 1
+            else:
+                expert_consecutive_zero_usage[k] = 0
+
+        # PPO Optimization Loop with Advantage Normalization
+        batch_size = total_samples
+        minibatch_size = batch_size // 4
+        b_inds = np.arange(batch_size)
+
+        for _ in range(UPDATE_EPOCHS):
+            np.random.shuffle(b_inds)
+            for start in range(0, batch_size, minibatch_size):
+                end = start + minibatch_size
+                mb_inds = b_inds[start:end]
+
+                mb_exp = flat_experts[mb_inds]
+                mb_adv = flat_advantages[mb_inds]
+
+                # Per-expert advantage normalization
+                mb_adv_norm = torch.zeros_like(mb_adv)
+                for k in range(active_experts):
+                    k_mask = mb_exp == k
+                    if k_mask.sum() > 1:
+                        k_adv = mb_adv[k_mask]
+                        mb_adv_norm[k_mask] = (k_adv - k_adv.mean()) / (
+                            k_adv.std() + 1e-8
+                        )
+                    elif k_mask.sum() == 1:
+                        mb_adv_norm[k_mask] = 0.0
+
+                mb_obs = flat_obs[mb_inds]
+                mb_role = flat_role[mb_inds]
+                mb_mask = flat_mask[mb_inds]
+                mb_state = flat_states[mb_inds]
+                mb_actions = flat_actions[mb_inds]
+                mb_logprobs = flat_logprobs[mb_inds]
+                mb_returns = flat_returns[mb_inds]
+
+                _, newlogprob, entropy, newvalue, _ = agent.get_action_and_value(
+                    mb_obs,
+                    mb_role,
+                    mb_mask,
+                    mb_state,
+                    active_experts=active_experts,
+                    action=mb_actions,
+                    expert_idx=mb_exp,
+                )
+
+                logratio = newlogprob - mb_logprobs
+                ratio = logratio.exp()
+
+                pg_loss1 = -mb_adv_norm * ratio
+                pg_loss2 = -mb_adv_norm * torch.clamp(
+                    ratio, 1 - CLIP_COEF, 1 + CLIP_COEF
+                )
+                pg_loss = torch.max(pg_loss1, pg_loss2).mean()
+
+                v_loss = 0.5 * ((newvalue - mb_returns) ** 2).mean()
+                entropy_loss = entropy.mean()
+
+                loss = pg_loss - (ENT_COEF * entropy_loss) + (VF_COEF * v_loss)
+
+                optimizer.zero_grad()
+                loss.backward()
+                nn.utils.clip_grad_norm_(agent.parameters(), 0.5)
+                optimizer.step()
+
+        # Lifecycle Step A: Sandbox Incubation Progression
+        if current_grace_expert is not None:
+            grace_counter += 1
+            if grace_counter >= THIEF_ISOLATION_UPDATES:
+                msg = (
+                    f"[Incubation Event] Update: {update} | Mutant E{current_grace_expert} "
+                    f"completed {THIEF_ISOLATION_UPDATES} sandbox updates. Calibrated Critic promoted to general bidding pool!"
+                )
+                console_logger.info(msg)
+                if file_logger:
+                    file_logger.info(msg)
+                current_grace_expert = None
+                grace_counter = 0
+
+        # Lifecycle Step B: Dynamic Deficit Spawning Check (post-update 100)
+        deficit_triggered, deficit_mask = check_deficit_trigger(
+            agent,
+            active_experts,
+            flat_obs,
+            flat_role,
+            flat_states,
+            update,
+            last_spawn_update,
+            current_grace_expert,
+            device,
+        )
+
+        if deficit_triggered:
+            total_spawns += 1
+            child_idx, best_parent, parent_val = recombine_and_mutate_thief(
+                agent,
+                active_experts,
+                flat_obs,
+                flat_role,
+                flat_mask,
+                flat_actions,
+                flat_returns,
+                flat_values,
+                flat_states,
+                deficit_mask,
+                device,
+            )
+            active_experts += 1
+            current_grace_expert = child_idx
+            grace_counter = 0
+            last_spawn_update = update
+
+            optimizer = torch.optim.Adam(agent.parameters(), lr=LR, eps=1e-5)
+
+            spawn_history.append(
+                {
+                    "update": update,
+                    "parent_expert": best_parent,
+                    "child_expert": child_idx,
+                    "parent_value": parent_val,
+                    "active_experts": active_experts,
+                    "total_spawns": total_spawns,
+                    "trigger": "critic_deficit_dynamic",
+                }
+            )
+
+            msg = (
+                f"[Deficit Evolution Event] Update: {update} | Triggered Dynamic Deficit Spawn! "
+                f"Spawned E{child_idx} via Deficit-Targeted Fisher Recombination (top parent E{best_parent}, val={parent_val:.3f}) | "
+                f"Active Pool: {active_experts} experts | Total Spawns: {total_spawns} | Entering 20-update Sandbox Incubation"
+            )
+            console_logger.info(msg)
+            if file_logger:
+                file_logger.info(msg)
+
+        # Lifecycle Step C: Extinction Culling
+        if current_grace_expert is None and active_experts > 2:
+            culled_indices = [
+                k
+                for k in range(1, active_experts)
+                if expert_consecutive_zero_usage[k] >= THIEF_CULL_WINDOW_UPDATES
+            ]
+
+            if culled_indices:
+                survivor_indices = [
+                    k for k in range(active_experts) if k not in culled_indices
+                ]
+                agent.prune_experts(survivor_indices)
+                active_experts = len(survivor_indices)
+
+                old_zero_usage = dict(expert_consecutive_zero_usage)
+                expert_consecutive_zero_usage.clear()
+                for new_idx, old_idx in enumerate(survivor_indices):
+                    expert_consecutive_zero_usage[new_idx] = old_zero_usage.get(
+                        old_idx, 0
+                    )
+
+                if env_previous_expert is not None:
+                    old_to_new = {
+                        old_idx: new_idx
+                        for new_idx, old_idx in enumerate(survivor_indices)
+                    }
+                    new_prev = torch.full_like(env_previous_expert, -1)
+                    for old_idx, new_idx in old_to_new.items():
+                        new_prev[env_previous_expert == old_idx] = new_idx
+                    env_previous_expert = new_prev
+
+                optimizer = torch.optim.Adam(agent.parameters(), lr=LR, eps=1e-5)
+
+                culled_names = ", ".join(f"E{i}" for i in culled_indices)
+                msg = (
+                    f"[Extinction Event] Update: {update} | Culled {len(culled_indices)} extinct expert(s) "
+                    f"({culled_names}) inactive for >= {THIEF_CULL_WINDOW_UPDATES} updates. Active pool: {active_experts}"
+                )
+                console_logger.info(msg)
+                if file_logger:
+                    file_logger.info(msg)
+
+        # Logging
+        if update % 5 == 0:
+            avg_win = np.mean(completed_wins[-100:]) if completed_wins else 0.0
+            avg_rew = (
+                np.mean(completed_episode_returns[-100:])
+                if completed_episode_returns
+                else 0.0
+            )
+            avg_steps = (
+                np.mean(completed_episode_steps[-100:])
+                if completed_episode_steps
+                else 0.0
+            )
+            avg_alarm = (
+                np.mean(completed_episode_alarms[-100:])
+                if completed_episode_alarms
+                else 0.0
+            )
+            avg_scout_int = (
+                np.mean(completed_scout_interact[-100:])
+                if completed_scout_interact
+                else 0.0
+            )
+            avg_scout_pois = (
+                np.mean(completed_scout_pois[-100:]) if completed_scout_pois else 0.0
+            )
+            avg_hacker_hack = (
+                np.mean(completed_hacker_hack[-100:]) if completed_hacker_hack else 0.0
+            )
+            avg_muscle_neut = (
+                np.mean(completed_muscle_neutralize[-100:])
+                if completed_muscle_neutralize
+                else 0.0
+            )
+            avg_muscle_guards = (
+                np.mean(completed_muscle_guards[-100:])
+                if completed_muscle_guards
+                else 0.0
+            )
+            avg_extractor_loot = (
+                np.mean(completed_extractor_loot[-100:])
+                if completed_extractor_loot
+                else 0.0
+            )
+            avg_agents_extract = (
+                np.mean(completed_agents_at_extract[-100:])
+                if completed_agents_at_extract
+                else 0.0
+            )
+
+            stage_max_steps = env_config.get("max_steps", 300)
+            stage_alarm_max = float(env_config.get("alarm_max", 100.0))
+            stage_guards = env_config.get("guard_count", 0)
+
+            usage_str = ", ".join(
+                f"E{k}: {last_expert_usage.get(k, 0.0)}%" for k in range(active_experts)
+            )
+
+            status_str = (
+                f"Update: {update}/{num_updates} | "
+                f"Win Rate: {avg_win:.2f} | "
+                f"Episodic Return: {avg_rew:.3f} | "
+                f"Steps: {avg_steps:.1f}/{stage_max_steps} | "
+                f"Alarm: {avg_alarm:.1f}/{stage_alarm_max:.0f} | "
+                f"Scout Tag Rate: {avg_scout_int:.2f} (Avg POIs: {avg_scout_pois:.1f}) | "
+                f"Hacker Hack Rate: {avg_hacker_hack:.2f} | "
+                f"Muscle Neutralize Rate: {avg_muscle_neut:.2f} (Avg Guards: {avg_muscle_guards:.1f}/{stage_guards}) | "
+                f"Extractor Loot Rate: {avg_extractor_loot:.2f} | "
+                f"Avg Agents at Extract: {avg_agents_extract:.2f}/4 | "
+                f"Active: {active_experts} | "
+                f"Total Spawns: {total_spawns} | "
+                f"Switch Rate: {last_switch_rate:.1f}% | "
+                f"Usage: [{usage_str}]"
+            )
+            console_logger.info(status_str)
+            if file_logger:
+                file_logger.info(status_str)
+
+    vec_env.close()
+
+    # Final Evaluation & Checkpoint Saving
+    if save_ckpt_dir:
+        os.makedirs(save_ckpt_dir, exist_ok=True)
+        model_save_path = os.path.join(save_ckpt_dir, "model.pt")
+        torch.save(
+            {
+                "model_state": agent.state_dict(),
+                "active_experts": active_experts,
+                "total_spawns": total_spawns,
+                "spawn_history": spawn_history,
+            },
+            model_save_path,
+        )
+        print(f"Saved final THIEF model to {model_save_path}")
+
+    avg_win = float(np.mean(completed_wins[-100:])) if completed_wins else 0.0
+    lifetime_win = float(np.mean(completed_wins)) if completed_wins else 0.0
+    avg_rew = (
+        float(np.mean(completed_episode_returns[-100:]))
+        if completed_episode_returns
+        else 0.0
+    )
+    avg_steps = (
+        float(np.mean(completed_episode_steps[-100:]))
+        if completed_episode_steps
+        else 0.0
+    )
+    avg_alarm = (
+        float(np.mean(completed_episode_alarms[-100:]))
+        if completed_episode_alarms
+        else 0.0
+    )
+    avg_scout_int = (
+        float(np.mean(completed_scout_interact[-100:]))
+        if completed_scout_interact
+        else 0.0
+    )
+    avg_scout_pois = (
+        float(np.mean(completed_scout_pois[-100:])) if completed_scout_pois else 0.0
+    )
+    avg_hacker_hack = (
+        float(np.mean(completed_hacker_hack[-100:])) if completed_hacker_hack else 0.0
+    )
+    avg_muscle_neut = (
+        float(np.mean(completed_muscle_neutralize[-100:]))
+        if completed_muscle_neutralize
+        else 0.0
+    )
+    avg_muscle_guards = (
+        float(np.mean(completed_muscle_guards[-100:]))
+        if completed_muscle_guards
+        else 0.0
+    )
+    avg_extractor_loot = (
+        float(np.mean(completed_extractor_loot[-100:]))
+        if completed_extractor_loot
+        else 0.0
+    )
+    avg_agents_extract = (
+        float(np.mean(completed_agents_at_extract[-100:]))
+        if completed_agents_at_extract
+        else 0.0
+    )
+
+    stage_max_steps = env_config.get("max_steps", 300)
+    stage_alarm_max = float(env_config.get("alarm_max", 100.0))
+    stage_guards = env_config.get("guard_count", 0)
+
+    results_data = {
+        "algo": algo_name,
+        "stage": stage_idx,
+        "win_rate": avg_win,
+        "lifetime_win_rate": lifetime_win,
+        "mean_reward": avg_rew,
+        "avg_episode_steps": avg_steps,
+        "max_stage_steps": stage_max_steps,
+        "avg_alarm": avg_alarm,
+        "stage_alarm_max": stage_alarm_max,
+        "scout_interact_rate": avg_scout_int,
+        "scout_avg_pois_tagged": avg_scout_pois,
+        "hacker_hack_rate": avg_hacker_hack,
+        "muscle_neutralize_rate": avg_muscle_neut,
+        "muscle_avg_guards_neutralized": avg_muscle_guards,
+        "total_stage_guards": stage_guards,
+        "extractor_loot_rate": avg_extractor_loot,
+        "avg_agents_at_extract": avg_agents_extract,
+        "active_experts": active_experts,
+        "total_spawns": total_spawns,
+        "expert_switch_rate": last_switch_rate,
+        "expert_usage_pct": last_expert_usage,
+        "spawn_history": spawn_history,
+    }
+
+    if log_dir is not None:
+        results_path = os.path.join(log_dir, "results.json")
+        with open(results_path, "w") as f:
+            json.dump(results_data, f, indent=4)
+        print(f"Saved results summary to {results_path}")
+
+
+if __name__ == "__main__":
+    train()
