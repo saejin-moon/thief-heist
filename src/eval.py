@@ -1,663 +1,609 @@
 """
-Unified Multi-Model Multi-Seed Evaluation Engine for Heist MARL Benchmark.
-Evaluates trained checkpoints across standardized random seeds for any combination
-of curriculum stages and algorithm paradigms under both Deterministic (argmax)
-and Stochastic (sampling) action selection modes.
+High-Throughput Parallel Evaluation Suite for Multi-Agent RL Heist Algorithms.
+Evaluates checkpoints across all curriculum stages in parallel using VectorEnv.
 """
 
 import argparse
 import json
-import math
 import os
-from collections import defaultdict
+import time
 
 import numpy as np
 import torch
-from torch.distributions.categorical import Categorical
 
 from constants import (
     AGENTS,
     CURRICULUM_STAGES,
-    MACRO_STEP,
     N_AGENTS,
 )
-from env import HeistEnv
+from vec_env import VectorEnv
 
 
-def parse_stages(stages_arg):
-    """Parses stage string like '0', '0-2', '0,1,3', or 'all' into a list of stage integers."""
-    if stages_arg is None or stages_arg.lower() == "all":
-        return list(range(len(CURRICULUM_STAGES)))
+# ----------------------------------------------------------------------
+# Universal Model Loaders
+# ----------------------------------------------------------------------
+def load_thief_model(ckpt_path, state_dim, device):
+    from train_thief import ThiefNetwork
 
-    if "-" in stages_arg:
-        parts = stages_arg.split("-")
-        start, end = int(parts[0]), int(parts[1])
-        return list(range(start, end + 1))
-
-    if "," in stages_arg:
-        return [int(x.strip()) for x in stages_arg.split(",") if x.strip()]
-
-    return [int(stages_arg)]
-
-
-def parse_seeds(seeds_arg):
-    """Parses seeds argument like '42,43,44' into a list of ints."""
-    if isinstance(seeds_arg, list):
-        return [int(x) for x in seeds_arg]
-    if isinstance(seeds_arg, int):
-        return [seeds_arg]
-    return [int(x.strip()) for x in seeds_arg.split(",") if x.strip()]
-
-
-def parse_models(models_arg):
-    """Parses models argument into a list of model identifiers or checkpoint paths."""
-    all_known_algos = ["thief", "hmappo", "mappo", "ecoop", "coma", "marc", "coop"]
-    if models_arg is None or models_arg.lower() == "all":
-        return all_known_algos
-
-    if "," in models_arg:
-        return [x.strip() for x in models_arg.split(",") if x.strip()]
-
-    return [models_arg.strip()]
-
-
-def load_agent(model_key, stage_idx, state_dim, ckpt_path=None, device="cpu"):
-    """
-    Instantiates and loads the correct network architecture for each MARL paradigm.
-    Returns: (agent, meta_dict)
-    """
-    is_direct_path = model_key.endswith(".pt") or os.path.isfile(model_key)
-    if is_direct_path:
-        path = model_key
-        # Infer algo from path
-        algo_name = "mappo"
-        for candidate in ["thief", "hmappo", "ecoop", "coma", "marc", "coop", "mappo"]:
-            if candidate in path.lower():
-                algo_name = candidate
-                break
-    else:
-        algo_name = model_key.lower()
-        path = ckpt_path or f"results/{algo_name}/stage_{stage_idx}/model.pt"
-
-    if not os.path.exists(path):
-        return None, f"Checkpoint not found at {path}"
-
-    try:
-        ckpt = torch.load(path, map_location=device, weights_only=False)
-    except Exception as e:  # noqa: BLE001
-        return None, f"Failed to load checkpoint ({e})"
-
+    ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
     state_dict = (
         ckpt["model_state"]
-        if (isinstance(ckpt, dict) and "model_state" in ckpt)
+        if isinstance(ckpt, dict) and "model_state" in ckpt
         else ckpt
     )
-    meta = {}
 
-    if algo_name == "thief":
-        from train_thief import ThiefNetwork
-
-        expert_indices = {
-            int(k.split(".")[1]) for k in state_dict if k.startswith("experts.")
-        }
-        needed = max(expert_indices) + 1 if expert_indices else 2
-        agent = ThiefNetwork(state_dim, num_initial_experts=needed).to(device)
-        while len(agent.experts) < needed:
-            agent.add_expert()
-        agent.load_state_dict(state_dict)
-        agent.eval()
-        meta["active_experts"] = (
-            ckpt.get("active_experts", len(agent.experts))
-            if isinstance(ckpt, dict)
-            else len(agent.experts)
-        )
-        return agent, meta
-
-    elif algo_name == "ecoop":
-        from train_ecoop import EcoopNetwork
-
-        expert_indices = {
-            int(k.split(".")[1]) for k in state_dict if k.startswith("experts.")
-        }
-        needed = max(expert_indices) + 1 if expert_indices else 1
-        agent = EcoopNetwork(state_dim, num_initial_experts=needed).to(device)
-        while len(agent.experts) < needed:
-            agent.add_expert()
-        agent.load_state_dict(state_dict)
-        agent.eval()
-        meta["active_experts"] = (
-            ckpt.get("active_experts", len(agent.experts))
-            if isinstance(ckpt, dict)
-            else len(agent.experts)
-        )
-        return agent, meta
-
-    elif algo_name == "hmappo":
-        from train_hmappo import HierarchicalNetwork
-
-        agent = HierarchicalNetwork(state_dim).to(device)
-        agent.load_state_dict(state_dict)
-        agent.eval()
-        return agent, meta
-
-    elif algo_name == "mappo":
-        from train_mappo import MappoNetwork
-
-        agent = MappoNetwork(state_dim).to(device)
-        agent.load_state_dict(state_dict)
-        agent.eval()
-        return agent, meta
-
-    elif algo_name == "coma":
-        from train_coma import ComaNetwork
-
-        agent = ComaNetwork(state_dim).to(device)
-        agent.load_state_dict(state_dict)
-        agent.eval()
-        return agent, meta
-
-    elif algo_name == "marc":
-        from train_marc import MarcNetwork
-
-        agent = MarcNetwork(state_dim).to(device)
-        agent.load_state_dict(state_dict)
-        agent.eval()
-        return agent, meta
-
-    elif algo_name == "coop":
-        from train_coop import CoopNetwork
-
-        agent = CoopNetwork(state_dim).to(device)
-        agent.load_state_dict(state_dict)
-        agent.eval()
-        return agent, meta
-
-    else:
-        # Fallback to standard MAPPO
-        from train_mappo import MappoNetwork
-
-        agent = MappoNetwork(state_dim).to(device)
-        agent.load_state_dict(state_dict)
-        agent.eval()
-        return agent, meta
-
-
-def get_actions(
-    agent,
-    algo_name,
-    obs_dict,
-    state_arr,
-    step,
-    hmappo_goals,
-    deterministic=True,
-    device="cpu",
-    meta=None,
-):
-    """
-    Executes policy action inference across all agents.
-    Returns: actions_dict mapping agent_name -> action_int
-    """
-    meta = meta or {}
-    actions = {}
-
-    obs_t = {
-        a: torch.tensor(
-            obs_dict[a]["observation"], dtype=torch.float32, device=device
-        ).unsqueeze(0)
-        for a in AGENTS
+    expert_indices = {
+        int(k.split(".")[1]) for k in state_dict if k.startswith("experts.")
     }
-    role_t = {
-        a: torch.tensor(
-            obs_dict[a]["role_id"], dtype=torch.float32, device=device
-        ).unsqueeze(0)
-        for a in AGENTS
-    }
-    mask_t = {
-        a: torch.tensor(
-            obs_dict[a]["action_mask"], dtype=torch.float32, device=device
-        ).unsqueeze(0)
-        for a in AGENTS
-    }
-    state_t = torch.tensor(state_arr, dtype=torch.float32, device=device).unsqueeze(0)
+    needed = max(expert_indices) + 1 if expert_indices else 2
 
-    with torch.no_grad():
-        if algo_name == "thief":
-            active_experts = meta.get("active_experts", len(agent.experts))
-            prev_expert = meta.get("previous_expert")
+    model = ThiefNetwork(state_dim, num_initial_experts=needed).to(device)
+    while len(model.experts) < needed:
+        model.add_expert()
+    if len(model.experts) > needed:
+        model.prune_experts(list(range(needed)))
 
-            obs_stack = torch.cat([obs_t[a] for a in AGENTS], dim=0)
-            role_stack = torch.cat([role_t[a] for a in AGENTS], dim=0)
-            mask_stack = torch.cat([mask_t[a] for a in AGENTS], dim=0)
-            state_stack = state_t.repeat(N_AGENTS, 1)
+    model.load_state_dict(state_dict)
+    model.eval()
 
-            acts, _, _, _, chosen_expert = agent.get_action_and_value(
-                obs_stack,
-                role_stack,
-                mask_stack,
-                state_stack,
+    active_experts = (
+        int(ckpt.get("active_experts", len(model.experts)))
+        if isinstance(ckpt, dict)
+        else len(model.experts)
+    )
+
+    def policy_fn(
+        obs_all, role_all, mask_all, state_rep, prev_experts, deterministic=True
+    ):
+        with torch.no_grad():
+            actions, _, _, _, chosen_expert = model.get_action_and_value(
+                obs_all.flatten(0, 1),
+                role_all.flatten(0, 1),
+                mask_all.flatten(0, 1),
+                state_rep,
                 active_experts=active_experts,
-                previous_expert=prev_expert,
+                previous_expert=prev_experts,
                 deterministic=deterministic,
             )
-            meta["previous_expert"] = chosen_expert
-            for i, a in enumerate(AGENTS):
-                actions[a] = int(acts[i].item())
+            return actions, chosen_expert
 
-        elif algo_name == "ecoop":
-            active_experts = meta.get("active_experts", len(agent.experts))
-            prev_expert = meta.get("previous_expert")
+    return policy_fn
 
-            obs_stack = torch.cat([obs_t[a] for a in AGENTS], dim=0)
-            role_stack = torch.cat([role_t[a] for a in AGENTS], dim=0)
-            mask_stack = torch.cat([mask_t[a] for a in AGENTS], dim=0)
-            state_stack = state_t.repeat(N_AGENTS, 1)
 
-            acts, _, _, _, chosen_expert = agent.get_action_and_value(
-                obs_stack,
-                role_stack,
-                mask_stack,
-                state_stack,
+def load_ecoop_model(ckpt_path, state_dim, device):
+    from train_ecoop import EcoopNetwork
+
+    ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
+    state_dict = (
+        ckpt["model_state"]
+        if isinstance(ckpt, dict) and "model_state" in ckpt
+        else ckpt
+    )
+
+    expert_indices = {
+        int(k.split(".")[1]) for k in state_dict if k.startswith("experts.")
+    }
+    needed = max(expert_indices) + 1 if expert_indices else 1
+
+    model = EcoopNetwork(state_dim, num_initial_experts=needed).to(device)
+    while len(model.experts) < needed:
+        model.add_expert()
+    if len(model.experts) > needed:
+        model.prune_experts(list(range(needed)))
+
+    model.load_state_dict(state_dict)
+    model.eval()
+
+    active_experts = (
+        int(ckpt.get("active_experts", len(model.experts)))
+        if isinstance(ckpt, dict)
+        else len(model.experts)
+    )
+
+    def policy_fn(
+        obs_all, role_all, mask_all, state_rep, prev_experts, deterministic=True
+    ):
+        with torch.no_grad():
+            actions, _, _, _, chosen_expert = model.get_action_and_value(
+                obs_all.flatten(0, 1),
+                role_all.flatten(0, 1),
+                mask_all.flatten(0, 1),
+                state_rep,
                 active_experts=active_experts,
-                previous_expert=prev_expert,
+                previous_expert=prev_experts,
             )
-            meta["previous_expert"] = chosen_expert
-            for i, a in enumerate(AGENTS):
-                actions[a] = int(acts[i].item())
+            return actions, chosen_expert
 
-        elif algo_name == "hmappo":
-            role_stack = torch.cat([role_t[a] for a in AGENTS], dim=0)
-            state_stack = state_t.repeat(N_AGENTS, 1)
-
-            # High-level Manager updates macro sub-goal every MACRO_STEP steps
-            if step % MACRO_STEP == 0 or hmappo_goals is None:
-                m_acts, _, _, _ = agent.get_manager_action_and_value(
-                    state_stack, role_stack
-                )
-                hmappo_goals = m_acts
-
-            for i, a in enumerate(AGENTS):
-                goal_i = hmappo_goals[i].unsqueeze(0)
-                x = torch.cat([obs_t[a].flatten(start_dim=1), role_t[a], goal_i], dim=1)
-                logits = agent.worker_actor(x)
-                masked_logits = logits + ((1.0 - mask_t[a]) * -1e9)
-                if deterministic:
-                    act = masked_logits.argmax(dim=-1).item()
-                else:
-                    dist = Categorical(logits=masked_logits)
-                    act = dist.sample().item()
-                actions[a] = int(act)
-
-        elif algo_name in ["coma", "mappo", "marc", "coop"]:
-            for a in AGENTS:
-                x_actor = torch.cat([obs_t[a].flatten(start_dim=1), role_t[a]], dim=1)
-                logits = agent.actor(x_actor)
-                masked_logits = logits + ((1.0 - mask_t[a]) * -1e9)
-                if deterministic:
-                    act = masked_logits.argmax(dim=-1).item()
-                else:
-                    dist = Categorical(logits=masked_logits)
-                    act = dist.sample().item()
-                actions[a] = int(act)
-
-    return actions, hmappo_goals
+    return policy_fn
 
 
-def evaluate_seed(
-    agent,
+def load_hmappo_model(ckpt_path, state_dim, device):
+    from train_hmappo import HMappoAgent
+
+    ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
+    state_dict = (
+        ckpt["model_state"]
+        if isinstance(ckpt, dict) and "model_state" in ckpt
+        else ckpt
+    )
+
+    agent = HMappoAgent(state_dim).to(device)
+    agent.load_state_dict(state_dict)
+    agent.eval()
+
+    manager_goals = None
+    step_count = [0]
+
+    def policy_fn(
+        obs_all, role_all, mask_all, state_rep, prev_experts, deterministic=True
+    ):
+        nonlocal manager_goals
+        batch_size = obs_all.shape[1]
+        with torch.no_grad():
+            # Manager updates every 10 steps
+            if step_count[0] % 10 == 0 or manager_goals is None:
+                # State rep is (N_AGENTS * num_envs, state_dim) -> extract per-env state
+                env_states = state_rep[:batch_size]
+                _, m_goals, _, _ = agent.get_manager_action_and_value(env_states)
+                manager_goals = m_goals.repeat(N_AGENTS, 1)
+
+            step_count[0] += 1
+
+            actions, _, _, _ = agent.get_worker_action_and_value(
+                obs_all.flatten(0, 1),
+                role_all.flatten(0, 1),
+                manager_goals,
+                mask_all.flatten(0, 1),
+                state_rep,
+            )
+            return actions, None
+
+    return policy_fn
+
+
+def load_mappo_model(ckpt_path, state_dim, device):
+    from train_mappo import MappoNetwork
+
+    ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
+    state_dict = (
+        ckpt["model_state"]
+        if isinstance(ckpt, dict) and "model_state" in ckpt
+        else ckpt
+    )
+
+    model = MappoNetwork(state_dim).to(device)
+    model.load_state_dict(state_dict)
+    model.eval()
+
+    def policy_fn(
+        obs_all, role_all, mask_all, state_rep, prev_experts, deterministic=True
+    ):
+        with torch.no_grad():
+            actions, _, _, _ = model.get_action_and_value(
+                obs_all.flatten(0, 1),
+                role_all.flatten(0, 1),
+                mask_all.flatten(0, 1),
+                state_rep,
+            )
+            return actions, None
+
+    return policy_fn
+
+
+def load_coop_model(ckpt_path, state_dim, device):
+    from train_coop import CoopNetwork
+
+    ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
+    state_dict = (
+        ckpt["model_state"]
+        if isinstance(ckpt, dict) and "model_state" in ckpt
+        else ckpt
+    )
+
+    model = CoopNetwork(state_dim).to(device)
+    model.load_state_dict(state_dict)
+    model.eval()
+
+    def policy_fn(
+        obs_all, role_all, mask_all, state_rep, prev_experts, deterministic=True
+    ):
+        with torch.no_grad():
+            actions, _, _, _ = model.get_action_and_value(
+                obs_all.flatten(0, 1),
+                role_all.flatten(0, 1),
+                mask_all.flatten(0, 1),
+                state_rep,
+            )
+            return actions, None
+
+    return policy_fn
+
+
+def load_marc_model(ckpt_path, state_dim, device):
+    from train_marc import MarcNetwork
+
+    ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
+    state_dict = (
+        ckpt["model_state"]
+        if isinstance(ckpt, dict) and "model_state" in ckpt
+        else ckpt
+    )
+
+    model = MarcNetwork(state_dim).to(device)
+    model.load_state_dict(state_dict)
+    model.eval()
+
+    def policy_fn(
+        obs_all, role_all, mask_all, state_rep, prev_experts, deterministic=True
+    ):
+        with torch.no_grad():
+            actions, _, _, _ = model.get_action_and_value(
+                obs_all.flatten(0, 1),
+                role_all.flatten(0, 1),
+                mask_all.flatten(0, 1),
+                state_rep,
+            )
+            return actions, None
+
+    return policy_fn
+
+
+def load_coma_model(ckpt_path, state_dim, device):
+    from train_coma import ComaActor
+
+    ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
+    state_dict = (
+        ckpt["model_state"]
+        if isinstance(ckpt, dict) and "model_state" in ckpt
+        else ckpt
+    )
+
+    # Extract actor weights
+    actor_state = {
+        k.replace("actor.", ""): v
+        for k, v in state_dict.items()
+        if k.startswith("actor.")
+    }
+    model = ComaActor().to(device)
+    model.load_state_dict(actor_state if actor_state else state_dict)
+    model.eval()
+
+    def policy_fn(
+        obs_all, role_all, mask_all, state_rep, prev_experts, deterministic=True
+    ):
+        with torch.no_grad():
+            x_actor = torch.cat(
+                [obs_all.flatten(0, 1).flatten(1), role_all.flatten(0, 1)], dim=1
+            )
+            logits = model(x_actor)
+            masked_logits = logits + ((1.0 - mask_all.flatten(0, 1)) * -1e9)
+            if deterministic:
+                actions = masked_logits.argmax(dim=-1)
+            else:
+                dist = torch.distributions.Categorical(logits=masked_logits)
+                actions = dist.sample()
+            return actions, None
+
+    return policy_fn
+
+
+MODEL_LOADERS = {
+    "thief": load_thief_model,
+    "ecoop": load_ecoop_model,
+    "hmappo": load_hmappo_model,
+    "mappo": load_mappo_model,
+    "coop": load_coop_model,
+    "marc": load_marc_model,
+    "coma": load_coma_model,
+}
+
+
+# ----------------------------------------------------------------------
+# Parallel Vectorized Evaluation Engine
+# ----------------------------------------------------------------------
+def evaluate_checkpoint(
     algo_name,
     stage_idx,
-    env_config,
-    seed,
-    num_episodes=100,
+    ckpt_path,
+    target_episodes=100,
+    num_envs=16,
+    device=None,
     deterministic=True,
-    device="cpu",
-    meta_init=None,
+    base_seed=10000,
 ):
     """
-    Evaluates a model over `num_episodes` in a fixed environment instance seeded with `seed`.
+    Evaluates a model checkpoint in parallel using VectorEnv.
+    Returns rich dictionary of aggregated milestone statistics.
     """
-    env = HeistEnv(env_config)
-    meta = dict(meta_init or {})
+    if device is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    wins = []
-    returns = []
-    episode_steps = []
-    alarms = []
-    scout_pois = []
-    hacker_hacks = []
-    muscle_guards = []
-    extractor_loots = []
-    agents_extracted = []
+    stage_config = CURRICULUM_STAGES[stage_idx].copy()
+    env_config = stage_config.copy()
+    env_config.pop("timesteps", None)
 
-    for ep in range(num_episodes):
-        ep_seed = seed * 10000 + ep
-        obs, _info = env.reset(seed=ep_seed)
-        state = env.state()
-        done = False
-        step = 0
-        ep_rew = 0.0
-        hmappo_goals = None
-        meta["previous_expert"] = None
+    vec_env = VectorEnv(num_envs, config=env_config, base_seed=base_seed)
+    state_dim = vec_env.state_dim
 
-        while not done:
-            acts, hmappo_goals = get_actions(
-                agent,
-                algo_name,
-                obs,
-                state,
-                step,
-                hmappo_goals,
-                deterministic=deterministic,
-                device=device,
-                meta=meta,
+    # Load policy function
+    loader = MODEL_LOADERS.get(algo_name.lower())
+    if loader is None:
+        raise ValueError(f"Unknown algorithm loader: {algo_name}")
+
+    policy_fn = loader(ckpt_path, state_dim, device)
+
+    # Evaluation accumulators
+    completed_wins = []
+    completed_returns = []
+    completed_steps = []
+    completed_alarms = []
+    completed_scout_interact = []
+    completed_scout_pois = []
+    completed_hacker_hack = []
+    completed_muscle_neutralize = []
+    completed_muscle_guards = []
+    completed_extractor_loot = []
+    completed_agents_extract = []
+
+    current_returns = np.zeros(num_envs)
+    env_prev_experts = None
+
+    next_obs, next_state = vec_env.reset(seed=base_seed)
+    start_time = time.time()
+
+    while len(completed_wins) < target_episodes:
+        with torch.no_grad():
+            stacked = next_obs["_stacked"]
+            obs_all = torch.tensor(
+                stacked["observation"], dtype=torch.float32, device=device
+            )
+            role_all = torch.tensor(
+                stacked["role_id"], dtype=torch.float32, device=device
+            )
+            mask_all = torch.tensor(
+                stacked["action_mask"], dtype=torch.float32, device=device
+            )
+            state_rep = (
+                torch.tensor(next_state, dtype=torch.float32)
+                .to(device)
+                .repeat(N_AGENTS, 1)
             )
 
-            obs, rewards, terms, truncs, infos = env.step(acts)
-            state = env.state()
-            step += 1
-            step_reward = sum(rewards[a] for a in AGENTS) / float(N_AGENTS)
-            ep_rew += step_reward
+            actions, chosen_expert = policy_fn(
+                obs_all,
+                role_all,
+                mask_all,
+                state_rep,
+                env_prev_experts,
+                deterministic=deterministic,
+            )
 
-            done = terms["scout"] or truncs["scout"]
+            if chosen_expert is not None:
+                env_prev_experts = chosen_expert
 
-        scout_info = infos["scout"]
-        is_win = bool(scout_info.get("win", False))
-        wins.append(float(is_win))
-        returns.append(float(ep_rew))
-        episode_steps.append(float(scout_info.get("steps", step)))
-        alarms.append(float(scout_info.get("alarm", 0.0)))
-        scout_pois.append(float(scout_info.get("scout_pois_tagged", 0)))
-        hacker_hacks.append(float(scout_info.get("hacker_hack_success", False)))
-        muscle_guards.append(float(scout_info.get("muscle_guards_neutralized", 0)))
-        extractor_loots.append(float(scout_info.get("extractor_loot_success", False)))
-        agents_extracted.append(float(scout_info.get("agents_at_extract", 0)))
+            actions_unflattened = actions.view(N_AGENTS, num_envs)
+            actions_dict = {
+                a: actions_unflattened[i].cpu().numpy() for i, a in enumerate(AGENTS)
+            }
 
-    total_stage_guards = env_config.get("guard_count", 0)
-    neut_rate = (
-        (np.mean(muscle_guards) / total_stage_guards) if total_stage_guards > 0 else 0.0
-    )
+        next_obs, rewards, terms, truncs, infos = vec_env.step(actions_dict)
+        next_state = vec_env.state
 
-    return {
-        "win_rate": float(np.mean(wins)),
-        "mean_reward": float(np.mean(returns)),
-        "avg_episode_steps": float(np.mean(episode_steps)),
-        "avg_alarm": float(np.mean(alarms)),
-        "scout_avg_pois_tagged": float(np.mean(scout_pois)),
-        "hacker_hack_rate": float(np.mean(hacker_hacks)),
-        "muscle_avg_guards_neutralized": float(np.mean(muscle_guards)),
-        "muscle_neutralize_rate": float(neut_rate),
-        "extractor_loot_rate": float(np.mean(extractor_loots)),
-        "avg_agents_at_extract": float(np.mean(agents_extracted)),
-        "episodes": num_episodes,
+        # Accumulate per-agent mean step reward
+        step_reward = sum(rewards[a] for a in AGENTS) / N_AGENTS
+        current_returns += step_reward
+
+        for e in range(num_envs):
+            is_done = terms["scout"][e] or truncs["scout"][e]
+            if is_done and len(completed_wins) < target_episodes:
+                scout_info = infos[e]["scout"]
+                is_win = bool(scout_info.get("win", False))
+
+                completed_wins.append(float(is_win))
+                completed_returns.append(float(current_returns[e]))
+                current_returns[e] = 0.0
+
+                completed_steps.append(float(scout_info.get("steps", 0)))
+                completed_alarms.append(float(scout_info.get("alarm", 0.0)))
+                completed_scout_interact.append(
+                    float(scout_info.get("scout_interact_success", False))
+                )
+                completed_scout_pois.append(
+                    float(scout_info.get("scout_pois_tagged", 0))
+                )
+                completed_hacker_hack.append(
+                    float(scout_info.get("hacker_hack_success", False))
+                )
+                completed_muscle_neutralize.append(
+                    float(scout_info.get("muscle_neutralize_success", False))
+                )
+                completed_muscle_guards.append(
+                    float(scout_info.get("muscle_guards_neutralized", 0))
+                )
+                completed_extractor_loot.append(
+                    float(scout_info.get("extractor_loot_success", False))
+                )
+                completed_agents_extract.append(
+                    float(scout_info.get("agents_at_extract", 0))
+                )
+
+                if env_prev_experts is not None:
+                    for ag_i in range(N_AGENTS):
+                        env_prev_experts[ag_i * num_envs + e] = -1
+
+    vec_env.close()
+    elapsed_time = time.time() - start_time
+
+    results = {
+        "algo": algo_name,
+        "stage": stage_idx,
+        "episodes_evaluated": len(completed_wins),
+        "evaluation_time_sec": round(elapsed_time, 2),
+        "episodes_per_sec": round(len(completed_wins) / elapsed_time, 1),
+        "win_rate": float(np.mean(completed_wins)),
+        "win_rate_std": float(np.std(completed_wins)),
+        "mean_return": float(np.mean(completed_returns)),
+        "mean_return_std": float(np.std(completed_returns)),
+        "avg_steps": float(np.mean(completed_steps)),
+        "max_stage_steps": stage_config.get("max_steps", 300),
+        "avg_alarm": float(np.mean(completed_alarms)),
+        "stage_alarm_max": stage_config.get("alarm_max", 100.0),
+        "scout_tag_rate": float(np.mean(completed_scout_interact)),
+        "scout_avg_pois": float(np.mean(completed_scout_pois)),
+        "hacker_hack_rate": float(np.mean(completed_hacker_hack)),
+        "muscle_neutralize_rate": float(np.mean(completed_muscle_neutralize)),
+        "muscle_avg_guards": float(np.mean(completed_muscle_guards)),
+        "total_stage_guards": stage_config.get("guard_count", 0),
+        "extractor_loot_rate": float(np.mean(completed_extractor_loot)),
+        "avg_agents_extract": float(np.mean(completed_agents_extract)),
     }
+    return results
 
 
-def aggregate_seeds(per_seed_results):
-    """
-    Computes mean and standard error across all evaluated seeds.
-    """
-    keys = [
-        "win_rate",
-        "mean_reward",
-        "avg_episode_steps",
-        "avg_alarm",
-        "scout_avg_pois_tagged",
-        "hacker_hack_rate",
-        "muscle_avg_guards_neutralized",
-        "muscle_neutralize_rate",
-        "extractor_loot_rate",
-        "avg_agents_at_extract",
-    ]
-    agg = {}
-    n_seeds = len(per_seed_results)
-
-    for k in keys:
-        vals = [res[k] for res in per_seed_results.values()]
-        mean_val = float(np.mean(vals))
-        std_err = (
-            float(np.std(vals, ddof=1) / math.sqrt(n_seeds)) if n_seeds > 1 else 0.0
-        )
-        agg[f"{k}_mean"] = round(mean_val, 4)
-        agg[f"{k}_stderr"] = round(std_err, 4)
-
-    return agg
-
-
-def format_table(
-    stage_idx, stage_config, results_dict, mode_label, n_seeds, episodes_per_seed
-):
-    """
-    Formats a clean ASCII table of comparative metrics for a stage.
-    """
-    total_eps = n_seeds * episodes_per_seed
-    stage_name = stage_config.get("name", f"Stage {stage_idx}")
-    max_steps = stage_config.get("max_steps", 300)
-    guards = stage_config.get("guard_count", 0)
-
-    header = (
-        f"\n{'=' * 115}\n"
-        f"[{mode_label.upper()} EVALUATION] Stage {stage_idx}: {stage_name} "
-        f"({max_steps} max steps, {guards} guards) | {n_seeds} seeds x {episodes_per_seed} eps ({total_eps} eps total)\n"
-        f"{'=' * 115}\n"
-        f"{'Algorithm':<12} | {'Win Rate (%)':<18} | {'Mean Return':<16} | {'Avg Steps':<18} | {'Avg Alarm':<16} | {'Hack (%)':<10} | {'Loot (%)':<10}\n"
-        f"{'-' * 115}"
-    )
-    lines = [header]
-
-    for algo, stage_data in results_dict.items():
-        if f"stage_{stage_idx}" not in stage_data:
-            continue
-        st_data = stage_data[f"stage_{stage_idx}"]
-        win_m = st_data["win_rate_mean"] * 100
-        win_se = st_data["win_rate_stderr"] * 100
-        ret_m = st_data["mean_reward_mean"]
-        ret_se = st_data["mean_reward_stderr"]
-        steps_m = st_data["avg_episode_steps_mean"]
-        steps_se = st_data["avg_episode_steps_stderr"]
-        alarm_m = st_data["avg_alarm_mean"]
-        alarm_se = st_data["avg_alarm_stderr"]
-        hack_m = st_data["hacker_hack_rate_mean"] * 100
-        loot_m = st_data["extractor_loot_rate_mean"] * 100
-
-        win_str = f"{win_m:5.1f} +/- {win_se:4.2f}"
-        ret_str = f"{ret_m:5.2f} +/- {ret_se:4.2f}"
-        steps_str = f"{steps_m:6.1f} +/- {steps_se:4.1f}"
-        alarm_str = f"{alarm_m:4.1f} +/- {alarm_se:3.1f}"
-        hack_str = f"{hack_m:4.1f}%"
-        loot_str = f"{loot_m:4.1f}%"
-
-        line = f"{algo.upper():<12} | {win_str:<18} | {ret_str:<16} | {steps_str:<18} | {alarm_str:<16} | {hack_str:<10} | {loot_str:<10}"
-        lines.append(line)
-
-    lines.append("=" * 115)
-    return "\n".join(lines)
-
-
-def run_eval():
-    parser = argparse.ArgumentParser(
-        description="Unified Multi-Model Multi-Seed Evaluation Engine for Heist"
-    )
+# ----------------------------------------------------------------------
+# CLI Runner & Multi-Model Multi-Stage Batch Evaluation
+# ----------------------------------------------------------------------
+def parse_eval_args():
+    parser = argparse.ArgumentParser(description="High-Throughput Parallel Evaluator")
     parser.add_argument(
-        "--models",
         "--algo",
-        "--algos",
         type=str,
         default="all",
-        help="Models to evaluate: comma-separated names ('thief,hmappo,mappo,ecoop,coma'), 'all', or path to model.pt",
+        choices=["thief", "hmappo", "mappo", "ecoop", "coop", "marc", "coma", "all"],
+        help="Algorithm to evaluate or 'all'",
     )
     parser.add_argument(
         "--stages",
-        "--stage",
         type=str,
         default="all",
-        help="Curriculum stages to evaluate: '0', '0-4', '0,1,3', or 'all'",
+        help="Stages to evaluate ('0', '0-4', 'all')",
     )
     parser.add_argument(
-        "--seeds",
-        type=str,
-        default="42,43,44",
-        help="Comma-separated random seeds (e.g. '42,43,44')",
+        "--stage",
+        type=int,
+        default=None,
+        help="Convenience alias to evaluate single stage",
     )
     parser.add_argument(
         "--episodes",
         type=int,
         default=100,
-        help="Number of evaluation episodes per seed per stage",
+        help="Number of evaluation episodes per stage (default: 100)",
     )
     parser.add_argument(
-        "--mode",
-        type=str,
-        choices=["both", "determ", "stocha"],
-        default="both",
-        help="Evaluation action mode: 'both' (default, runs determ + stocha), 'determ', or 'stocha'",
+        "--num-envs",
+        type=int,
+        default=16,
+        help="Number of parallel worker environments (default: 16)",
     )
     parser.add_argument(
-        "--output-dir",
+        "--ckpt",
         type=str,
-        default="results/eval",
-        help="Directory to save evaluation results and summaries",
+        default=None,
+        help="Direct path to checkpoint model.pt to evaluate",
     )
     parser.add_argument(
-        "--device",
-        type=str,
-        default="cuda" if torch.cuda.is_available() else "cpu",
-        help="Torch compute device ('cuda' or 'cpu')",
+        "--stochastic",
+        action="store_true",
+        help="Use stochastic action sampling instead of deterministic argmax",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=10000,
+        help="Base evaluation seed",
+    )
+    return parser.parse_args()
+
+
+def main():
+    args = parse_eval_args()
+    deterministic = not args.stochastic
+
+    stages = (
+        [args.stage]
+        if args.stage is not None
+        else (
+            list(range(len(CURRICULUM_STAGES)))
+            if args.stages == "all"
+            else [int(x) for x in args.stages.split(",") if x]
+        )
     )
 
-    args = parser.parse_args()
+    algos = (
+        ["thief", "hmappo", "mappo", "ecoop", "coop", "marc", "coma"]
+        if args.algo == "all"
+        else [args.algo]
+    )
 
-    models_to_eval = parse_models(args.models)
-    stages_to_eval = parse_stages(args.stages)
-    seeds = parse_seeds(args.seeds)
-    episodes_per_seed = args.episodes
-    device = torch.device(args.device)
-    os.makedirs(args.output_dir, exist_ok=True)
+    all_eval_results = []
 
-    modes = []
-    if args.mode in ["both", "determ"]:
-        modes.append(("determ", True, "Deterministic (Argmax)"))
-    if args.mode in ["both", "stocha"]:
-        modes.append(("stocha", False, "Stochastic (Sampling)"))
-
-    print(f"\n{'=' * 80}")
-    print("HEIST MULTI-MODEL MULTI-SEED EVALUATION ENGINE")
-    print(f"Models: {models_to_eval}")
-    print(f"Stages: {stages_to_eval}")
-    print(f"Seeds: {seeds} ({len(seeds)} seeds)")
+    print(f"\n{'=' * 85}")
     print(
-        f"Episodes per seed: {episodes_per_seed} ({len(seeds) * episodes_per_seed} per stage)"
+        f"PARALLEL EVALUATION SUITE (Envs: {args.num_envs} | Episodes: {args.episodes} | Greedy: {deterministic})"
     )
-    print(f"Modes: {[m[0] for m in modes]}")
-    print(f"Device: {device}")
-    print(f"{'=' * 80}\n")
+    print(f"{'=' * 85}\n")
 
-    eval_json_data = {
-        "determ": defaultdict(dict),
-        "stocha": defaultdict(dict),
-    }
+    for stage_idx in stages:
+        print(
+            f"\n--- STAGE {stage_idx} (Max Steps: {CURRICULUM_STAGES[stage_idx]['max_steps']}) ---"
+        )
+        print(
+            f"{'Algorithm':<10} | {'Win Rate':<10} | {'Mean Return':<12} | {'Steps':<14} | {'Alarm':<12} | {'Extract':<10} | {'Eval Time':<10}"
+        )
+        print("-" * 85)
 
-    dummy_env = HeistEnv(CURRICULUM_STAGES[0])
-    dummy_env.reset()
-    state_dim = dummy_env.state().shape[0]
-
-    for mode_key, is_determ, mode_desc in modes:
-        print(f"\n>>> Running {mode_desc} Evaluation...")
-
-        for stage_idx in stages_to_eval:
-            stage_config = CURRICULUM_STAGES[stage_idx]
-
-            for model_id in models_to_eval:
-                agent, meta_or_err = load_agent(
-                    model_id, stage_idx, state_dim, device=device
+        for algo in algos:
+            # Checkpoint resolution
+            if args.ckpt and os.path.exists(args.ckpt):
+                ckpt_path = args.ckpt
+            else:
+                ckpt_candidates = [
+                    f"results/{algo}/stage_{stage_idx}/model.pt",
+                    f"results/{algo}/seed_0/stage_{stage_idx}/model.pt",
+                ]
+                ckpt_path = next(
+                    (c for c in ckpt_candidates if os.path.exists(c)), None
                 )
-                if agent is None:
-                    print(f"  [Skipping] {model_id} Stage {stage_idx}: {meta_or_err}")
-                    continue
 
-                algo_name = model_id.split("/")[-1].split(".")[0].lower()
-                for known in [
-                    "thief",
-                    "hmappo",
-                    "ecoop",
-                    "coma",
-                    "marc",
-                    "coop",
-                    "mappo",
-                ]:
-                    if known in model_id.lower():
-                        algo_name = known
-                        break
+            if ckpt_path is None:
+                print(f"{algo:<10} | {'[No Checkpoint Found]':<65}")
+                continue
+
+            try:
+                res = evaluate_checkpoint(
+                    algo_name=algo,
+                    stage_idx=stage_idx,
+                    ckpt_path=ckpt_path,
+                    target_episodes=args.episodes,
+                    num_envs=args.num_envs,
+                    deterministic=deterministic,
+                    base_seed=args.seed,
+                )
+                all_eval_results.append(res)
+
+                wr = f"{res['win_rate'] * 100:.1f}%"
+                ret = f"{res['mean_return']:.2f}"
+                steps = f"{res['avg_steps']:.1f}/{res['max_stage_steps']}"
+                alarm = f"{res['avg_alarm']:.1f}/{res['stage_alarm_max']:.0f}"
+                extract = f"{res['avg_agents_extract']:.2f}/4"
+                time_str = (
+                    f"{res['evaluation_time_sec']}s ({res['episodes_per_sec']} ep/s)"
+                )
 
                 print(
-                    f"  Evaluating {algo_name.upper()} on Stage {stage_idx} "
-                    f"({mode_key}) across seeds {seeds}..."
+                    f"{algo:<10} | {wr:<10} | {ret:<12} | {steps:<14} | {alarm:<12} | {extract:<10} | {time_str:<10}"
                 )
+            except Exception as e:  # noqa: BLE001
+                print(f"{algo:<10} | Error evaluating: {e}")
 
-                per_seed_results = {}
-                for seed in seeds:
-                    seed_res = evaluate_seed(
-                        agent,
-                        algo_name,
-                        stage_idx,
-                        stage_config,
-                        seed,
-                        num_episodes=episodes_per_seed,
-                        deterministic=is_determ,
-                        device=device,
-                        meta_init=meta_or_err,
-                    )
-                    per_seed_results[str(seed)] = seed_res
-
-                agg_stats = aggregate_seeds(per_seed_results)
-                agg_stats["seeds"] = seeds
-                agg_stats["episodes_per_seed"] = episodes_per_seed
-                agg_stats["total_episodes"] = len(seeds) * episodes_per_seed
-                agg_stats["per_seed_results"] = per_seed_results
-
-                eval_json_data[mode_key][algo_name][f"stage_{stage_idx}"] = agg_stats
-
-    # Clean dict for JSON serialization
-    output_payload = {
-        "determ": {
-            algo: dict(stages) for algo, stages in eval_json_data["determ"].items()
-        },
-        "stocha": {
-            algo: dict(stages) for algo, stages in eval_json_data["stocha"].items()
-        },
-    }
-
-    # Save JSON results
-    json_path = os.path.join(args.output_dir, "eval.json")
-    with open(json_path, "w") as f:
-        json.dump(output_payload, f, indent=4)
-    print(f"\n[Saved JSON Summary]: {json_path}")
-
-    # Generate and Print Formatted Tables
-    markdown_lines = ["# Heist Multi-Model Benchmark Evaluation Summary\n"]
-
-    for mode_key, _, mode_desc in modes:
-        mode_data = output_payload[mode_key]
-        if not mode_data:
-            continue
-
-        for stage_idx in stages_to_eval:
-            stage_config = CURRICULUM_STAGES[stage_idx]
-            table_str = format_table(
-                stage_idx,
-                stage_config,
-                mode_data,
-                mode_desc,
-                len(seeds),
-                episodes_per_seed,
-            )
-            print(table_str)
-            markdown_lines.append(f"```text\n{table_str}\n```\n")
-
-    md_path = os.path.join(args.output_dir, "eval_summary.md")
-    with open(md_path, "w") as f:
-        f.write("\n".join(markdown_lines))
-    print(f"[Saved Markdown Summary]: {md_path}\n")
+    # Save output JSON report
+    os.makedirs("results/eval", exist_ok=True)
+    report_file = "results/eval/eval_summary.json"
+    with open(report_file, "w") as f:
+        json.dump(all_eval_results, f, indent=4)
+    print(f"\nSaved complete evaluation metrics to {report_file}\n")
 
 
 if __name__ == "__main__":
-    run_eval()
+    main()

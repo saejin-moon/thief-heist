@@ -550,7 +550,7 @@ def recombine_and_mutate_thief(
     best_parent_idx = int(np.argmax(parent_values))
     best_parent_val = float(parent_values[best_parent_idx])
 
-    return child_indices, best_parent_idx, best_parent_val
+    return child_indices, weights, best_parent_idx, best_parent_val
 
 
 def train(
@@ -561,11 +561,21 @@ def train(
     load_ckpt_path=None,
     save_ckpt_dir=None,
     log_dir=None,
+    seed=0,
 ):
+    import random
+
+    if seed is not None:
+        random.seed(seed)
+        np.random.seed(seed)
+        torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     num_envs = THIEF_NUM_ENVS
 
-    console_logger = logging.getLogger(f"console_{algo_name}_{stage_idx}")
+    console_logger = logging.getLogger(f"console_{algo_name}_{stage_idx}_{seed}")
     console_logger.setLevel(logging.INFO)
     console_logger.handlers = [logging.StreamHandler()]
     console_logger.propagate = False
@@ -573,7 +583,7 @@ def train(
     file_logger = None
     if log_dir is not None:
         os.makedirs(log_dir, exist_ok=True)
-        file_logger = logging.getLogger(f"file_{algo_name}_{stage_idx}")
+        file_logger = logging.getLogger(f"file_{algo_name}_{stage_idx}_{seed}")
         file_logger.setLevel(logging.INFO)
         file_handler = logging.FileHandler(os.path.join(log_dir, "train.log"), mode="w")
         file_handler.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
@@ -581,7 +591,7 @@ def train(
         file_logger.propagate = False
 
     msg = (
-        f"Training {algo_name} Stage {stage_idx} on {device} ("
+        f"Training {algo_name} Stage {stage_idx} (Seed {seed}) on {device} ("
         f"16 Envs | Dynamic Sharding | Pool Doubling | FIFO Queue | 50-Update Post-Grace Cooldown)..."
     )
     console_logger.info(msg)
@@ -590,7 +600,9 @@ def train(
 
     if env_config is None:
         env_config = dict(CURRICULUM_STAGES[stage_idx])
-    vec_env = VectorEnv(num_envs, config=env_config)
+    vec_env = VectorEnv(
+        num_envs, config=env_config, base_seed=seed * 1000 if seed is not None else 0
+    )
     state_dim = vec_env.state_dim
 
     agent = ThiefNetwork(state_dim, num_initial_experts=THIEF_INITIAL_EXPERTS).to(
@@ -1020,18 +1032,20 @@ def train(
         )
 
         if deficit_triggered:
-            child_indices, best_parent, parent_val = recombine_and_mutate_thief(
-                agent,
-                active_experts,
-                flat_obs,
-                flat_role,
-                flat_mask,
-                flat_actions,
-                flat_returns,
-                flat_values,
-                flat_states,
-                deficit_mask,
-                device,
+            child_indices, weights, best_parent, parent_val = (
+                recombine_and_mutate_thief(
+                    agent,
+                    active_experts,
+                    flat_obs,
+                    flat_role,
+                    flat_mask,
+                    flat_actions,
+                    flat_returns,
+                    flat_values,
+                    flat_states,
+                    deficit_mask,
+                    device,
+                )
             )
             old_count = active_experts
             active_experts += len(child_indices)
@@ -1059,10 +1073,13 @@ def train(
                 )
 
             spawned_names = ", ".join(f"E{i}" for i in child_indices)
+            parent_mix_str = ", ".join(
+                f"E{k}: {weights[k] * 100:.1f}%" for k in range(len(weights))
+            )
             msg = (
                 f"[Deficit Evolution Event] Update: {update} | Triggered Dynamic Deficit Spawn! "
-                f"Doubled pool from {old_count} -> {active_experts} experts via Multi-Offspring Sexual Fisher Recombination "
-                f"({spawned_names} spawned from top parent E{best_parent}, val={parent_val:.3f}) | "
+                f"Doubled pool from {old_count} -> {active_experts} experts via All-Pool Fisher Recombination "
+                f"({spawned_names} recombined from all parents [{parent_mix_str}]) | "
                 f"Active Sandbox Mutants: {list(active_sandbox_mutants.keys())}, Queue: {incubation_queue}"
             )
             console_logger.info(msg)
