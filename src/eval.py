@@ -133,9 +133,9 @@ def load_agent(model_key, stage_idx, state_dim, ckpt_path=None, device="cpu"):
         return agent, meta
 
     elif algo_name == "hmappo":
-        from train_hmappo import HmappoAgent
+        from train_hmappo import HierarchicalNetwork
 
-        agent = HmappoAgent(state_dim).to(device)
+        agent = HierarchicalNetwork(state_dim).to(device)
         agent.load_state_dict(state_dict)
         agent.eval()
         return agent, meta
