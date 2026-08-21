@@ -118,7 +118,8 @@ def load_ecoop_model(ckpt_path, state_dim, device):
 
 
 def load_hmappo_model(ckpt_path, state_dim, device):
-    from train_hmappo import HMappoAgent
+    from constants import MACRO_STEP
+    from train_hmappo import HierarchicalNetwork
 
     ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
     state_dict = (
@@ -127,35 +128,40 @@ def load_hmappo_model(ckpt_path, state_dim, device):
         else ckpt
     )
 
-    agent = HMappoAgent(state_dim).to(device)
+    agent = HierarchicalNetwork(state_dim).to(device)
     agent.load_state_dict(state_dict)
     agent.eval()
 
-    manager_goals = None
+    current_goals = None
     step_count = [0]
 
     def policy_fn(
         obs_all, role_all, mask_all, state_rep, prev_experts, deterministic=True
     ):
-        nonlocal manager_goals
-        batch_size = obs_all.shape[1]
+        nonlocal current_goals
+        num_envs = obs_all.shape[1]
         with torch.no_grad():
-            # Manager updates every 10 steps
-            if step_count[0] % 10 == 0 or manager_goals is None:
-                # State rep is (N_AGENTS * num_envs, state_dim) -> extract per-env state
-                env_states = state_rep[:batch_size]
-                _, m_goals, _, _ = agent.get_manager_action_and_value(env_states)
-                manager_goals = m_goals.repeat(N_AGENTS, 1)
+            if step_count[0] % MACRO_STEP == 0 or current_goals is None:
+                # state_rep is (N_AGENTS * num_envs, state_dim) -> per-env state is state_rep[:num_envs]
+                env_state_rep = state_rep[:num_envs].repeat(N_AGENTS, 1)
+                m_acts, _, _, _ = agent.get_manager_action_and_value(
+                    env_state_rep, role_all.flatten(0, 1)
+                )
+                current_goals = m_acts.view(N_AGENTS, num_envs, 2)
 
             step_count[0] += 1
 
-            actions, _, _, _ = agent.get_worker_action_and_value(
-                obs_all.flatten(0, 1),
-                role_all.flatten(0, 1),
-                manager_goals,
-                mask_all.flatten(0, 1),
-                state_rep,
-            )
+            actions_list = []
+            for i, a in enumerate(AGENTS):
+                w_act, _, _, _ = agent.get_worker_action_and_value(
+                    obs_all[i],
+                    role_all[i],
+                    mask_all[i],
+                    current_goals[i],
+                )
+                actions_list.append(w_act)
+
+            actions = torch.cat(actions_list, dim=0)
             return actions, None
 
     return policy_fn
@@ -208,7 +214,7 @@ def load_coop_model(ckpt_path, state_dim, device):
         obs_all, role_all, mask_all, state_rep, prev_experts, deterministic=True
     ):
         with torch.no_grad():
-            actions, _, _, _ = model.get_action_and_value(
+            actions, _, _, _, _ = model.get_action_and_value(
                 obs_all.flatten(0, 1),
                 role_all.flatten(0, 1),
                 mask_all.flatten(0, 1),
@@ -249,7 +255,7 @@ def load_marc_model(ckpt_path, state_dim, device):
 
 
 def load_coma_model(ckpt_path, state_dim, device):
-    from train_coma import ComaActor
+    from train_coma import ComaNetwork
 
     ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
     state_dict = (
@@ -258,30 +264,19 @@ def load_coma_model(ckpt_path, state_dim, device):
         else ckpt
     )
 
-    # Extract actor weights
-    actor_state = {
-        k.replace("actor.", ""): v
-        for k, v in state_dict.items()
-        if k.startswith("actor.")
-    }
-    model = ComaActor().to(device)
-    model.load_state_dict(actor_state if actor_state else state_dict)
+    model = ComaNetwork(state_dim).to(device)
+    model.load_state_dict(state_dict)
     model.eval()
 
     def policy_fn(
         obs_all, role_all, mask_all, state_rep, prev_experts, deterministic=True
     ):
         with torch.no_grad():
-            x_actor = torch.cat(
-                [obs_all.flatten(0, 1).flatten(1), role_all.flatten(0, 1)], dim=1
+            actions, _, _, _ = model.get_action(
+                obs_all.flatten(0, 1),
+                role_all.flatten(0, 1),
+                mask_all.flatten(0, 1),
             )
-            logits = model(x_actor)
-            masked_logits = logits + ((1.0 - mask_all.flatten(0, 1)) * -1e9)
-            if deterministic:
-                actions = masked_logits.argmax(dim=-1)
-            else:
-                dist = torch.distributions.Categorical(logits=masked_logits)
-                actions = dist.sample()
             return actions, None
 
     return policy_fn
@@ -469,8 +464,7 @@ def parse_eval_args():
         "--algo",
         type=str,
         default="all",
-        choices=["thief", "hmappo", "mappo", "ecoop", "coop", "marc", "coma", "all"],
-        help="Algorithm to evaluate or 'all'",
+        help="Algorithm to evaluate ('thief', 'hmappo', etc., comma-separated list, or 'all')",
     )
     parser.add_argument(
         "--stages",
@@ -503,9 +497,9 @@ def parse_eval_args():
         help="Direct path to checkpoint model.pt to evaluate",
     )
     parser.add_argument(
-        "--stochastic",
+        "--greedy",
         action="store_true",
-        help="Use stochastic action sampling instead of deterministic argmax",
+        help="Use deterministic argmax action selection instead of default policy sampling",
     )
     parser.add_argument(
         "--seed",
@@ -516,9 +510,15 @@ def parse_eval_args():
     return parser.parse_args()
 
 
+import warnings
+
+warnings.filterwarnings("ignore", message=".*CUDA initialization.*")
+warnings.filterwarnings("ignore", category=UserWarning)
+
+
 def main():
     args = parse_eval_args()
-    deterministic = not args.stochastic
+    deterministic = args.greedy
 
     stages = (
         [args.stage]
@@ -530,28 +530,32 @@ def main():
         )
     )
 
-    algos = (
-        ["thief", "hmappo", "mappo", "ecoop", "coop", "marc", "coma"]
-        if args.algo == "all"
-        else [args.algo]
-    )
+    if args.algo == "all":
+        algos = ["thief", "hmappo", "mappo", "ecoop", "coop", "marc", "coma"]
+    elif "," in args.algo:
+        algos = [x.strip().lower() for x in args.algo.split(",") if x.strip()]
+    else:
+        algos = [args.algo.strip().lower()]
 
     all_eval_results = []
 
-    print(f"\n{'=' * 85}")
     print(
-        f"PARALLEL EVALUATION SUITE (Envs: {args.num_envs} | Episodes: {args.episodes} | Greedy: {deterministic})"
+        f"\n{'=' * 85}\n"
+        f"PARALLEL EVALUATION SUITE (Envs: {args.num_envs} | Episodes: {args.episodes} | Greedy: {deterministic})\n"
+        f"{'=' * 85}\n",
+        flush=True,
     )
-    print(f"{'=' * 85}\n")
 
     for stage_idx in stages:
         print(
-            f"\n--- STAGE {stage_idx} (Max Steps: {CURRICULUM_STAGES[stage_idx]['max_steps']}) ---"
+            f"\n--- STAGE {stage_idx} (Max Steps: {CURRICULUM_STAGES[stage_idx]['max_steps']}) ---",
+            flush=True,
         )
         print(
-            f"{'Algorithm':<10} | {'Win Rate':<10} | {'Mean Return':<12} | {'Steps':<14} | {'Alarm':<12} | {'Extract':<10} | {'Eval Time':<10}"
+            f"{'Algorithm':<10} | {'Win Rate':<10} | {'Mean Return':<12} | {'Steps':<14} | {'Alarm':<12} | {'Extract':<10} | {'Eval Time':<10}",
+            flush=True,
         )
-        print("-" * 85)
+        print("-" * 85, flush=True)
 
         for algo in algos:
             # Checkpoint resolution
@@ -567,8 +571,14 @@ def main():
                 )
 
             if ckpt_path is None:
-                print(f"{algo:<10} | {'[No Checkpoint Found]':<65}")
+                print(f"{algo:<10} | {'[No Checkpoint Found]':<65}", flush=True)
                 continue
+
+            print(
+                f"{algo:<10} | Evaluating {args.episodes} episodes...",
+                end="\r",
+                flush=True,
+            )
 
             try:
                 res = evaluate_checkpoint(
@@ -592,17 +602,47 @@ def main():
                 )
 
                 print(
-                    f"{algo:<10} | {wr:<10} | {ret:<12} | {steps:<14} | {alarm:<12} | {extract:<10} | {time_str:<10}"
+                    f"{algo:<10} | {wr:<10} | {ret:<12} | {steps:<14} | {alarm:<12} | {extract:<10} | {time_str:<10}",
+                    flush=True,
                 )
             except Exception as e:  # noqa: BLE001
-                print(f"{algo:<10} | Error evaluating: {e}")
+                print(f"{algo:<10} | Error evaluating: {e}", flush=True)
+
+    # Print Full Multi-Stage Summary if multiple stages evaluated
+    if len(stages) > 1 and len(all_eval_results) > 0:
+        print(f"\n\n{'=' * 85}")
+        print("EVALUATION BENCHMARK SUMMARY (WIN RATES ACROSS STAGES)")
+        print(f"{'=' * 85}")
+        header_stages = " | ".join(f"Stage {s}" for s in stages)
+        print(f"{'Algorithm':<10} | {'Avg Win%':<10} | {header_stages}")
+        print("-" * 85)
+
+        for algo in algos:
+            algo_res = [r for r in all_eval_results if r["algo"] == algo]
+            if not algo_res:
+                continue
+            wrs = [
+                next(
+                    (
+                        f"{r['win_rate'] * 100:.1f}%"
+                        for r in algo_res
+                        if r["stage"] == s
+                    ),
+                    "N/A",
+                )
+                for s in stages
+            ]
+            num_wrs = [r["win_rate"] * 100 for r in algo_res]
+            avg_wr = np.mean(num_wrs) if num_wrs else 0.0
+            row_str = " | ".join(f"{w:>7}" for w in wrs)
+            print(f"{algo:<10} | {avg_wr:>7.1f}%  | {row_str}")
 
     # Save output JSON report
     os.makedirs("results/eval", exist_ok=True)
     report_file = "results/eval/eval_summary.json"
     with open(report_file, "w") as f:
         json.dump(all_eval_results, f, indent=4)
-    print(f"\nSaved complete evaluation metrics to {report_file}\n")
+    print(f"\nSaved complete evaluation metrics to {report_file}\n", flush=True)
 
 
 if __name__ == "__main__":
