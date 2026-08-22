@@ -125,16 +125,18 @@ class ThiefNetwork(nn.Module):
         expert_idx=None,
         previous_expert=None,
         grace_experts=None,
+        dormant_experts=None,
         epsilon=THIEF_HYSTERESIS_EPSILON,
         deterministic=False,
         num_envs=THIEF_NUM_ENVS,
     ):
         """
         Executes routing and policy forward passes across the expert pool.
-        Implements Dynamic Environment Sharding:
-        - When grace_experts is empty: 100% of environments run competitive bidding.
+        Implements Dynamic Environment Sharding & Dormancy Freezing:
+        - When grace_experts is empty: 100% of environments run competitive bidding across active, non-dormant experts.
         - When M mutants incubate: each occupies 2 dedicated sandbox envs (max 8 envs),
           leaving all remaining (16 - 2M) envs for general competitive bidding.
+        - Dormant experts are excluded from candidate bidding without altering expert tensor indices.
         """
         batch_size = obs.shape[0]
         x_critic = torch.cat([state, role], dim=1)
@@ -155,10 +157,18 @@ class ThiefNetwork(nn.Module):
                 grace_list = []
                 grace_set = set()
 
-            # Candidate experts for general competitive bidding
-            candidate_experts = [k for k in range(active_experts) if k not in grace_set]
+            dormant_set = set(dormant_experts) if dormant_experts is not None else set()
+
+            # Candidate experts for general competitive bidding (active, non-grace, non-dormant)
+            candidate_experts = [
+                k
+                for k in range(active_experts)
+                if k not in grace_set and k not in dormant_set
+            ]
             if not candidate_experts:
-                candidate_experts = list(range(active_experts))
+                candidate_experts = [
+                    k for k in range(active_experts) if k not in dormant_set
+                ] or list(range(active_experts))
 
             if len(candidate_experts) == 1:
                 best_idx = torch.full(
@@ -331,12 +341,13 @@ def check_deficit_trigger(
     active_sandbox_mutants,
     incubation_queue,
     device,
+    dormant_experts=None,
 ):
     """
     Online rollout deficit detection: triggers only when:
     1. Warmup period has completed (update > THIEF_WARMUP_UPDATES).
     2. Zero mutants are in training/grace AND zero mutants in incubation queue.
-    3. Exactly 50 updates have elapsed since the last mutant completed its grace period.
+    3. Exactly THIEF_POST_GRACE_COOLDOWN_UPDATES have elapsed since the last mutant graduated.
     4. Active expert pool capacity has not reached maximum.
     5. >20% of transitions exhibit confidence deficit (max_k V_k < THIEF_DEFICIT_THRESHOLD).
     """
@@ -346,13 +357,20 @@ def check_deficit_trigger(
         return False, None
     if (update - last_grace_end_update) < THIEF_POST_GRACE_COOLDOWN_UPDATES:
         return False, None
-    if active_experts >= THIEF_MAX_EXPERTS:
+
+    dormant_set = set(dormant_experts) if dormant_experts is not None else set()
+    active_bidding_count = active_experts - len(dormant_set)
+    if active_bidding_count >= THIEF_MAX_EXPERTS:
         return False, None
+
+    non_dormant = [k for k in range(active_experts) if k not in dormant_set]
+    if not non_dormant:
+        non_dormant = list(range(active_experts))
 
     x_critic = torch.cat([b_state, b_role], dim=1).to(device)
     with torch.no_grad():
         bids = torch.stack(
-            [agent.experts[k].critic(x_critic) for k in range(active_experts)],
+            [agent.experts[k].critic(x_critic) for k in non_dormant],
             dim=-1,
         ).squeeze(1)
         v_max = bids.max(dim=-1).values
@@ -426,21 +444,26 @@ def recombine_and_mutate_thief(
     b_state,
     deficit_mask,
     device,
+    dormant_experts=None,
 ):
     """
     Executes THIEF Evolutionary Operator:
-    1. Multi-parent empirical return fitness weighting.
+    1. Multi-parent empirical return fitness weighting across active non-dormant parents.
     2. All-Pool Full-Buffer Fisher Information Matrix evaluation on Actors.
-    3. Geometry-aware Fisher crossover across all active parents.
+    3. Geometry-aware Fisher crossover across active parents.
     4. Recombined Critic initialization (clean pool baseline, no E0 carbon copy).
     5. Deficit-directed gradient mutation on failure transitions + Riemannian noise.
-    6. Multi-offspring pool doubling (spawns K distinct mutants from K parents).
+    6. Structured Orthogonal Antithetic Sampling (capped at THIEF_MAX_SANDBOX_EXPERTS = 4).
     """
+    dormant_set = set(dormant_experts) if dormant_experts is not None else set()
+    parent_candidates = [k for k in range(active_experts) if k not in dormant_set]
+    if not parent_candidates:
+        parent_candidates = list(range(active_experts))
+
     x_critic = torch.cat([b_state, b_role], dim=1).to(device)
     with torch.no_grad():
         parent_values = [
-            agent.experts[k].critic(x_critic).mean().item()
-            for k in range(active_experts)
+            agent.experts[k].critic(x_critic).mean().item() for k in parent_candidates
         ]
 
     val_tensor = torch.tensor(parent_values, device=device)
@@ -450,13 +473,12 @@ def recombine_and_mutate_thief(
     # Compute FIM for each active parent Actor
     fims = [
         compute_fim_diagonal(agent, k, b_obs, b_role, b_mask, b_actions, device)
-        for k in range(active_experts)
+        for k in parent_candidates
     ]
 
     # Recombine Actor Parameters
     actor_params = [
-        [p.data for p in agent.experts[k].actor.parameters()]
-        for k in range(active_experts)
+        [p.data for p in agent.experts[k].actor.parameters()] for k in parent_candidates
     ]
     recombined_actor_params = []
     effective_fishers = []
@@ -467,12 +489,12 @@ def recombine_and_mutate_thief(
         weight_sum = torch.zeros_like(actor_params[0][p_idx])
         eff_f = torch.zeros_like(actor_params[0][p_idx])
 
-        for k in range(active_experts):
-            w = weights[k]
-            f = fims[k][p_idx]
+        for i, k in enumerate(parent_candidates):
+            w = weights[i]
+            f = fims[i][p_idx]
             eff_f += w * f
             inv_var = w * (f + damping)
-            weighted_p_sum += inv_var * actor_params[k][p_idx]
+            weighted_p_sum += inv_var * actor_params[i][p_idx]
             weight_sum += inv_var
 
         recomb_p = weighted_p_sum / (weight_sum + 1e-8)
@@ -482,13 +504,13 @@ def recombine_and_mutate_thief(
     # Recombine Critic Parameters (clean weighted average across parent pool)
     critic_params = [
         [p.data for p in agent.experts[k].critic.parameters()]
-        for k in range(active_experts)
+        for k in parent_candidates
     ]
     recombined_critic_params = []
     for p_idx in range(len(critic_params[0])):
         w_crit = torch.zeros_like(critic_params[0][p_idx])
-        for k in range(active_experts):
-            w_crit += weights[k] * critic_params[k][p_idx]
+        for i, k in enumerate(parent_candidates):
+            w_crit += weights[i] * critic_params[i][p_idx]
         recombined_critic_params.append(w_crit)
 
     # Build temporary recombined Actor to compute deficit gradient
@@ -510,45 +532,65 @@ def recombine_and_mutate_thief(
             device,
         )
 
-    # Spawn K diverse mutants (always doubling the active pool from K to 2K)
-    num_mutants = active_experts
+    # Structured Orthogonal Antithetic Sampling capped at THIEF_MAX_SANDBOX_EXPERTS (4)
+    num_mutants = min(max(2, len(parent_candidates)), THIEF_MAX_SANDBOX_EXPERTS)
     child_indices = []
-    noise_scale = THIEF_MUTATION_NOISE
-    targeted_lr = THIEF_TARGETED_LR
 
-    for m in range(num_mutants):
-        child_actor_params = []
-        for p_idx, (r_p, eff_f) in enumerate(
-            zip(recombined_actor_params, effective_fishers)
-        ):
-            f_safe = torch.clamp(eff_f, min=1e-6)
-            inv_f_sqrt = 1.0 / torch.sqrt(f_safe + 1e-4)
-            inv_f_scaled = inv_f_sqrt / (inv_f_sqrt.mean() + 1e-8)
-            inv_f_damped = torch.clamp(inv_f_scaled, max=10.0)
+    # Exploration temperature spectrum per mutant:
+    # M0: Gradient follower (+z0, low noise, high grad)
+    # M1: Antithetic mirror 1 (-z0, medium noise, medium grad)
+    # M2: Orthogonal explorer (+z1, medium noise, medium grad)
+    # M3: Broad basin explorer (-z1, high noise, low grad)
+    grad_scales = [0.08, 0.05, 0.05, 0.02]
+    noise_scales = [0.015, 0.030, 0.030, 0.060]
 
-            # Distinct Gaussian noise draw per mutant
-            noise = torch.randn_like(r_p) * noise_scale * inv_f_damped
+    all_child_actor_params = [[] for _ in range(num_mutants)]
+
+    for p_idx, (r_p, eff_f) in enumerate(
+        zip(recombined_actor_params, effective_fishers)
+    ):
+        f_safe = torch.clamp(eff_f, min=1e-6)
+        inv_f_sqrt = 1.0 / torch.sqrt(f_safe + 1e-4)
+        inv_f_scaled = inv_f_sqrt / (inv_f_sqrt.mean() + 1e-8)
+        inv_f_damped = torch.clamp(inv_f_scaled, max=10.0)
+
+        # Base orthogonal noise vectors z0, z1
+        z0 = torch.randn_like(r_p)
+        z0 = z0 / (z0.norm() + 1e-8) * np.sqrt(z0.numel())
+
+        raw_z1 = torch.randn_like(r_p)
+        proj = (z0 * raw_z1).sum() / ((z0 * z0).sum() + 1e-8)
+        z1 = raw_z1 - proj * z0
+        z1 = z1 / (z1.norm() + 1e-8) * np.sqrt(z1.numel())
+
+        dir_vectors = [z0, -z0, z1, -z1]
+        g_p = deficit_grads[p_idx] if deficit_grads is not None else None
+
+        for m in range(num_mutants):
+            vec = dir_vectors[m % len(dir_vectors)]
+            noise = vec * noise_scales[m % len(noise_scales)] * inv_f_damped
             mutated_p = r_p + noise
 
-            if deficit_grads is not None:
-                m_scale = 1.0 + (0.25 * m)
-                mutated_p = mutated_p - (targeted_lr * m_scale * deficit_grads[p_idx])
+            if g_p is not None:
+                mutated_p = mutated_p - (grad_scales[m % len(grad_scales)] * g_p)
 
-            child_actor_params.append(mutated_p)
+            all_child_actor_params[m].append(mutated_p)
 
-        # Instantiate and populate child expert
+    for m in range(num_mutants):
         c_idx = agent.add_expert()
-        for p, c_p in zip(agent.experts[c_idx].actor.parameters(), child_actor_params):
+        for p, c_p in zip(
+            agent.experts[c_idx].actor.parameters(), all_child_actor_params[m]
+        ):
             p.data.copy_(c_p)
         for p, c_p in zip(
             agent.experts[c_idx].critic.parameters(), recombined_critic_params
         ):
             p.data.copy_(c_p)
-
         child_indices.append(c_idx)
 
-    best_parent_idx = int(np.argmax(parent_values))
-    best_parent_val = float(parent_values[best_parent_idx])
+    best_parent_cand_idx = int(np.argmax(parent_values))
+    best_parent_idx = parent_candidates[best_parent_cand_idx]
+    best_parent_val = float(parent_values[best_parent_cand_idx])
 
     return child_indices, weights, best_parent_idx, best_parent_val
 
@@ -614,11 +656,14 @@ def train(
     total_spawns = 0
     spawn_history = []
 
-    # Queue & Dynamic Incubation Tracking
+    # Queue, Dynamic Incubation & Dormancy Tracking
     active_sandbox_mutants = {}  # Dict mapping active mutant_idx -> updates_completed
     incubation_queue = []  # FIFO list of waiting mutant_idx
     last_grace_end_update = 0  # Timestamp of when last mutant finished grace
     expert_consecutive_zero_usage = collections.defaultdict(int)
+    dormant_experts = (
+        set()
+    )  # Set of frozen inactive expert indices (0% usage for >= 20 updates)
     env_previous_expert = None
 
     if load_ckpt_path and os.path.exists(load_ckpt_path):
@@ -733,6 +778,7 @@ def train(
                         active_experts=active_experts,
                         previous_expert=env_previous_expert,
                         grace_experts=current_sandbox_list,
+                        dormant_experts=dormant_experts,
                         num_envs=num_envs,
                     )
                 )
@@ -844,6 +890,7 @@ def train(
                 active_experts=active_experts,
                 previous_expert=env_previous_expert,
                 grace_experts=current_sandbox_list,
+                dormant_experts=dormant_experts,
                 num_envs=num_envs,
             )
             next_values = next_values.view(N_AGENTS, num_envs)
@@ -948,6 +995,8 @@ def train(
                     active_experts=active_experts,
                     action=mb_actions,
                     expert_idx=mb_exp,
+                    grace_experts=current_sandbox_list,
+                    dormant_experts=dormant_experts,
                 )
 
                 logratio = newlogprob - mb_logprobs
@@ -1029,6 +1078,7 @@ def train(
             active_sandbox_mutants,
             incubation_queue,
             device,
+            dormant_experts=dormant_experts,
         )
 
         if deficit_triggered:
@@ -1045,6 +1095,7 @@ def train(
                     flat_states,
                     deficit_mask,
                     device,
+                    dormant_experts=dormant_experts,
                 )
             )
             old_count = active_experts
@@ -1074,61 +1125,42 @@ def train(
 
             spawned_names = ", ".join(f"E{i}" for i in child_indices)
             parent_mix_str = ", ".join(
-                f"E{k}: {weights[k] * 100:.1f}%" for k in range(len(weights))
+                f"E{k}: {weights[i] * 100:.1f}%"
+                for i, k in enumerate(
+                    [idx for idx in range(old_count) if idx not in dormant_experts]
+                    or range(old_count)
+                )
             )
             msg = (
                 f"[Deficit Evolution Event] Update: {update} | Triggered Dynamic Deficit Spawn! "
-                f"Doubled pool from {old_count} -> {active_experts} experts via All-Pool Fisher Recombination "
-                f"({spawned_names} recombined from all parents [{parent_mix_str}]) | "
+                f"Spawned {len(child_indices)} Structured Orthogonal Mutants (Pool: {old_count} -> {active_experts} experts) "
+                f"({spawned_names} recombined from active parents [{parent_mix_str}]) | "
                 f"Active Sandbox Mutants: {list(active_sandbox_mutants.keys())}, Queue: {incubation_queue}"
             )
             console_logger.info(msg)
             if file_logger:
                 file_logger.info(msg)
 
-        # Lifecycle Step C: Extinction Culling
+        # Lifecycle Step C: Extinction Dormancy (Zero Culling Shock)
         if (
             len(active_sandbox_mutants) == 0
             and len(incubation_queue) == 0
-            and active_experts > 2
+            and (active_experts - len(dormant_experts)) > 1
         ):
-            culled_indices = [
-                k
-                for k in range(1, active_experts)
-                if expert_consecutive_zero_usage[k] >= THIEF_CULL_WINDOW_UPDATES
-            ]
+            newly_dormant = []
+            for k in range(1, active_experts):
+                if (
+                    k not in dormant_experts
+                    and expert_consecutive_zero_usage[k] >= THIEF_CULL_WINDOW_UPDATES
+                ):
+                    dormant_experts.add(k)
+                    newly_dormant.append(k)
 
-            if culled_indices:
-                survivor_indices = [
-                    k for k in range(active_experts) if k not in culled_indices
-                ]
-                agent.prune_experts(survivor_indices)
-                active_experts = len(survivor_indices)
-
-                old_zero_usage = dict(expert_consecutive_zero_usage)
-                expert_consecutive_zero_usage.clear()
-                for new_idx, old_idx in enumerate(survivor_indices):
-                    expert_consecutive_zero_usage[new_idx] = old_zero_usage.get(
-                        old_idx, 0
-                    )
-
-                if env_previous_expert is not None:
-                    old_to_new = {
-                        old_idx: new_idx
-                        for new_idx, old_idx in enumerate(survivor_indices)
-                    }
-                    new_prev = torch.full_like(env_previous_expert, -1)
-                    for old_idx, new_idx in old_to_new.items():
-                        new_prev[env_previous_expert == old_idx] = new_idx
-                    env_previous_expert = new_prev
-
-                # Preserve Adam momentum and variance state for surviving parents
-                optimizer = update_optimizer_params(optimizer, agent, lr=LR)
-
-                culled_names = ", ".join(f"E{i}" for i in culled_indices)
+            if newly_dormant:
+                dormant_names = ", ".join(f"E{i}" for i in newly_dormant)
                 msg = (
-                    f"[Extinction Event] Update: {update} | Culled {len(culled_indices)} extinct expert(s) "
-                    f"({culled_names}) inactive for >= {THIEF_CULL_WINDOW_UPDATES} updates. Active pool: {active_experts}"
+                    f"[Dormancy Event] Update: {update} | Expert(s) ({dormant_names}) entered Dormant State "
+                    f"(0% usage for >= {THIEF_CULL_WINDOW_UPDATES} updates). Preserved in memory, excluded from bidding."
                 )
                 console_logger.info(msg)
                 if file_logger:
@@ -1188,8 +1220,10 @@ def train(
             stage_alarm_max = float(env_config.get("alarm_max", 100.0))
             stage_guards = env_config.get("guard_count", 0)
 
+            active_bidding_count = active_experts - len(dormant_experts)
             usage_str = ", ".join(
-                f"E{k}: {last_expert_usage.get(k, 0.0)}%" for k in range(active_experts)
+                f"E{k}{'(dormant)' if k in dormant_experts else ''}: {last_expert_usage.get(k, 0.0)}%"
+                for k in range(active_experts)
             )
 
             # Compact console log (clean standard output)
@@ -1199,7 +1233,7 @@ def train(
                 f"Episodic Return: {avg_rew:.3f} | "
                 f"Steps: {avg_steps:.1f}/{stage_max_steps} | "
                 f"Alarm: {avg_alarm:.1f}/{stage_alarm_max:.0f} | "
-                f"Active Experts: {active_experts}"
+                f"Active Experts: {active_bidding_count}/{active_experts}"
             )
             console_logger.info(console_str)
 
@@ -1216,7 +1250,7 @@ def train(
                     f"Muscle Neutralize Rate: {avg_muscle_neut:.2f} (Avg Guards: {avg_muscle_guards:.1f}/{stage_guards}) | "
                     f"Extractor Loot Rate: {avg_extractor_loot:.2f} | "
                     f"Avg Agents at Extract: {avg_agents_extract:.2f}/4 | "
-                    f"Active: {active_experts} | "
+                    f"Active: {active_bidding_count}/{active_experts} | "
                     f"Total Spawns: {total_spawns} | "
                     f"Switch Rate: {last_switch_rate:.1f}% | "
                     f"Usage: [{usage_str}]"
@@ -1225,7 +1259,12 @@ def train(
 
     vec_env.close()
 
-    # Final Evaluation & Checkpoint Saving
+    # Final Evaluation & Inter-Stage Compaction (prune dormant experts cleanly for saved model)
+    surviving_indices = [k for k in range(active_experts) if k not in dormant_experts]
+    if len(surviving_indices) < active_experts and len(surviving_indices) >= 2:
+        agent.prune_experts(surviving_indices)
+        active_experts = len(surviving_indices)
+
     if save_ckpt_dir:
         os.makedirs(save_ckpt_dir, exist_ok=True)
         model_save_path = os.path.join(save_ckpt_dir, "model.pt")
