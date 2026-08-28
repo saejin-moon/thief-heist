@@ -739,11 +739,27 @@ def train(
             optimizer = torch.optim.Adam(agent.parameters(), lr=LR, eps=1e-5)
             if isinstance(ckpt, dict) and "model_state" in ckpt:
                 active_experts = int(ckpt.get("active_experts", len(agent.experts)))
+                dormant_experts = set(ckpt.get("dormant_experts", []))
                 total_spawns = int(ckpt.get("total_spawns", 0))
                 spawn_history = list(ckpt.get("spawn_history", []))
             else:
                 active_experts = len(agent.experts)
-            msg = f"Loaded checkpoint from {load_ckpt_path} (Active specialists: {active_experts}, total spawns: {total_spawns})"
+
+            # If loaded checkpoint has uncompacted dormant experts, prune them immediately
+            surviving_indices = [
+                k for k in range(active_experts) if k not in dormant_experts
+            ]
+            if len(surviving_indices) < active_experts and len(surviving_indices) >= 1:
+                agent.prune_experts(surviving_indices)
+                optimizer = update_optimizer_params(optimizer, agent, lr=LR)
+                active_experts = len(surviving_indices)
+                dormant_experts.clear()
+
+            active_bidding = active_experts - len(dormant_experts)
+            msg = (
+                f"Loaded checkpoint from {load_ckpt_path} "
+                f"(Active bidding specialists: {active_bidding}/{active_experts}, total spawns: {total_spawns})"
+            )
             console_logger.info(msg)
             if file_logger:
                 file_logger.info(msg)
@@ -1592,9 +1608,10 @@ def train(
 
     # Final Evaluation & Inter-Stage Compaction (prune dormant experts cleanly for saved model)
     surviving_indices = [k for k in range(active_experts) if k not in dormant_experts]
-    if len(surviving_indices) < active_experts and len(surviving_indices) >= 2:
+    if len(surviving_indices) < active_experts and len(surviving_indices) >= 1:
         agent.prune_experts(surviving_indices)
         active_experts = len(surviving_indices)
+        dormant_experts.clear()
 
     if save_ckpt_dir:
         os.makedirs(save_ckpt_dir, exist_ok=True)
@@ -1603,6 +1620,7 @@ def train(
             {
                 "model_state": agent.state_dict(),
                 "active_experts": active_experts,
+                "dormant_experts": list(dormant_experts),
                 "total_spawns": total_spawns,
                 "spawn_history": spawn_history,
             },
@@ -1684,6 +1702,7 @@ def train(
         "extractor_loot_rate": avg_extractor_loot,
         "avg_agents_at_extract": avg_agents_extract,
         "active_experts": active_experts,
+        "dormant_experts": list(dormant_experts),
         "total_spawns": total_spawns,
         "expert_switch_rate": last_switch_rate,
         "expert_usage_pct": last_expert_usage,

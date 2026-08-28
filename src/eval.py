@@ -36,7 +36,7 @@ def load_thief_model(ckpt_path, state_dim, device):
     expert_indices = {
         int(k.split(".")[1]) for k in state_dict if k.startswith("experts.")
     }
-    needed = max(expert_indices) + 1 if expert_indices else 2
+    needed = max(expert_indices) + 1 if expert_indices else 1
 
     model = ThiefNetwork(state_dim, num_initial_experts=needed).to(device)
     while len(model.experts) < needed:
@@ -47,11 +47,17 @@ def load_thief_model(ckpt_path, state_dim, device):
     model.load_state_dict(state_dict)
     model.eval()
 
-    active_experts = (
-        int(ckpt.get("active_experts", len(model.experts)))
-        if isinstance(ckpt, dict)
-        else len(model.experts)
-    )
+    if isinstance(ckpt, dict) and "model_state" in ckpt:
+        active_experts = int(ckpt.get("active_experts", len(model.experts)))
+        dormant_experts = set(ckpt.get("dormant_experts", []))
+    else:
+        active_experts = len(model.experts)
+        dormant_experts = set()
+
+    surviving_indices = [k for k in range(active_experts) if k not in dormant_experts]
+    if len(surviving_indices) < active_experts and len(surviving_indices) >= 1:
+        model.prune_experts(surviving_indices)
+        active_experts = len(surviving_indices)
 
     current_goals = [None]
     step_count = [0]
