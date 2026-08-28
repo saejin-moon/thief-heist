@@ -15,6 +15,7 @@ from constants import (
     AGENTS,
     CURRICULUM_STAGES,
     N_AGENTS,
+    THIEF_MACRO_HORIZON,
 )
 from vec_env import VectorEnv
 
@@ -52,18 +53,41 @@ def load_thief_model(ckpt_path, state_dim, device):
         else len(model.experts)
     )
 
+    current_goals = [None]
+    step_count = [0]
+
     def policy_fn(
         obs_all, role_all, mask_all, state_rep, prev_experts, deterministic=True
     ):
         with torch.no_grad():
+            num_agents_eval, num_envs_eval = obs_all.shape[0], obs_all.shape[1]
+            if (
+                current_goals[0] is None
+                or step_count[0] % THIEF_MACRO_HORIZON == 0
+                or current_goals[0].shape[0] != (num_agents_eval * num_envs_eval)
+            ):
+                goals_list = []
+                for a_idx in range(num_agents_eval):
+                    role_oh = torch.zeros(num_envs_eval, N_AGENTS, device=device)
+                    role_oh[:, a_idx] = 1.0
+                    g_act, _, _, _ = model.get_manager_action_and_value(
+                        state_rep[:num_envs_eval], role_oh
+                    )
+                    goals_list.append(g_act)
+                current_goals[0] = torch.cat(goals_list, dim=0)
+
+            step_count[0] += 1
+
             actions, _, _, _, chosen_expert = model.get_action_and_value(
                 obs_all.flatten(0, 1),
                 role_all.flatten(0, 1),
                 mask_all.flatten(0, 1),
+                current_goals[0],
                 state_rep,
                 active_experts=active_experts,
                 previous_expert=prev_experts,
                 deterministic=deterministic,
+                num_envs=num_envs_eval,
             )
             return actions, chosen_expert
 

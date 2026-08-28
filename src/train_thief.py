@@ -21,10 +21,48 @@ from thermal_guard import check_thermal_guard
 from vec_env import VectorEnv
 
 
+class ManagerNetwork(nn.Module):
+    def __init__(self, state_dim):
+        super().__init__()
+        in_dim = state_dim + N_AGENTS
+        self.actor_mean = nn.Sequential(
+            nn.Linear(in_dim, 64),
+            nn.Tanh(),
+            nn.Linear(64, 64),
+            nn.Tanh(),
+            nn.Linear(64, THIEF_HER_GOAL_DIM),
+            nn.Tanh(),
+        )
+        self.actor_logstd = nn.Parameter(torch.zeros(1, THIEF_HER_GOAL_DIM))
+        self.critic = nn.Sequential(
+            nn.Linear(state_dim, 64),
+            nn.Tanh(),
+            nn.Linear(64, 64),
+            nn.Tanh(),
+            nn.Linear(64, 1),
+        )
+
+    def get_action_and_value(self, state, role, action=None):
+        x = torch.cat([state, role], dim=1)
+        action_mean = self.actor_mean(x)
+        action_logstd = self.actor_logstd.expand_as(action_mean)
+        action_std = torch.exp(action_logstd)
+        probs = torch.distributions.Normal(action_mean, action_std)
+
+        if action is None:
+            action = probs.sample()
+            action = torch.clamp(action, -1.0, 1.0)
+
+        value = self.critic(state).squeeze(-1)
+        return action, probs.log_prob(action).sum(1), probs.entropy().sum(1), value
+
+
 class MappoActor(nn.Module):
     def __init__(self):
         super().__init__()
-        in_dim = (OBSERVATION_SIZE[0] * OBSERVATION_SIZE[1]) + N_AGENTS
+        in_dim = (
+            (OBSERVATION_SIZE[0] * OBSERVATION_SIZE[1]) + N_AGENTS + THIEF_HER_GOAL_DIM
+        )
         self.network = nn.Sequential(
             nn.Linear(in_dim, 64),
             nn.Tanh(),
@@ -40,7 +78,7 @@ class MappoActor(nn.Module):
 class MappoCritic(nn.Module):
     def __init__(self, state_dim):
         super().__init__()
-        in_dim = state_dim + N_AGENTS
+        in_dim = state_dim + N_AGENTS + THIEF_HER_GOAL_DIM
         self.network = nn.Sequential(
             nn.Linear(in_dim, 64),
             nn.Tanh(),
@@ -60,9 +98,9 @@ class MappoNetwork(nn.Module):
         self.critic = MappoCritic(state_dim)
 
     def get_action_and_value(
-        self, obs, role, mask, state=None, action=None, deterministic=False
+        self, obs, role, mask, goal, state=None, action=None, deterministic=False
     ):
-        x_actor = torch.cat([obs.flatten(1), role], dim=1)
+        x_actor = torch.cat([obs.flatten(1), role, goal], dim=1)
         logits = self.actor(x_actor)
         masked_logits = logits + ((1.0 - mask) * -1e9)
         probs = Categorical(logits=masked_logits)
@@ -78,7 +116,7 @@ class MappoNetwork(nn.Module):
 
         value = None
         if state is not None:
-            x_critic = torch.cat([state, role], dim=1)
+            x_critic = torch.cat([state, role, goal], dim=1)
             value = self.critic(x_critic).squeeze(-1)
 
         return action, log_prob, entropy, value
@@ -86,18 +124,22 @@ class MappoNetwork(nn.Module):
 
 class ThiefNetwork(nn.Module):
     """
-    Modular Specialist Pool for THIEF.
+    Modular Specialist Pool with HER Sub-Goal Navigation for THIEF.
     Routes actions based on decentralized Critic confidence bidding with dynamic
     temporal hysteresis, supports dynamic 16-environment sharding, and manages
-    dynamic addition and culling of specialist sub-networks.
+    dynamic addition and culling of specialist sub-networks conditioned on sub-goals.
     """
 
     def __init__(self, state_dim, num_initial_experts=THIEF_INITIAL_EXPERTS):
         super().__init__()
         self.state_dim = state_dim
+        self.manager = ManagerNetwork(state_dim)
         self.experts = nn.ModuleList(
             [MappoNetwork(state_dim) for _ in range(max(1, num_initial_experts))]
         )
+
+    def get_manager_action_and_value(self, state, role, action=None):
+        return self.manager.get_action_and_value(state, role, action)
 
     def add_expert(self):
         """Appends a fresh expert module onto the device of existing parameters and returns its index."""
@@ -119,6 +161,7 @@ class ThiefNetwork(nn.Module):
         obs,
         role,
         mask,
+        goal,
         state,
         active_experts,
         action=None,
@@ -131,7 +174,7 @@ class ThiefNetwork(nn.Module):
         num_envs=THIEF_NUM_ENVS,
     ):
         """
-        Executes routing and policy forward passes across the expert pool.
+        Executes routing and policy forward passes across the expert pool conditioned on sub-goals.
         Implements Dynamic Environment Sharding & Dormancy Freezing:
         - When grace_experts is empty: 100% of environments run competitive bidding across active, non-dormant experts.
         - When M mutants incubate: each occupies 2 dedicated sandbox envs (max 8 envs),
@@ -139,7 +182,7 @@ class ThiefNetwork(nn.Module):
         - Dormant experts are excluded from candidate bidding without altering expert tensor indices.
         """
         batch_size = obs.shape[0]
-        x_critic = torch.cat([state, role], dim=1)
+        x_critic = torch.cat([state, role, goal], dim=1) if state is not None else None
 
         # 1. Routing Selection Phase
         if expert_idx is not None:
@@ -257,6 +300,7 @@ class ThiefNetwork(nn.Module):
                 obs[mask_k],
                 role[mask_k],
                 mask[mask_k],
+                goal[mask_k],
                 state[mask_k] if state is not None else None,
                 action=act_k,
                 deterministic=deterministic,
@@ -283,13 +327,15 @@ def update_optimizer_params(old_optimizer, agent, lr=LR):
     return new_optimizer
 
 
-def compute_fim_diagonal(agent, expert_idx, b_obs, b_role, b_mask, b_actions, device):
+def compute_fim_diagonal(
+    agent, expert_idx, b_obs, b_role, b_mask, b_actions, b_goal, device
+):
     """
     Computes the exact diagonal of the empirical Fisher Information Matrix (FIM)
     strictly for Actor parameters across 100% of the rollout buffer transitions.
     """
     actor = agent.experts[expert_idx].actor
-    x_actor = torch.cat([b_obs.flatten(1), b_role], dim=1).to(device)
+    x_actor = torch.cat([b_obs.flatten(1), b_role, b_goal], dim=1).to(device)
     b_mask_dev = b_mask.to(device)
     b_actions_dev = b_actions.to(device)
     total_samples = x_actor.shape[0]
@@ -336,6 +382,7 @@ def check_deficit_trigger(
     b_obs,
     b_role,
     b_state,
+    b_goal,
     update,
     last_grace_end_update,
     active_sandbox_mutants,
@@ -367,7 +414,7 @@ def check_deficit_trigger(
     if not non_dormant:
         non_dormant = list(range(active_experts))
 
-    x_critic = torch.cat([b_state, b_role], dim=1).to(device)
+    x_critic = torch.cat([b_state, b_role, b_goal], dim=1).to(device)
     with torch.no_grad():
         bids = torch.stack(
             [agent.experts[k].critic(x_critic) for k in non_dormant],
@@ -391,6 +438,7 @@ def compute_deficit_gradient(
     b_role,
     b_mask,
     b_actions,
+    b_goal,
     b_returns,
     b_values,
     deficit_mask,
@@ -404,10 +452,11 @@ def compute_deficit_gradient(
     sub_role = b_role[deficit_mask].to(device)
     sub_mask = b_mask[deficit_mask].to(device)
     sub_actions = b_actions[deficit_mask].to(device)
+    sub_goal = b_goal[deficit_mask].to(device)
     sub_returns = b_returns[deficit_mask].to(device)
     sub_values = b_values[deficit_mask].to(device)
 
-    x_actor = torch.cat([sub_obs.flatten(1), sub_role], dim=1)
+    x_actor = torch.cat([sub_obs.flatten(1), sub_role, sub_goal], dim=1)
     logits = recombined_actor(x_actor)
     masked_logits = logits + ((1.0 - sub_mask) * -1e9)
     dist = Categorical(logits=masked_logits)
@@ -439,6 +488,7 @@ def recombine_and_mutate_thief(
     b_role,
     b_mask,
     b_actions,
+    b_goal,
     b_returns,
     b_values,
     b_state,
@@ -460,7 +510,7 @@ def recombine_and_mutate_thief(
     if not parent_candidates:
         parent_candidates = list(range(active_experts))
 
-    x_critic = torch.cat([b_state, b_role], dim=1).to(device)
+    x_critic = torch.cat([b_state, b_role, b_goal], dim=1).to(device)
     with torch.no_grad():
         parent_values = [
             agent.experts[k].critic(x_critic).mean().item() for k in parent_candidates
@@ -472,7 +522,7 @@ def recombine_and_mutate_thief(
 
     # Compute FIM for each active parent Actor
     fims = [
-        compute_fim_diagonal(agent, k, b_obs, b_role, b_mask, b_actions, device)
+        compute_fim_diagonal(agent, k, b_obs, b_role, b_mask, b_actions, b_goal, device)
         for k in parent_candidates
     ]
 
@@ -526,6 +576,7 @@ def recombine_and_mutate_thief(
             b_role,
             b_mask,
             b_actions,
+            b_goal,
             b_returns,
             b_values,
             deficit_mask,
@@ -634,7 +685,7 @@ def train(
 
     msg = (
         f"Training {algo_name} Stage {stage_idx} (Seed {seed}) on {device} ("
-        f"16 Envs | Dynamic Sharding | Pool Doubling | FIFO Queue | 50-Update Post-Grace Cooldown)..."
+        f"16 Envs | HER Sub-Goal Navigation | Dynamic Sharding | Pool Doubling | FIFO Queue | 30-Update Post-Grace Cooldown)..."
     )
     console_logger.info(msg)
     if file_logger:
@@ -646,6 +697,8 @@ def train(
         num_envs, config=env_config, base_seed=seed * 1000 if seed is not None else 0
     )
     state_dim = vec_env.state_dim
+    map_w, map_h = env_config.get("map_size", (15, 15))
+    map_diag = np.sqrt(map_w**2 + map_h**2)
 
     agent = ThiefNetwork(state_dim, num_initial_experts=THIEF_INITIAL_EXPERTS).to(
         device
@@ -661,9 +714,7 @@ def train(
     incubation_queue = []  # FIFO list of waiting mutant_idx
     last_grace_end_update = 0  # Timestamp of when last mutant finished grace
     expert_consecutive_zero_usage = collections.defaultdict(int)
-    dormant_experts = (
-        set()
-    )  # Set of frozen inactive expert indices (0% usage for >= 20 updates)
+    dormant_experts = set()  # Set of frozen inactive expert indices
     env_previous_expert = None
 
     if load_ckpt_path and os.path.exists(load_ckpt_path):
@@ -703,6 +754,7 @@ def train(
     next_done = torch.zeros(num_envs).to(device)
 
     num_updates = total_timesteps // (num_envs * NUM_STEPS)
+    num_macro_steps = NUM_STEPS // THIEF_MACRO_HORIZON
     global_episodes = 0
     global_wins = 0
     current_env_returns = np.zeros(num_envs)
@@ -720,10 +772,13 @@ def train(
 
     last_expert_usage = {}
     last_switch_rate = 0.0
+    last_her_reach_rate = 0.0
+    last_her_avg_dist = 0.0
 
     for update in range(1, num_updates + 1):
         check_thermal_guard()
 
+        # Worker Buffers
         b_obs = {
             a: torch.zeros((NUM_STEPS, num_envs, *OBSERVATION_SIZE)).to(device)
             for a in AGENTS
@@ -733,6 +788,10 @@ def train(
         }
         b_mask = {
             a: torch.zeros((NUM_STEPS, num_envs, ACTION_SPACE_SIZE)).to(device)
+            for a in AGENTS
+        }
+        b_goal = {
+            a: torch.zeros((NUM_STEPS, num_envs, THIEF_HER_GOAL_DIM)).to(device)
             for a in AGENTS
         }
         b_actions = {a: torch.zeros((NUM_STEPS, num_envs)).to(device) for a in AGENTS}
@@ -746,6 +805,41 @@ def train(
             for a in AGENTS
         }
 
+        # Manager Macro Buffers (SMDP)
+        m_states = torch.zeros((num_macro_steps, num_envs, state_dim)).to(device)
+        m_goals = {
+            a: torch.zeros((num_macro_steps, num_envs, THIEF_HER_GOAL_DIM)).to(device)
+            for a in AGENTS
+        }
+        m_logprobs = {
+            a: torch.zeros((num_macro_steps, num_envs)).to(device) for a in AGENTS
+        }
+        m_values = {
+            a: torch.zeros((num_macro_steps, num_envs)).to(device) for a in AGENTS
+        }
+        m_rewards = {
+            a: torch.zeros((num_macro_steps, num_envs)).to(device) for a in AGENTS
+        }
+        m_dones = torch.zeros((num_macro_steps, num_envs)).to(device)
+
+        # HER Tracking State
+        current_goals = {
+            a: torch.zeros((num_envs, THIEF_HER_GOAL_DIM)).to(device) for a in AGENTS
+        }
+        prev_poses = {a: np.zeros((num_envs, 2)) for a in AGENTS}
+        macro_reward_acc = {a: torch.zeros(num_envs).to(device) for a in AGENTS}
+
+        her_relabeled_obs = []
+        her_relabeled_role = []
+        her_relabeled_mask = []
+        her_relabeled_actions = []
+        her_relabeled_goal = []
+        her_relabeled_expert = []
+
+        her_goals_assigned = 0
+        her_goals_reached = 0
+        her_total_dist = 0.0
+
         total_switches = 0
         total_switch_opportunities = 0
         current_sandbox_list = list(active_sandbox_mutants.keys())
@@ -754,6 +848,25 @@ def train(
         for step in range(NUM_STEPS):
             b_states[step] = torch.tensor(next_state, dtype=torch.float32).to(device)
             b_dones[step] = next_done
+
+            # Macro Step: Manager assigns sub-goals every THIEF_MACRO_HORIZON steps
+            if step % THIEF_MACRO_HORIZON == 0:
+                macro_idx = step // THIEF_MACRO_HORIZON
+                m_states[macro_idx] = b_states[step]
+                m_dones[macro_idx] = next_done
+
+                with torch.no_grad():
+                    for a_idx, a in enumerate(AGENTS):
+                        role_onehot = torch.zeros(num_envs, N_AGENTS, device=device)
+                        role_onehot[:, a_idx] = 1.0
+                        g_act, g_lp, _, g_val = agent.get_manager_action_and_value(
+                            b_states[step], role_onehot
+                        )
+                        current_goals[a] = g_act
+                        m_goals[a][macro_idx] = g_act
+                        m_logprobs[a][macro_idx] = g_lp
+                        m_values[a][macro_idx] = g_val
+                        macro_reward_acc[a].zero_()
 
             actions_dict = {}
             with torch.no_grad():
@@ -767,6 +880,9 @@ def train(
                 mask_all = torch.tensor(
                     stacked["action_mask"], dtype=torch.float32, device=device
                 )
+                goals_all = torch.cat(
+                    [current_goals[a] for a in AGENTS], dim=0
+                )  # Shape (N_AGENTS * num_envs, 2)
 
                 state_rep = b_states[step].repeat(N_AGENTS, 1)
                 actions, logprobs, _, values, chosen_expert = (
@@ -774,6 +890,7 @@ def train(
                         obs_all.flatten(0, 1),
                         role_all.flatten(0, 1),
                         mask_all.flatten(0, 1),
+                        goals_all,
                         state_rep,
                         active_experts=active_experts,
                         previous_expert=env_previous_expert,
@@ -801,6 +918,7 @@ def train(
                     b_obs[a][step] = obs_all[i]
                     b_role[a][step] = role_all[i]
                     b_mask[a][step] = mask_all[i]
+                    b_goal[a][step] = current_goals[a]
                     b_actions[a][step] = actions[i]
                     b_logprobs[a][step] = logprobs[i]
                     b_values[a][step] = values[i]
@@ -859,12 +977,80 @@ def train(
                 terms["scout"] | truncs["scout"], dtype=torch.float32
             ).to(device)
 
+            # Compute Goal Distances & Intrinsic Progress Reward
             for a in AGENTS:
-                b_rewards[a][step] = torch.tensor(rewards[a], dtype=torch.float32).to(
-                    device
+                gx = (current_goals[a][:, 0].cpu().numpy() + 1.0) * 0.5 * map_w
+                gy = (current_goals[a][:, 1].cpu().numpy() + 1.0) * 0.5 * map_h
+                curr_pos = np.array(
+                    [infos[e].get(a, {}).get("pos", (0, 0)) for e in range(num_envs)]
                 )
+                dist = np.sqrt((curr_pos[:, 0] - gx) ** 2 + (curr_pos[:, 1] - gy) ** 2)
 
-        # GAE Calculation
+                if step % THIEF_MACRO_HORIZON == 0:
+                    prev_poses[a] = curr_pos
+
+                prev_dist = np.sqrt(
+                    (prev_poses[a][:, 0] - gx) ** 2 + (prev_poses[a][:, 1] - gy) ** 2
+                )
+                progress = (prev_dist - dist) / max(1.0, map_diag)
+                prev_poses[a] = curr_pos
+
+                ext_r = torch.tensor(rewards[a], dtype=torch.float32, device=device)
+                int_r = torch.tensor(
+                    progress, dtype=torch.float32, device=device
+                ).clamp(-1.0, 1.0)
+
+                b_rewards[a][step] = ext_r + (THIEF_HER_REWARD_COEF * int_r)
+                macro_reward_acc[a] += ext_r
+
+                # End of Macro Segment: Record Manager Reward & HER Hindsight Relabeling
+                if (step + 1) % THIEF_MACRO_HORIZON == 0:
+                    macro_idx = step // THIEF_MACRO_HORIZON
+                    m_rewards[a][macro_idx] = macro_reward_acc[a].clone()
+
+                    for e in range(num_envs):
+                        her_goals_assigned += 1
+                        her_total_dist += float(dist[e])
+
+                        if dist[e] <= THIEF_HER_REACH_DIST:
+                            her_goals_reached += 1
+                        else:
+                            # Hindsight Relabeling: Goal achieved was the actual reached position
+                            hgx = float(
+                                np.clip(
+                                    (curr_pos[e, 0] / (0.5 * map_w)) - 1.0, -1.0, 1.0
+                                )
+                            )
+                            hgy = float(
+                                np.clip(
+                                    (curr_pos[e, 1] / (0.5 * map_h)) - 1.0, -1.0, 1.0
+                                )
+                            )
+                            hg = torch.tensor(
+                                [hgx, hgy], dtype=torch.float32, device=device
+                            )
+
+                            seg_start = step - THIEF_MACRO_HORIZON + 1
+                            for tau in range(seg_start, step + 1):
+                                her_relabeled_obs.append(b_obs[a][tau, e])
+                                her_relabeled_role.append(b_role[a][tau, e])
+                                her_relabeled_mask.append(b_mask[a][tau, e])
+                                her_relabeled_actions.append(b_actions[a][tau, e])
+                                her_relabeled_goal.append(hg)
+                                her_relabeled_expert.append(b_experts[a][tau, e])
+
+        last_her_reach_rate = (
+            (her_goals_reached / max(1, her_goals_assigned)) * 100
+            if her_goals_assigned > 0
+            else 0.0
+        )
+        last_her_avg_dist = (
+            her_total_dist / max(1, her_goals_assigned)
+            if her_goals_assigned > 0
+            else 0.0
+        )
+
+        # --- GAE CALCULATION (WORKERS) ---
         with torch.no_grad():
             stacked = next_obs["_stacked"]
             obs_all = torch.tensor(
@@ -876,6 +1062,7 @@ def train(
             mask_all = torch.tensor(
                 stacked["action_mask"], dtype=torch.float32, device=device
             )
+            goals_all = torch.cat([current_goals[a] for a in AGENTS], dim=0)
             state_rep = (
                 torch.tensor(next_state, dtype=torch.float32)
                 .to(device)
@@ -886,6 +1073,7 @@ def train(
                 obs_all.flatten(0, 1),
                 role_all.flatten(0, 1),
                 mask_all.flatten(0, 1),
+                goals_all,
                 state_rep,
                 active_experts=active_experts,
                 previous_expert=env_previous_expert,
@@ -920,10 +1108,45 @@ def train(
                     )
                 b_returns[a] = b_advantages[a] + b_values[a]
 
-        # Flatten transitions across all roles and environments
+        # --- GAE CALCULATION (MANAGER SMDP) ---
+        with torch.no_grad():
+            next_state_t = torch.tensor(next_state, dtype=torch.float32, device=device)
+            m_next_value = agent.manager.critic(next_state_t).squeeze(-1)
+
+            m_advantages = {
+                a: torch.zeros_like(m_rewards[a]).to(device) for a in AGENTS
+            }
+            m_returns = {a: torch.zeros_like(m_rewards[a]).to(device) for a in AGENTS}
+
+            for a in AGENTS:
+                lastgaelam = 0
+                for t in reversed(range(num_macro_steps)):
+                    if t == num_macro_steps - 1:
+                        nextnonterminal = 1.0 - next_done
+                        nextvalues = m_next_value
+                    else:
+                        nextnonterminal = 1.0 - m_dones[t + 1]
+                        nextvalues = m_values[a][t + 1]
+
+                    delta = (
+                        m_rewards[a][t]
+                        + (GAMMA**THIEF_MACRO_HORIZON) * nextvalues * nextnonterminal
+                        - m_values[a][t]
+                    )
+                    m_advantages[a][t] = lastgaelam = (
+                        delta
+                        + (GAMMA**THIEF_MACRO_HORIZON)
+                        * GAE_LAMBDA
+                        * nextnonterminal
+                        * lastgaelam
+                    )
+                m_returns[a] = m_advantages[a] + m_values[a]
+
+        # Flatten worker transitions across all roles and environments
         flat_obs = torch.cat([b_obs[a].flatten(0, 1) for a in AGENTS], dim=0)
         flat_role = torch.cat([b_role[a].flatten(0, 1) for a in AGENTS], dim=0)
         flat_mask = torch.cat([b_mask[a].flatten(0, 1) for a in AGENTS], dim=0)
+        flat_goal = torch.cat([b_goal[a].flatten(0, 1) for a in AGENTS], dim=0)
         flat_actions = torch.cat([b_actions[a].flatten(0, 1) for a in AGENTS], dim=0)
         flat_logprobs = torch.cat([b_logprobs[a].flatten(0, 1) for a in AGENTS], dim=0)
         flat_advantages = torch.cat(
@@ -933,6 +1156,37 @@ def train(
         flat_values = torch.cat([b_values[a].flatten(0, 1) for a in AGENTS], dim=0)
         flat_states = b_states.repeat(N_AGENTS, 1, 1).flatten(0, 1)
         flat_experts = torch.cat([b_experts[a].flatten(0, 1) for a in AGENTS], dim=0)
+
+        # Flatten manager transitions
+        flat_m_states = m_states.repeat(N_AGENTS, 1, 1).flatten(0, 1)
+        flat_m_role = torch.cat(
+            [
+                torch.zeros(
+                    num_macro_steps * num_envs,
+                    N_AGENTS,
+                    device=device,
+                ).scatter_(
+                    1,
+                    torch.full(
+                        (num_macro_steps * num_envs, 1),
+                        i,
+                        dtype=torch.long,
+                        device=device,
+                    ),
+                    1.0,
+                )
+                for i in range(N_AGENTS)
+            ],
+            dim=0,
+        )
+        flat_m_goals = torch.cat([m_goals[a].flatten(0, 1) for a in AGENTS], dim=0)
+        flat_m_logprobs = torch.cat(
+            [m_logprobs[a].flatten(0, 1) for a in AGENTS], dim=0
+        )
+        flat_m_advantages = torch.cat(
+            [m_advantages[a].flatten(0, 1) for a in AGENTS], dim=0
+        )
+        flat_m_returns = torch.cat([m_returns[a].flatten(0, 1) for a in AGENTS], dim=0)
 
         total_samples = flat_obs.shape[0]
         usage_counts = torch.bincount(flat_experts, minlength=active_experts)
@@ -953,13 +1207,62 @@ def train(
             else:
                 expert_consecutive_zero_usage[k] = 0
 
-        # PPO Optimization Loop with Advantage Normalization
+        # HER auxiliary tensors
+        has_her = len(her_relabeled_actions) > 0
+        if has_her:
+            her_obs_t = torch.stack(her_relabeled_obs, dim=0)
+            her_role_t = torch.stack(her_relabeled_role, dim=0)
+            her_mask_t = torch.stack(her_relabeled_mask, dim=0)
+            her_act_t = torch.stack(her_relabeled_actions, dim=0)
+            her_goal_t = torch.stack(her_relabeled_goal, dim=0)
+            her_exp_t = torch.stack(her_relabeled_expert, dim=0)
+
+        # --- PPO OPTIMIZATION LOOP ---
         batch_size = total_samples
         minibatch_size = batch_size // 4
         b_inds = np.arange(batch_size)
+        m_batch_size = flat_m_states.shape[0]
+        m_minibatch_size = max(1, m_batch_size // 4)
+        m_b_inds = np.arange(m_batch_size)
 
         for _ in range(UPDATE_EPOCHS):
             np.random.shuffle(b_inds)
+            np.random.shuffle(m_b_inds)
+
+            # Manager Update Step
+            for m_start in range(0, m_batch_size, m_minibatch_size):
+                m_end = m_start + m_minibatch_size
+                m_mb_inds = m_b_inds[m_start:m_end]
+
+                m_mb_state = flat_m_states[m_mb_inds]
+                m_mb_role = flat_m_role[m_mb_inds]
+                m_mb_goals = flat_m_goals[m_mb_inds]
+                m_mb_logprobs = flat_m_logprobs[m_mb_inds]
+                m_mb_adv = flat_m_advantages[m_mb_inds]
+                m_mb_returns = flat_m_returns[m_mb_inds]
+
+                m_mb_adv_norm = (m_mb_adv - m_mb_adv.mean()) / (m_mb_adv.std() + 1e-8)
+
+                _, new_m_lp, m_ent, new_m_val = agent.get_manager_action_and_value(
+                    m_mb_state, m_mb_role, action=m_mb_goals
+                )
+                m_ratio = (new_m_lp - m_mb_logprobs).exp()
+
+                m_pg1 = -m_mb_adv_norm * m_ratio
+                m_pg2 = -m_mb_adv_norm * torch.clamp(
+                    m_ratio, 1 - CLIP_COEF, 1 + CLIP_COEF
+                )
+                m_pg_loss = torch.max(m_pg1, m_pg2).mean()
+                m_v_loss = 0.5 * ((new_m_val - m_mb_returns) ** 2).mean()
+
+                mgr_loss = m_pg_loss - (ENT_COEF * m_ent.mean()) + (VF_COEF * m_v_loss)
+
+                optimizer.zero_grad()
+                mgr_loss.backward()
+                nn.utils.clip_grad_norm_(agent.parameters(), 0.5)
+                optimizer.step()
+
+            # Worker Specialists Update Step
             for start in range(0, batch_size, minibatch_size):
                 end = start + minibatch_size
                 mb_inds = b_inds[start:end]
@@ -982,6 +1285,7 @@ def train(
                 mb_obs = flat_obs[mb_inds]
                 mb_role = flat_role[mb_inds]
                 mb_mask = flat_mask[mb_inds]
+                mb_goal = flat_goal[mb_inds]
                 mb_state = flat_states[mb_inds]
                 mb_actions = flat_actions[mb_inds]
                 mb_logprobs = flat_logprobs[mb_inds]
@@ -991,6 +1295,7 @@ def train(
                     mb_obs,
                     mb_role,
                     mb_mask,
+                    mb_goal,
                     mb_state,
                     active_experts=active_experts,
                     action=mb_actions,
@@ -1012,6 +1317,28 @@ def train(
                 entropy_loss = entropy.mean()
 
                 loss = pg_loss - (ENT_COEF * entropy_loss) + (VF_COEF * v_loss)
+
+                # Auxiliary HER Hindsight Navigation Loss
+                if has_her:
+                    her_sample_size = min(len(her_act_t), minibatch_size // 2)
+                    her_idx = torch.randint(
+                        0, len(her_act_t), (her_sample_size,), device=device
+                    )
+
+                    _, her_newlogprob, _, _, _ = agent.get_action_and_value(
+                        her_obs_t[her_idx],
+                        her_role_t[her_idx],
+                        her_mask_t[her_idx],
+                        her_goal_t[her_idx],
+                        state=None,
+                        active_experts=active_experts,
+                        action=her_act_t[her_idx],
+                        expert_idx=her_exp_t[her_idx],
+                        grace_experts=current_sandbox_list,
+                        dormant_experts=dormant_experts,
+                    )
+                    her_aux_loss = -her_newlogprob.mean()
+                    loss = loss + (THIEF_HER_AUX_COEF * her_aux_loss)
 
                 optimizer.zero_grad()
                 loss.backward()
@@ -1073,6 +1400,7 @@ def train(
             flat_obs,
             flat_role,
             flat_states,
+            flat_goal,
             update,
             last_grace_end_update,
             active_sandbox_mutants,
@@ -1090,6 +1418,7 @@ def train(
                     flat_role,
                     flat_mask,
                     flat_actions,
+                    flat_goal,
                     flat_returns,
                     flat_values,
                     flat_states,
@@ -1226,18 +1555,19 @@ def train(
                 for k in range(active_experts)
             )
 
-            # Compact console log (clean standard output)
+            # Compact console log (clean standard output with HER reach rate)
             console_str = (
                 f"Update: {update}/{num_updates} | "
                 f"Win Rate: {avg_win:.2f} | "
                 f"Episodic Return: {avg_rew:.3f} | "
+                f"Goals Reached: {last_her_reach_rate:.1f}% (Dist: {last_her_avg_dist:.1f}) | "
                 f"Steps: {avg_steps:.1f}/{stage_max_steps} | "
                 f"Alarm: {avg_alarm:.1f}/{stage_alarm_max:.0f} | "
                 f"Active Experts: {active_bidding_count}/{active_experts}"
             )
             console_logger.info(console_str)
 
-            # Comprehensive file log (full sub-task breakdown matching E-COOP)
+            # Comprehensive file log (full sub-task breakdown matching E-COOP + HER)
             if file_logger:
                 file_str = (
                     f"Update: {update}/{num_updates} | "
@@ -1245,6 +1575,7 @@ def train(
                     f"Episodic Return: {avg_rew:.3f} | "
                     f"Steps: {avg_steps:.1f}/{stage_max_steps} | "
                     f"Alarm: {avg_alarm:.1f}/{stage_alarm_max:.0f} | "
+                    f"Goals Reached: {last_her_reach_rate:.1f}% (Avg Dist: {last_her_avg_dist:.1f} tiles, Relabeled: {len(her_relabeled_actions)}) | "
                     f"Scout Tag Rate: {avg_scout_int:.2f} (Avg POIs: {avg_scout_pois:.1f}) | "
                     f"Hacker Hack Rate: {avg_hacker_hack:.2f} | "
                     f"Muscle Neutralize Rate: {avg_muscle_neut:.2f} (Avg Guards: {avg_muscle_guards:.1f}/{stage_guards}) | "
@@ -1342,6 +1673,8 @@ def train(
         "max_stage_steps": stage_max_steps,
         "avg_alarm": avg_alarm,
         "stage_alarm_max": stage_alarm_max,
+        "her_goal_reach_rate": last_her_reach_rate,
+        "her_avg_goal_distance": last_her_avg_dist,
         "scout_interact_rate": avg_scout_int,
         "scout_avg_pois_tagged": avg_scout_pois,
         "hacker_hack_rate": avg_hacker_hack,
@@ -1365,4 +1698,33 @@ def train(
 
 
 if __name__ == "__main__":
-    train()
+    import argparse
+
+    parser = argparse.ArgumentParser(description="THIEF Training")
+    parser.add_argument("--stage", type=int, default=0, help="Stage index")
+    parser.add_argument(
+        "--timesteps", type=int, default=200_000, help="Total timesteps"
+    )
+    parser.add_argument("--seed", type=int, default=0, help="Random seed")
+    parser.add_argument(
+        "--save-dir",
+        "--save-ckpt-dir",
+        dest="save_dir",
+        type=str,
+        default=None,
+        help="Directory to save checkpoint and logs",
+    )
+    parser.add_argument(
+        "--load-ckpt", type=str, default=None, help="Path to checkpoint to load"
+    )
+    args = parser.parse_args()
+
+    train(
+        algo_name="thief",
+        stage_idx=args.stage,
+        total_timesteps=args.timesteps,
+        load_ckpt_path=args.load_ckpt,
+        save_ckpt_dir=args.save_dir,
+        log_dir=args.save_dir,
+        seed=args.seed,
+    )

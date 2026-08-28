@@ -217,5 +217,16 @@ THIEF_ISOLATION_UPDATES = 20
 THIEF_TARGETED_LR = 0.05
 THIEF_MUTATION_NOISE = 0.03
 THIEF_CROSSOVER_DAMPING = 1e-4
-THIEF_HYSTERESIS_EPSILON = 0.03  # Fluid sub-task routing (3-8% switch rate)
+THIEF_HYSTERESIS_EPSILON = (
+    0.05  # Calibrated for responsive switching without corridor thrashing
+)
 THIEF_CULL_WINDOW_UPDATES = 20
+
+# THIEF HER (Hindsight Experience Replay) Sub-Goal Constants
+THIEF_MACRO_HORIZON = (
+    5  # Sub-goal duration (K steps per macro action, 125 / 5 = 25 macro steps)
+)
+THIEF_HER_GOAL_DIM = 2  # (gx, gy) 2D continuous waypoint coordinates
+THIEF_HER_REWARD_COEF = 0.05  # Intrinsic distance reduction reward weight
+THIEF_HER_AUX_COEF = 0.10  # Weight of auxiliary HER hindsight navigation policy loss
+THIEF_HER_REACH_DIST = 1.5  # Distance threshold in tiles to consider sub-goal reached
