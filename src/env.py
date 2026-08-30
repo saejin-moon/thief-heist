@@ -58,6 +58,9 @@ class HeistEnv(ParallelEnv):
                         low=0, high=1, shape=(ACTION_SPACE_SIZE,), dtype=np.int8
                     ),
                     "role_id": Box(low=0, high=1, shape=(N_AGENTS,), dtype=np.int8),
+                    "goal_vector": Box(
+                        low=-1.0, high=1.0, shape=(GOAL_VECTOR_DIM,), dtype=np.float32
+                    ),
                 }
             )
             for a in self.possible_agents
@@ -69,7 +72,7 @@ class HeistEnv(ParallelEnv):
         max_cells = self.map_h * self.map_w
         self._distance_map = np.full((self.map_h, self.map_w), -1, dtype=np.int32)
         self._bfs_queue = np.empty(max_cells, dtype=np.int32)
-        self._bfs_previous = np.full(max_cells, -1, dtype=np.int32)
+        self._bfs_previous = np.full(max_cells, -2, dtype=np.int32)
         self._bfs_reset = np.empty(max_cells, dtype=np.int32)
 
         self._pad = OBSERVATION_SIZE[0] // 2
@@ -86,6 +89,26 @@ class HeistEnv(ParallelEnv):
             dtype=np.float32,
         )
         self.time_bleed = TOTAL_TIME_BLEED / float(self.config.get("max_steps", 300))
+        self.current_step = 0
+        self.alarm = 0.0
+        self.alarm_max = float(self.config.get("alarm_max", ALARM_MAX))
+        self.terminal_disabled = False
+        self.loot_acquired = False
+        self.extraction_triggered = False
+        self.extraction_countdown = int(
+            self.config.get("max_steps", 300) * EXTRACTION_COUNTDOWN_RATIO
+        )
+        self.agent_positions = {a: (0, 0) for a in self.possible_agents}
+        self.guard_positions = []
+        self.neutralized = np.zeros(0, dtype=np.int32)
+        self.terminal_pos = (0, 0)
+        self.loot_pos = (0, 0)
+        self.extract_pos = (0, 0)
+        self.camera_positions = []
+        self.door_positions = []
+        self.room_rects = []
+        self.tagged_pois = set()
+        self.explored_map = np.zeros((self.map_h, self.map_w), dtype=bool)
 
     def reset(self, seed=None, _options=None):
         if seed is not None:
@@ -521,7 +544,7 @@ class HeistEnv(ParallelEnv):
         scale = min(1.0, 17.0 / max(self.map_h, self.map_w))
         scaled_amount = amount * scale
         prev = self.alarm
-        self.alarm = min(self.alarm + scaled_amount, ALARM_MAX)
+        self.alarm = min(self.alarm + scaled_amount, self.alarm_max)
         if self.alarm - prev > 0:
             for a in self.agents:
                 rewards[a] -= 0.01 * (self.alarm - prev)
@@ -625,10 +648,43 @@ class HeistEnv(ParallelEnv):
                         pad + int(np.clip(dc, -pad, pad)),
                     ] = WAYPOINT
 
+            # 3. 2D Mission Orientation Unit Vector
+            tgt = None
+            if agent == "hacker":
+                if not self.terminal_disabled and self.terminal_pos is not None:
+                    tgt = np.array(self.terminal_pos, dtype=np.float32)
+                else:
+                    tgt = np.array(self.extract_pos, dtype=np.float32)
+            elif agent == "extractor":
+                if not self.loot_acquired and self.loot_pos is not None:
+                    tgt = np.array(self.loot_pos, dtype=np.float32)
+                else:
+                    tgt = np.array(self.extract_pos, dtype=np.float32)
+            elif agent == "muscle":
+                active_guards = [
+                    self.guard_positions[gi]
+                    for gi in range(len(self.guard_positions))
+                    if self.neutralized[gi] == 0
+                ]
+                if active_guards:
+                    dists = [manhattan((r, c), gp) for gp in active_guards]
+                    tgt = np.array(
+                        active_guards[int(np.argmin(dists))], dtype=np.float32
+                    )
+                else:
+                    tgt = np.array(self.extract_pos, dtype=np.float32)
+            else:  # Scout
+                tgt = np.array(self.extract_pos, dtype=np.float32)
+
+            diff = tgt - np.array([r, c], dtype=np.float32)
+            norm = np.linalg.norm(diff) + 1e-5
+            goal_vec = np.clip(diff / norm, -1.0, 1.0)
+
             obs_dict[agent] = {
                 "observation": obs_masked,
                 "action_mask": self._action_mask(agent),
                 "role_id": ROLE_ONEHOT_ARRAYS[agent],
+                "goal_vector": goal_vec,
             }
         return obs_dict
 

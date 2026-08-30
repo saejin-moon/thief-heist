@@ -28,6 +28,7 @@ from constants import (
     ENT_COEF,
     GAE_LAMBDA,
     GAMMA,
+    GOAL_VECTOR_DIM,
     LR,
     N_AGENTS,
     NUM_ENVS,
@@ -45,16 +46,20 @@ class MappoNetwork(nn.Module):
     Individual Expert Actor-Critic module.
 
     Each specialist maintains:
-    - Actor MLP: maps local egocentric observation + one-hot role vector -> action logits.
-    - Critic MLP: maps global centralized environment state + one-hot role vector -> state value V(s, role).
+    - Actor MLP: maps local egocentric observation + one-hot role vector + goal vector -> action logits.
+    - Critic MLP: maps global centralized environment state + one-hot role vector + goal vector -> state value V(s, role).
     """
 
     def __init__(self, state_dim):
         super().__init__()
-        actor_in_dim = (OBSERVATION_SIZE[0] * OBSERVATION_SIZE[1]) + N_AGENTS
-        critic_in_dim = state_dim + N_AGENTS
+        actor_in_dim = (
+            (OBSERVATION_SIZE[0] * OBSERVATION_SIZE[1])
+            + N_AGENTS
+            + GOAL_VECTOR_DIM
+        )
+        critic_in_dim = state_dim + N_AGENTS + GOAL_VECTOR_DIM
 
-        # Policy Network: maps local 7x7 view + role ID -> unnormalized action logits
+        # Policy Network
         self.actor = nn.Sequential(
             nn.Linear(actor_in_dim, 64),
             nn.Tanh(),
@@ -63,7 +68,7 @@ class MappoNetwork(nn.Module):
             nn.Linear(64, ACTION_SPACE_SIZE),
         )
 
-        # Centralized Critic Network: maps global state + role ID -> expected return V(s, role)
+        # Centralized Critic Network
         self.critic = nn.Sequential(
             nn.Linear(critic_in_dim, 64),
             nn.Tanh(),
@@ -72,12 +77,14 @@ class MappoNetwork(nn.Module):
             nn.Linear(64, 1),
         )
 
-    def get_action_and_value(self, obs, role, mask, state=None, action=None):
+    def get_action_and_value(
+        self, obs, role, mask, goal, state=None, action=None
+    ):
         """
         Forward pass for a batch of transitions assigned to this expert.
         Applies invalid action masking (-1e9) prior to categorical sampling.
         """
-        x_actor = torch.cat([obs.flatten(start_dim=1), role], dim=1)
+        x_actor = torch.cat([obs.flatten(start_dim=1), role, goal], dim=1)
         logits = self.actor(x_actor)
         masked_logits = logits + ((1.0 - mask) * -1e9)
         probs = Categorical(logits=masked_logits)
@@ -86,7 +93,7 @@ class MappoNetwork(nn.Module):
             action = probs.sample()
 
         if state is not None:
-            x_critic = torch.cat([state, role], dim=1)
+            x_critic = torch.cat([state, role, goal], dim=1)
             value = self.critic(x_critic).squeeze(-1)
         else:
             value = None
@@ -106,7 +113,10 @@ class EcoopNetwork(nn.Module):
         super().__init__()
         self.state_dim = state_dim
         self.experts = nn.ModuleList(
-            [MappoNetwork(state_dim) for _ in range(max(1, num_initial_experts))]
+            [
+                MappoNetwork(state_dim)
+                for _ in range(max(1, num_initial_experts))
+            ]
         )
 
     def add_expert(self):
@@ -122,13 +132,16 @@ class EcoopNetwork(nn.Module):
 
     def prune_experts(self, survivor_indices):
         """Retains only the surviving expert modules in contiguous order."""
-        self.experts = nn.ModuleList([self.experts[i] for i in survivor_indices])
+        self.experts = nn.ModuleList(
+            [self.experts[i] for i in survivor_indices]
+        )
 
     def get_action_and_value(
         self,
         obs,
         role,
         mask,
+        goal,
         state,
         active_experts,
         action=None,
@@ -140,13 +153,9 @@ class EcoopNetwork(nn.Module):
     ):
         """
         Executes routing and policy forward passes across the expert pool.
-
-        If expert_idx is explicitly passed (e.g. during PPO policy loss updates), actions
-        are evaluated using the exact expert that took the step during rollout.
-        Otherwise, Direct Role-Conditioned Critic Bidding with Hysteresis selects the best expert per agent.
         """
         batch_size = obs.shape[0]
-        x_critic = torch.cat([state, role], dim=1)
+        x_critic = torch.cat([state, role, goal], dim=1)
 
         # 1. Routing Selection Phase
         if expert_idx is not None:
@@ -164,14 +173,14 @@ class EcoopNetwork(nn.Module):
                 candidate_experts, dtype=torch.long, device=obs.device
             )
 
-            # Direct Role-Conditioned Critic Bids: V_k(s, role)
+            # Direct Role-Conditioned Critic Bids: V_k(s, role, goal)
             expert_bids = torch.stack(
                 [
                     self.experts[k].critic(x_critic).squeeze(-1)
                     for k in candidate_experts
                 ],
                 dim=1,
-            )  # [Batch, len(candidate_experts)]
+            )
 
             # Greedy Argmax with Vectorized Hybrid Hysteresis for temporal policy coherence
             best_rel_idx = torch.argmax(expert_bids, dim=1)
@@ -190,7 +199,7 @@ class EcoopNetwork(nn.Module):
                     expert_bids, 1, best_rel_idx.unsqueeze(1)
                 ).squeeze(1)
 
-                # Dynamic switching threshold: require clear superiority before switching
+                # Dynamic switching threshold
                 switch_thresh = prev_bid + torch.clamp(
                     epsilon * torch.abs(prev_bid), min=epsilon
                 )
@@ -205,7 +214,7 @@ class EcoopNetwork(nn.Module):
             else:
                 chosen_expert = best_idx
 
-            # Environment Sharding Grace Routing: isolate mutant to dedicated environments
+            # Environment Sharding Grace Routing
             if grace_expert is not None and grace_expert < active_experts:
                 threshold_env = max(0, NUM_ENVS - ECOOP_MUTANT_ENVS)
                 env_ids = torch.arange(batch_size, device=obs.device) % NUM_ENVS
@@ -213,7 +222,9 @@ class EcoopNetwork(nn.Module):
                 chosen_expert = torch.where(
                     is_grace_env,
                     torch.tensor(
-                        grace_expert, device=obs.device, dtype=chosen_expert.dtype
+                        grace_expert,
+                        device=obs.device,
+                        dtype=chosen_expert.dtype,
                     ),
                     chosen_expert,
                 )
@@ -234,6 +245,7 @@ class EcoopNetwork(nn.Module):
                 obs[mask_k],
                 role[mask_k],
                 mask[mask_k],
+                goal[mask_k],
                 state[mask_k] if state is not None else None,
                 action=act_k,
             )
@@ -252,35 +264,44 @@ def compute_fim_diagonal(
     sample_obs,
     sample_role,
     sample_mask,
+    sample_goal,
     sample_actions,
+    chunk_size=256,
 ):
     """
-    Computes the empirical Fisher Information Matrix (FIM) diagonal across 100% of the rollout buffer.
-
-    Calculates policy log-likelihood gradients strictly for the Actor network across all transitions
-    collected by Scout, Hacker, Muscle, and Extractor without subsampling.
+    Computes the empirical Fisher Information Matrix (FIM) diagonal across the rollout buffer
+    in manageable chunks to prevent computation graph bloat.
     """
     fim = {
         name: torch.zeros_like(param)
         for name, param in expert_model.actor.named_parameters()
     }
-    expert_model.actor.zero_grad()
     n_eval = len(sample_obs)
     if n_eval == 0:
         return fim
 
-    x_actor = torch.cat([sample_obs.flatten(start_dim=1), sample_role], dim=1)
-    logits = expert_model.actor(x_actor)
-    masked_logits = logits + ((1.0 - sample_mask) * -1e9)
-    probs = Categorical(logits=masked_logits)
-    log_prob = probs.log_prob(sample_actions)
+    x_actor = torch.cat(
+        [sample_obs.flatten(start_dim=1), sample_role, sample_goal], dim=1
+    )
 
-    for j in range(n_eval):
-        expert_model.actor.zero_grad()
-        log_prob[j].backward(retain_graph=True)
-        for name, param in expert_model.actor.named_parameters():
-            if param.grad is not None:
-                fim[name] += (param.grad.data.clone() ** 2) / n_eval
+    for start in range(0, n_eval, chunk_size):
+        end = min(start + chunk_size, n_eval)
+        sub_x = x_actor[start:end]
+        sub_mask = sample_mask[start:end]
+        sub_acts = sample_actions[start:end]
+
+        logits = expert_model.actor(sub_x)
+        masked_logits = logits + ((1.0 - sub_mask) * -1e9)
+        probs = Categorical(logits=masked_logits)
+        log_prob = probs.log_prob(sub_acts)
+
+        for j in range(len(sub_acts)):
+            expert_model.actor.zero_grad()
+            log_prob[j].backward(retain_graph=(j < len(sub_acts) - 1))
+            for name, param in expert_model.actor.named_parameters():
+                if param.grad is not None:
+                    fim[name] += (param.grad.data.clone() ** 2) / n_eval
+
     expert_model.actor.zero_grad()
     return fim
 
@@ -293,6 +314,7 @@ def train(
     load_ckpt_path=None,
     save_ckpt_dir=None,
     log_dir=None,
+    seed=None,
 ):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -306,7 +328,9 @@ def train(
         os.makedirs(log_dir, exist_ok=True)
         file_logger = logging.getLogger(f"file_{algo_name}_{stage_idx}")
         file_logger.setLevel(logging.INFO)
-        file_handler = logging.FileHandler(os.path.join(log_dir, "train.log"), mode="w")
+        file_handler = logging.FileHandler(
+            os.path.join(log_dir, "train.log"), mode="w"
+        )
         file_handler.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
         file_logger.handlers = [file_handler]
         file_logger.propagate = False
@@ -318,7 +342,11 @@ def train(
 
     if env_config is None:
         env_config = dict(CURRICULUM_STAGES[stage_idx])
-    vec_env = VectorEnv(NUM_ENVS, config=env_config)
+    vec_env = VectorEnv(
+        NUM_ENVS,
+        config=env_config,
+        base_seed=seed * 1000 if seed is not None else 0,
+    )
     state_dim = vec_env.state_dim
 
     agent = EcoopNetwork(state_dim, num_initial_experts=1).to(device)
@@ -334,34 +362,45 @@ def train(
 
     if load_ckpt_path and os.path.exists(load_ckpt_path):
         try:
-            ckpt = torch.load(load_ckpt_path, map_location=device, weights_only=False)
+            ckpt = torch.load(
+                load_ckpt_path, map_location=device, weights_only=False
+            )
             state_dict = (
                 ckpt["model_state"]
                 if (isinstance(ckpt, dict) and "model_state" in ckpt)
                 else ckpt
             )
             expert_indices = {
-                int(k.split(".")[1]) for k in state_dict if k.startswith("experts.")
+                int(k.split(".")[1])
+                for k in state_dict
+                if k.startswith("experts.")
             }
             needed_experts = max(expert_indices) + 1 if expert_indices else 1
             while len(agent.experts) < needed_experts:
                 agent.add_expert()
             if len(agent.experts) > needed_experts:
                 agent.prune_experts(list(range(needed_experts)))
+
             agent.load_state_dict(state_dict)
             optimizer = torch.optim.Adam(agent.parameters(), lr=LR)
-            if isinstance(ckpt, dict) and "model_state" in ckpt:
-                active_experts = int(ckpt.get("active_experts", len(agent.experts)))
-                total_spawns = int(ckpt.get("total_spawns", 0))
-                spawn_history = list(ckpt.get("spawn_history", []))
+
+            if isinstance(ckpt, dict) and "active_experts" in ckpt:
+                active_experts = ckpt["active_experts"]
             else:
                 active_experts = len(agent.experts)
-            msg = f"Loaded checkpoint from {load_ckpt_path} (Active specialists: {active_experts}, total spawns: {total_spawns})"
-            print(msg)
-            logging.info(msg)  # noqa: LOG015
+
+            if isinstance(ckpt, dict) and "total_spawns" in ckpt:
+                total_spawns = ckpt["total_spawns"]
+            if isinstance(ckpt, dict) and "spawn_history" in ckpt:
+                spawn_history = list(ckpt["spawn_history"])
+
+            msg = f"Successfully loaded checkpoint from {load_ckpt_path} (Active experts: {active_experts})"
+            console_logger.info(msg)
+            if file_logger:
+                file_logger.info(msg)
         except Exception as e:  # noqa: BLE001
             print(
-                f"Warning: Could not load full checkpoint ({e}). Training from scratch."
+                f"Warning: Could not load full checkpoint ({e}). Initializing fresh."
             )
 
     next_obs, next_state = vec_env.reset()
@@ -398,16 +437,29 @@ def train(
             for a in AGENTS
         }
         b_role = {
-            a: torch.zeros((NUM_STEPS, NUM_ENVS, N_AGENTS)).to(device) for a in AGENTS
+            a: torch.zeros((NUM_STEPS, NUM_ENVS, N_AGENTS)).to(device)
+            for a in AGENTS
         }
         b_mask = {
             a: torch.zeros((NUM_STEPS, NUM_ENVS, ACTION_SPACE_SIZE)).to(device)
             for a in AGENTS
         }
-        b_actions = {a: torch.zeros((NUM_STEPS, NUM_ENVS)).to(device) for a in AGENTS}
-        b_logprobs = {a: torch.zeros((NUM_STEPS, NUM_ENVS)).to(device) for a in AGENTS}
-        b_rewards = {a: torch.zeros((NUM_STEPS, NUM_ENVS)).to(device) for a in AGENTS}
-        b_values = {a: torch.zeros((NUM_STEPS, NUM_ENVS)).to(device) for a in AGENTS}
+        b_goal = {
+            a: torch.zeros((NUM_STEPS, NUM_ENVS, GOAL_VECTOR_DIM)).to(device)
+            for a in AGENTS
+        }
+        b_actions = {
+            a: torch.zeros((NUM_STEPS, NUM_ENVS)).to(device) for a in AGENTS
+        }
+        b_logprobs = {
+            a: torch.zeros((NUM_STEPS, NUM_ENVS)).to(device) for a in AGENTS
+        }
+        b_rewards = {
+            a: torch.zeros((NUM_STEPS, NUM_ENVS)).to(device) for a in AGENTS
+        }
+        b_values = {
+            a: torch.zeros((NUM_STEPS, NUM_ENVS)).to(device) for a in AGENTS
+        }
         b_dones = torch.zeros((NUM_STEPS, NUM_ENVS)).to(device)
         b_states = torch.zeros((NUM_STEPS, NUM_ENVS, state_dim)).to(device)
         b_experts = {
@@ -420,7 +472,9 @@ def train(
 
         # --- ROLLOUT PHASE ---
         for step in range(NUM_STEPS):
-            b_states[step] = torch.tensor(next_state, dtype=torch.float32).to(device)
+            b_states[step] = torch.tensor(next_state, dtype=torch.float32).to(
+                device
+            )
             b_dones[step] = next_done
 
             actions_dict = {}
@@ -435,6 +489,9 @@ def train(
                 mask_all = torch.tensor(
                     stacked["action_mask"], dtype=torch.float32, device=device
                 )
+                goals_all = torch.tensor(
+                    stacked["goal_vector"], dtype=torch.float32, device=device
+                )
 
                 state_rep = b_states[step].repeat(N_AGENTS, 1)
                 actions, logprobs, _, values, chosen_expert = (
@@ -442,6 +499,7 @@ def train(
                         obs_all.flatten(0, 1),
                         role_all.flatten(0, 1),
                         mask_all.flatten(0, 1),
+                        goals_all.flatten(0, 1),
                         state_rep,
                         active_experts=active_experts,
                         previous_expert=env_previous_expert,
@@ -461,6 +519,7 @@ def train(
                     b_obs[a][step] = obs_all[i]
                     b_role[a][step] = role_all[i]
                     b_mask[a][step] = mask_all[i]
+                    b_goal[a][step] = goals_all[i]
                     b_actions[a][step] = actions[i]
                     b_logprobs[a][step] = logprobs[i]
                     b_values[a][step] = values[i]
@@ -481,22 +540,30 @@ def train(
                     if is_win:
                         global_wins += 1
                     completed_wins.append(float(is_win))
-                    completed_episode_returns.append(float(current_env_returns[e]))
+                    completed_episode_returns.append(
+                        float(current_env_returns[e])
+                    )
                     current_env_returns[e] = 0.0
 
                     interact_succ = float(
                         scout_info.get("scout_interact_success", False)
                     )
                     pois_tagged = float(scout_info.get("scout_pois_tagged", 0))
-                    hack_succ = float(scout_info.get("hacker_hack_success", False))
+                    hack_succ = float(
+                        scout_info.get("hacker_hack_success", False)
+                    )
                     neutralize_succ = float(
                         scout_info.get("muscle_neutralize_success", False)
                     )
                     guards_neutralized = float(
                         scout_info.get("muscle_guards_neutralized", 0)
                     )
-                    loot_succ = float(scout_info.get("extractor_loot_success", False))
-                    agents_extract = float(scout_info.get("agents_at_extract", 0))
+                    loot_succ = float(
+                        scout_info.get("extractor_loot_success", False)
+                    )
+                    agents_extract = float(
+                        scout_info.get("agents_at_extract", 0)
+                    )
                     ep_steps = float(scout_info.get("steps", 0))
                     ep_alarm = float(scout_info.get("alarm", 0.0))
 
@@ -520,19 +587,19 @@ def train(
             ).to(device)
 
             for a in AGENTS:
-                b_rewards[a][step] = torch.tensor(rewards[a], dtype=torch.float32).to(
-                    device
-                )
+                b_rewards[a][step] = torch.tensor(
+                    rewards[a], dtype=torch.float32
+                ).to(device)
 
-        # Track usage and switch rate (100% Vectorized)
-        experts_stacked = torch.stack(
-            [b_experts[a] for a in AGENTS]
-        )  # [N_AGENTS, NUM_STEPS, NUM_ENVS]
+        # Track usage and switch rate
+        experts_stacked = torch.stack([b_experts[a] for a in AGENTS])
         all_experts_tensor = experts_stacked.view(-1)
         total_decisions = max(1, all_experts_tensor.numel())
         last_expert_usage = {
             str(k): round(
-                float((all_experts_tensor == k).sum().item()) / total_decisions * 100.0,
+                float((all_experts_tensor == k).sum().item())
+                / total_decisions
+                * 100.0,
                 1,
             )
             for k in range(active_experts)
@@ -558,12 +625,18 @@ def train(
             next_mask_all = torch.tensor(
                 stacked_next["action_mask"], dtype=torch.float32, device=device
             )
-            next_state_t = torch.tensor(next_state, dtype=torch.float32, device=device)
+            next_goals_all = torch.tensor(
+                stacked_next["goal_vector"], dtype=torch.float32, device=device
+            )
+            next_state_t = torch.tensor(
+                next_state, dtype=torch.float32, device=device
+            )
 
             _, _, _, next_val, _ = agent.get_action_and_value(
                 next_obs_all.flatten(0, 1),
                 next_role_all.flatten(0, 1),
                 next_mask_all.flatten(0, 1),
+                next_goals_all.flatten(0, 1),
                 next_state_t.repeat(N_AGENTS, 1),
                 active_experts=active_experts,
                 previous_expert=env_previous_expert,
@@ -588,7 +661,8 @@ def train(
                         - b_values[a][t]
                     )
                     b_adv[a][t] = lastgaelam = (
-                        delta + GAMMA * GAE_LAMBDA * nextnonterminal * lastgaelam
+                        delta
+                        + GAMMA * GAE_LAMBDA * nextnonterminal * lastgaelam
                     )
 
         b_returns = {a: b_adv[a] + b_values[a] for a in AGENTS}
@@ -600,13 +674,14 @@ def train(
                 obs_flat = b_obs[a].reshape(-1, *OBSERVATION_SIZE)
                 role_flat = b_role[a].reshape(-1, N_AGENTS)
                 mask_flat = b_mask[a].reshape(-1, ACTION_SPACE_SIZE)
+                goal_flat = b_goal[a].reshape(-1, GOAL_VECTOR_DIM)
                 action_flat = b_actions[a].reshape(-1)
                 logprob_flat = b_logprobs[a].reshape(-1)
                 adv_flat = b_adv[a].reshape(-1)
                 ret_flat = b_returns[a].reshape(-1)
                 experts_flat = b_experts[a].reshape(-1)
 
-                # Per-Expert Advantage Normalization (100% Mathematical Isolation)
+                # Per-Expert Advantage Normalization
                 adv_norm = torch.zeros_like(adv_flat)
                 for k in range(active_experts):
                     mask_k = experts_flat == k
@@ -624,6 +699,7 @@ def train(
                     obs_flat,
                     role_flat,
                     mask_flat,
+                    goal_flat,
                     b_states_flat,
                     active_experts=active_experts,
                     action=action_flat,
@@ -677,11 +753,21 @@ def train(
                         sample_roles = torch.cat(
                             [b_role[ag].flatten(0, 1) for ag in AGENTS], dim=0
                         )
+                        sample_goals = torch.cat(
+                            [b_goal[ag].flatten(0, 1) for ag in AGENTS], dim=0
+                        )
                         sample_states = torch.cat(
                             [b_states.flatten(0, 1) for _ in AGENTS], dim=0
                         )
-                        x_critic_eval = torch.cat([sample_states, sample_roles], dim=1)
-                        mean_v = agent.experts[k].critic(x_critic_eval).mean().item()
+                        x_critic_eval = torch.cat(
+                            [sample_states, sample_roles, sample_goals], dim=1
+                        )
+                        mean_v = (
+                            agent.experts[k]
+                            .critic(x_critic_eval)
+                            .mean()
+                            .item()
+                        )
                 expert_mean_vals[k] = mean_v
                 if mean_v > best_val:
                     best_val = mean_v
@@ -692,7 +778,8 @@ def train(
                 k
                 for k in range(active_experts)
                 if k != best_expert
-                and expert_consecutive_zero_usage[k] >= ECOOP_CULL_WINDOW_UPDATES
+                and expert_consecutive_zero_usage[k]
+                >= ECOOP_CULL_WINDOW_UPDATES
                 and k != current_grace_expert
             ]
 
@@ -714,12 +801,16 @@ def train(
                 agent.prune_experts(survivors)
                 optimizer.param_groups.clear()
                 for exp in agent.experts:
-                    optimizer.add_param_group({"params": exp.parameters(), "lr": LR})
+                    optimizer.add_param_group(
+                        {"params": exp.parameters(), "lr": LR}
+                    )
                 env_previous_expert = None
 
                 if current_grace_expert is not None:
                     if current_grace_expert in survivors:
-                        current_grace_expert = survivors.index(current_grace_expert)
+                        current_grace_expert = survivors.index(
+                            current_grace_expert
+                        )
                     else:
                         current_grace_expert = None
                         grace_updates_remaining = 0
@@ -730,7 +821,9 @@ def train(
                 new_zero_usage = collections.defaultdict(int)
 
                 for new_idx, old_idx in enumerate(survivors):
-                    new_zero_usage[new_idx] = expert_consecutive_zero_usage[old_idx]
+                    new_zero_usage[new_idx] = expert_consecutive_zero_usage[
+                        old_idx
+                    ]
 
                 expert_consecutive_zero_usage = new_zero_usage
                 best_expert = survivors.index(best_expert)
@@ -780,7 +873,11 @@ def train(
                 [b_role[a].reshape(-1, N_AGENTS) for a in AGENTS], dim=0
             )
             sample_mask = torch.cat(
-                [b_mask[a].reshape(-1, ACTION_SPACE_SIZE) for a in AGENTS], dim=0
+                [b_mask[a].reshape(-1, ACTION_SPACE_SIZE) for a in AGENTS],
+                dim=0,
+            )
+            sample_goal = torch.cat(
+                [b_goal[a].reshape(-1, GOAL_VECTOR_DIM) for a in AGENTS], dim=0
             )
             sample_acts = torch.cat(
                 [b_actions[a].reshape(-1).long() for a in AGENTS], dim=0
@@ -794,6 +891,7 @@ def train(
                     sample_obs,
                     sample_role,
                     sample_mask,
+                    sample_goal,
                     sample_acts,
                 )
                 pool_fims.append(fim_k)

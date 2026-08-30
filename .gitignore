@@ -14,3 +14,7 @@ wheels/
 
 # results
 results/
+checkpoints/
+
+# logs
+*.log

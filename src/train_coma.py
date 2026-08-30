@@ -22,6 +22,7 @@ from constants import (
     ENT_COEF,
     GAE_LAMBDA,
     GAMMA,
+    GOAL_VECTOR_DIM,
     LR,
     N_AGENTS,
     NUM_ENVS,
@@ -36,15 +37,19 @@ from vec_env import VectorEnv
 
 class ComaNetwork(nn.Module):
     """
-    COMA Actor-Critic Network.
-    - Decentralized Actor: pi(u^a | obs^a, role^a)
-    - Centralized Counterfactual Critic: Q(s, (., u^{-a}), role^a) -> R^|U|
+    Counterfactual Multi-Agent Policy Gradients (COMA) Network.
+    - Decentralized Actor: pi(u^a | obs^a, role^a, goal^a)
+    - Centralized Counterfactual Critic: Q(s, (., u^{-a}), role^a, goal^a) -> R^|U|
     """
 
     def __init__(self, state_dim):
         super().__init__()
-        # Actor sees: 7x7 local view (49) + Role One-Hot (4)
-        actor_in_dim = (OBSERVATION_SIZE[0] * OBSERVATION_SIZE[1]) + N_AGENTS
+        # Actor sees: 11x11 local view (121) + Role One-Hot (4) + Goal Vector (2) = 127
+        actor_in_dim = (
+            (OBSERVATION_SIZE[0] * OBSERVATION_SIZE[1])
+            + N_AGENTS
+            + GOAL_VECTOR_DIM
+        )
         self.actor = nn.Sequential(
             nn.Linear(actor_in_dim, 64),
             nn.Tanh(),
@@ -53,8 +58,13 @@ class ComaNetwork(nn.Module):
             nn.Linear(64, ACTION_SPACE_SIZE),
         )
 
-        # Critic sees: Global State + (N_AGENTS - 1) other agents' one-hot actions + Role
-        critic_in_dim = state_dim + ((N_AGENTS - 1) * ACTION_SPACE_SIZE) + N_AGENTS
+        # Critic sees: Global State + (N_AGENTS - 1) other agents' one-hot actions + Role + Goal
+        critic_in_dim = (
+            state_dim
+            + ((N_AGENTS - 1) * ACTION_SPACE_SIZE)
+            + N_AGENTS
+            + GOAL_VECTOR_DIM
+        )
         self.critic = nn.Sequential(
             nn.Linear(critic_in_dim, 128),
             nn.Tanh(),
@@ -63,8 +73,8 @@ class ComaNetwork(nn.Module):
             nn.Linear(128, ACTION_SPACE_SIZE),  # Outputs Q-values for all |U| actions
         )
 
-    def get_action(self, obs, role, mask, action=None):
-        x_actor = torch.cat([obs.flatten(start_dim=1), role], dim=1)
+    def get_action(self, obs, role, mask, goal, action=None):
+        x_actor = torch.cat([obs.flatten(start_dim=1), role, goal], dim=1)
         logits = self.actor(x_actor)
         masked_logits = logits + ((1.0 - mask) * -1e9)
         probs = Categorical(logits=masked_logits)
@@ -72,8 +82,8 @@ class ComaNetwork(nn.Module):
             action = probs.sample()
         return action, probs.log_prob(action), probs.entropy(), probs.probs
 
-    def get_q_values(self, state, other_actions_onehot, role):
-        x_critic = torch.cat([state, other_actions_onehot, role], dim=1)
+    def get_q_values(self, state, other_actions_onehot, role, goal):
+        x_critic = torch.cat([state, other_actions_onehot, role, goal], dim=1)
         return self.critic(x_critic)
 
 
@@ -103,6 +113,7 @@ def train(
     load_ckpt_path=None,
     save_ckpt_dir=None,
     log_dir=None,
+    seed=None,
 ):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -116,7 +127,9 @@ def train(
         os.makedirs(log_dir, exist_ok=True)
         file_logger = logging.getLogger(f"file_{algo_name}_{stage_idx}")
         file_logger.setLevel(logging.INFO)
-        file_handler = logging.FileHandler(os.path.join(log_dir, "train.log"), mode="w")
+        file_handler = logging.FileHandler(
+            os.path.join(log_dir, "train.log"), mode="w"
+        )
         file_handler.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
         file_logger.handlers = [file_handler]
         file_logger.propagate = False
@@ -128,7 +141,11 @@ def train(
 
     if env_config is None:
         env_config = dict(CURRICULUM_STAGES[stage_idx])
-    vec_env = VectorEnv(NUM_ENVS, config=env_config)
+    vec_env = VectorEnv(
+        NUM_ENVS,
+        config=env_config,
+        base_seed=seed * 1000 if seed is not None else 0,
+    )
     state_dim = vec_env.state_dim
 
     agent = ComaNetwork(state_dim).to(device)
@@ -180,14 +197,23 @@ def train(
             for a in AGENTS
         }
         b_role = {
-            a: torch.zeros((NUM_STEPS, NUM_ENVS, N_AGENTS)).to(device) for a in AGENTS
+            a: torch.zeros((NUM_STEPS, NUM_ENVS, N_AGENTS)).to(device)
+            for a in AGENTS
         }
         b_mask = {
             a: torch.zeros((NUM_STEPS, NUM_ENVS, ACTION_SPACE_SIZE)).to(device)
             for a in AGENTS
         }
-        b_actions = {a: torch.zeros((NUM_STEPS, NUM_ENVS)).to(device) for a in AGENTS}
-        b_logprobs = {a: torch.zeros((NUM_STEPS, NUM_ENVS)).to(device) for a in AGENTS}
+        b_goal = {
+            a: torch.zeros((NUM_STEPS, NUM_ENVS, GOAL_VECTOR_DIM)).to(device)
+            for a in AGENTS
+        }
+        b_actions = {
+            a: torch.zeros((NUM_STEPS, NUM_ENVS)).to(device) for a in AGENTS
+        }
+        b_logprobs = {
+            a: torch.zeros((NUM_STEPS, NUM_ENVS)).to(device) for a in AGENTS
+        }
         b_probs = {
             a: torch.zeros((NUM_STEPS, NUM_ENVS, ACTION_SPACE_SIZE)).to(device)
             for a in AGENTS
@@ -196,13 +222,19 @@ def train(
             a: torch.zeros((NUM_STEPS, NUM_ENVS, other_act_dim)).to(device)
             for a in AGENTS
         }
-        b_rewards = {a: torch.zeros((NUM_STEPS, NUM_ENVS)).to(device) for a in AGENTS}
-        b_q_taken = {a: torch.zeros((NUM_STEPS, NUM_ENVS)).to(device) for a in AGENTS}
+        b_rewards = {
+            a: torch.zeros((NUM_STEPS, NUM_ENVS)).to(device) for a in AGENTS
+        }
+        b_q_taken = {
+            a: torch.zeros((NUM_STEPS, NUM_ENVS)).to(device) for a in AGENTS
+        }
         b_dones = torch.zeros((NUM_STEPS, NUM_ENVS)).to(device)
         b_states = torch.zeros((NUM_STEPS, NUM_ENVS, state_dim)).to(device)
 
         for step in range(NUM_STEPS):
-            b_states[step] = torch.tensor(next_state, dtype=torch.float32).to(device)
+            b_states[step] = torch.tensor(next_state, dtype=torch.float32).to(
+                device
+            )
             b_dones[step] = next_done
 
             actions_dict = {}
@@ -217,12 +249,16 @@ def train(
                 mask_all = torch.tensor(
                     stacked["action_mask"], dtype=torch.float32, device=device
                 )
+                goals_all = torch.tensor(
+                    stacked["goal_vector"], dtype=torch.float32, device=device
+                )
 
                 # 1. Sample actions from decentralized actors
                 actions, logprobs, _, probs = agent.get_action(
                     obs_all.flatten(0, 1),
                     role_all.flatten(0, 1),
                     mask_all.flatten(0, 1),
+                    goals_all.flatten(0, 1),
                 )
                 actions = actions.view(N_AGENTS, NUM_ENVS)
                 logprobs = logprobs.view(N_AGENTS, NUM_ENVS)
@@ -233,6 +269,7 @@ def train(
                     b_obs[a][step] = obs_all[i]
                     b_role[a][step] = role_all[i]
                     b_mask[a][step] = mask_all[i]
+                    b_goal[a][step] = goals_all[i]
                     b_actions[a][step] = actions[i]
                     b_logprobs[a][step] = logprobs[i]
                     b_probs[a][step] = probs[i]
@@ -240,11 +277,16 @@ def train(
                     step_actions_dict[a] = actions[i]
 
                 # 2. Build other agents' one-hot actions and evaluate Q(s, u)
-                other_onehots = _build_other_actions_onehot(step_actions_dict, device)
+                other_onehots = _build_other_actions_onehot(
+                    step_actions_dict, device
+                )
                 for a in AGENTS:
                     b_other_actions[a][step] = other_onehots[a]
                     q_vals = agent.get_q_values(
-                        b_states[step], other_onehots[a], b_role[a][step]
+                        b_states[step],
+                        other_onehots[a],
+                        b_role[a][step],
+                        b_goal[a][step],
                     )
                     b_q_taken[a][step] = q_vals.gather(
                         1, b_actions[a][step].long().unsqueeze(1)
@@ -265,24 +307,34 @@ def train(
                     if is_win:
                         global_wins += 1
                     completed_wins.append(float(is_win))
-                    completed_episode_returns.append(float(current_env_returns[e]))
+                    completed_episode_returns.append(
+                        float(current_env_returns[e])
+                    )
                     interval_wins.append(float(is_win))
-                    interval_episode_returns.append(float(current_env_returns[e]))
+                    interval_episode_returns.append(
+                        float(current_env_returns[e])
+                    )
                     current_env_returns[e] = 0.0
 
                     interact_succ = float(
                         scout_info.get("scout_interact_success", False)
                     )
                     pois_tagged = float(scout_info.get("scout_pois_tagged", 0))
-                    hack_succ = float(scout_info.get("hacker_hack_success", False))
+                    hack_succ = float(
+                        scout_info.get("hacker_hack_success", False)
+                    )
                     neutralize_succ = float(
                         scout_info.get("muscle_neutralize_success", False)
                     )
                     guards_neutralized = float(
                         scout_info.get("muscle_guards_neutralized", 0)
                     )
-                    loot_succ = float(scout_info.get("extractor_loot_success", False))
-                    agents_extract = float(scout_info.get("agents_at_extract", 0))
+                    loot_succ = float(
+                        scout_info.get("extractor_loot_success", False)
+                    )
+                    agents_extract = float(
+                        scout_info.get("agents_at_extract", 0)
+                    )
                     ep_steps = float(scout_info.get("steps", 0))
                     ep_alarm = float(scout_info.get("alarm", 0.0))
 
@@ -312,9 +364,9 @@ def train(
             ).to(device)
 
             for a in AGENTS:
-                b_rewards[a][step] = torch.tensor(rewards[a], dtype=torch.float32).to(
-                    device
-                )
+                b_rewards[a][step] = torch.tensor(
+                    rewards[a], dtype=torch.float32
+                ).to(device)
 
         # --- COUNTERFACTUAL ADVANTAGE & TD(lambda) CRITIC TARGETS ---
         with torch.no_grad():
@@ -329,21 +381,32 @@ def train(
             next_mask_all = torch.tensor(
                 stacked_next["action_mask"], dtype=torch.float32, device=device
             )
-            next_state_t = torch.tensor(next_state, dtype=torch.float32, device=device)
+            next_goals_all = torch.tensor(
+                stacked_next["goal_vector"], dtype=torch.float32, device=device
+            )
+            next_state_t = torch.tensor(
+                next_state, dtype=torch.float32, device=device
+            )
 
             next_act, _, _, _ = agent.get_action(
                 next_obs_all.flatten(0, 1),
                 next_role_all.flatten(0, 1),
                 next_mask_all.flatten(0, 1),
+                next_goals_all.flatten(0, 1),
             )
             next_act = next_act.view(N_AGENTS, NUM_ENVS)
             next_act_dict = {a: next_act[i] for i, a in enumerate(AGENTS)}
-            next_other_onehots = _build_other_actions_onehot(next_act_dict, device)
+            next_other_onehots = _build_other_actions_onehot(
+                next_act_dict, device
+            )
 
             next_q_taken = {}
             for i, a in enumerate(AGENTS):
                 q_next_vals = agent.get_q_values(
-                    next_state_t, next_other_onehots[a], next_role_all[i]
+                    next_state_t,
+                    next_other_onehots[a],
+                    next_role_all[i],
+                    next_goals_all[i],
                 )
                 next_q_taken[a] = q_next_vals.gather(
                     1, next_act[i].long().unsqueeze(1)
@@ -370,13 +433,17 @@ def train(
                         - b_q_taken[a][t]
                     )
                     lastgaelam = (
-                        delta + GAMMA * GAE_LAMBDA * nextnonterminal * lastgaelam
+                        delta
+                        + GAMMA * GAE_LAMBDA * nextnonterminal * lastgaelam
                     )
                     b_returns[a][t] = lastgaelam + b_q_taken[a][t]
 
                     # Counterfactual baseline: b(s, u^{-a}) = sum_{u'} pi(u'|s) * Q(s, (u', u^{-a}))
                     q_vals_t = agent.get_q_values(
-                        b_states[t], b_other_actions[a][t], b_role[a][t]
+                        b_states[t],
+                        b_other_actions[a][t],
+                        b_role[a][t],
+                        b_goal[a][t],
                     )
                     cf_baseline = (b_probs[a][t] * q_vals_t).sum(dim=-1)
                     # Counterfactual advantage: A^a(s, u) = Q(s, (u^a, u^{-a})) - b(s, u^{-a})
@@ -389,17 +456,24 @@ def train(
                 obs_flat = b_obs[a].reshape(-1, *OBSERVATION_SIZE)
                 role_flat = b_role[a].reshape(-1, N_AGENTS)
                 mask_flat = b_mask[a].reshape(-1, ACTION_SPACE_SIZE)
+                goal_flat = b_goal[a].reshape(-1, GOAL_VECTOR_DIM)
                 action_flat = b_actions[a].reshape(-1)
                 logprob_flat = b_logprobs[a].reshape(-1)
                 other_act_flat = b_other_actions[a].reshape(-1, other_act_dim)
                 adv_flat = b_adv[a].reshape(-1)
                 ret_flat = b_returns[a].reshape(-1)
 
-                adv_flat = (adv_flat - adv_flat.mean()) / (adv_flat.std() + 1e-8)
+                adv_flat = (adv_flat - adv_flat.mean()) / (
+                    adv_flat.std() + 1e-8
+                )
 
                 # Actor Forward
                 _, newlogprob, entropy, newprobs = agent.get_action(
-                    obs_flat, role_flat, mask_flat, action=action_flat
+                    obs_flat,
+                    role_flat,
+                    mask_flat,
+                    goal_flat,
+                    action=action_flat,
                 )
 
                 logratio = newlogprob - logprob_flat
@@ -412,7 +486,7 @@ def train(
 
                 # Critic Forward (Q-value on taken actions)
                 q_vals_all = agent.get_q_values(
-                    b_states_flat, other_act_flat, role_flat
+                    b_states_flat, other_act_flat, role_flat, goal_flat
                 )
                 q_taken_new = q_vals_all.gather(
                     1, action_flat.long().unsqueeze(1)

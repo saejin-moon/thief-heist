@@ -225,7 +225,7 @@ def run_curriculum(
     stages_to_run=None,
     seeds=None,
     total_timesteps_override=None,
-    parallel=True,
+    parallel=False,
 ):
     if stages_to_run is None:
         stages_to_run = list(range(len(CURRICULUM_STAGES)))
@@ -280,12 +280,23 @@ def run_curriculum(
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Multi-Agent RL Curriculum Runner")
+    parser = argparse.ArgumentParser(
+        description="Multi-Agent RL Curriculum Runner"
+    )
     parser.add_argument(
         "--algo",
         type=str,
         default="all",
-        choices=["mappo", "coop", "marc", "hmappo", "ecoop", "coma", "thief", "all"],
+        choices=[
+            "mappo",
+            "coop",
+            "marc",
+            "hmappo",
+            "ecoop",
+            "coma",
+            "thief",
+            "all",
+        ],
         help="Algorithm to train across curriculum, or 'all' to run all benchmarks",
     )
     parser.add_argument(
@@ -321,8 +332,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--parallel",
         action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Run multiple seeds simultaneously in parallel worker processes (default: True)",
+        default=False,
+        help="Run multiple seeds simultaneously in parallel worker processes (default: False)",
     )
     args = parser.parse_args()
 

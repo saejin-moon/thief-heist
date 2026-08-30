@@ -15,8 +15,6 @@ from constants import (
     AGENTS,
     CURRICULUM_STAGES,
     N_AGENTS,
-    THIEF_HER_GOAL_DIM,
-    THIEF_MACRO_HORIZON,
 )
 from vec_env import VectorEnv
 
@@ -55,80 +53,29 @@ def load_thief_model(ckpt_path, state_dim, device):
         active_experts = len(model.experts)
         dormant_experts = set()
 
-    surviving_indices = [k for k in range(active_experts) if k not in dormant_experts]
+    surviving_indices = [
+        k for k in range(active_experts) if k not in dormant_experts
+    ]
     if len(surviving_indices) < active_experts and len(surviving_indices) >= 1:
         model.prune_experts(surviving_indices)
         active_experts = len(surviving_indices)
-
-    current_goals = [None]
-    step_count = [0]
 
     def policy_fn(
         obs_all,
         role_all,
         mask_all,
+        goal_all,
         state_rep,
         prev_experts,
         deterministic=True,
-        infos=None,
     ):
         with torch.no_grad():
-            num_agents_eval, num_envs_eval = obs_all.shape[0], obs_all.shape[1]
-            if (
-                current_goals[0] is None
-                or step_count[0] % THIEF_MACRO_HORIZON == 0
-                or current_goals[0].shape[0] != (num_agents_eval * num_envs_eval)
-            ):
-                goals_list = []
-                for a_idx in range(num_agents_eval):
-                    a_name = AGENTS[a_idx]
-                    role_oh = torch.zeros(num_envs_eval, N_AGENTS, device=device)
-                    role_oh[:, a_idx] = 1.0
-                    g_act, _, _, _ = model.get_manager_action_and_value(
-                        state_rep[:num_envs_eval],
-                        role_oh,
-                        deterministic=deterministic,
-                    )
-                    g_act_np = g_act.cpu().numpy()
-                    u_target_arr = np.zeros(
-                        (num_envs_eval, THIEF_HER_GOAL_DIM), dtype=np.float32
-                    )
-                    for e in range(num_envs_eval):
-                        agent_info = (
-                            infos[e].get(a_name, {})
-                            if (infos is not None and e < len(infos))
-                            else {}
-                        )
-                        agent_pos = np.array(
-                            agent_info.get("pos", (0, 0)), dtype=np.float32
-                        )
-                        tgt_type = int(g_act_np[e])
-
-                        if tgt_type == 0 and "terminal_pos" in agent_info:
-                            tgt = np.array(agent_info["terminal_pos"], dtype=np.float32)
-                        elif tgt_type == 1 and "loot_pos" in agent_info:
-                            tgt = np.array(agent_info["loot_pos"], dtype=np.float32)
-                        elif tgt_type == 2 and "extract_pos" in agent_info:
-                            tgt = np.array(agent_info["extract_pos"], dtype=np.float32)
-                        else:
-                            tgt = agent_pos + np.array([1.0, 0.0], dtype=np.float32)
-
-                        diff = tgt - agent_pos
-                        norm = np.linalg.norm(diff) + 1e-5
-                        u_target_arr[e] = np.clip(diff / norm, -1.0, 1.0)
-
-                    goals_list.append(
-                        torch.tensor(u_target_arr, dtype=torch.float32, device=device)
-                    )
-                current_goals[0] = torch.cat(goals_list, dim=0)
-
-            step_count[0] += 1
-
+            num_envs_eval = obs_all.shape[1]
             actions, _, _, _, chosen_expert = model.get_action_and_value(
                 obs_all.flatten(0, 1),
                 role_all.flatten(0, 1),
                 mask_all.flatten(0, 1),
-                current_goals[0],
+                goal_all.flatten(0, 1),
                 state_rep,
                 active_experts=active_experts,
                 previous_expert=prev_experts,
@@ -171,13 +118,20 @@ def load_ecoop_model(ckpt_path, state_dim, device):
     )
 
     def policy_fn(
-        obs_all, role_all, mask_all, state_rep, prev_experts, deterministic=True
+        obs_all,
+        role_all,
+        mask_all,
+        goal_all,
+        state_rep,
+        prev_experts,
+        deterministic=True,
     ):
         with torch.no_grad():
             actions, _, _, _, chosen_expert = model.get_action_and_value(
                 obs_all.flatten(0, 1),
                 role_all.flatten(0, 1),
                 mask_all.flatten(0, 1),
+                goal_all.flatten(0, 1),
                 state_rep,
                 active_experts=active_experts,
                 previous_expert=prev_experts,
@@ -206,13 +160,18 @@ def load_hmappo_model(ckpt_path, state_dim, device):
     step_count = [0]
 
     def policy_fn(
-        obs_all, role_all, mask_all, state_rep, prev_experts, deterministic=True
+        obs_all,
+        role_all,
+        mask_all,
+        goal_all,
+        state_rep,
+        prev_experts,
+        deterministic=True,
     ):
         nonlocal current_goals
         num_envs = obs_all.shape[1]
         with torch.no_grad():
             if step_count[0] % MACRO_STEP == 0 or current_goals is None:
-                # state_rep is (N_AGENTS * num_envs, state_dim) -> per-env state is state_rep[:num_envs]
                 env_state_rep = state_rep[:num_envs].repeat(N_AGENTS, 1)
                 m_acts, _, _, _ = agent.get_manager_action_and_value(
                     env_state_rep, role_all.flatten(0, 1)
@@ -252,13 +211,20 @@ def load_mappo_model(ckpt_path, state_dim, device):
     model.eval()
 
     def policy_fn(
-        obs_all, role_all, mask_all, state_rep, prev_experts, deterministic=True
+        obs_all,
+        role_all,
+        mask_all,
+        goal_all,
+        state_rep,
+        prev_experts,
+        deterministic=True,
     ):
         with torch.no_grad():
             actions, _, _, _ = model.get_action_and_value(
                 obs_all.flatten(0, 1),
                 role_all.flatten(0, 1),
                 mask_all.flatten(0, 1),
+                goal_all.flatten(0, 1),
                 state_rep,
             )
             return actions, None
@@ -281,13 +247,20 @@ def load_coop_model(ckpt_path, state_dim, device):
     model.eval()
 
     def policy_fn(
-        obs_all, role_all, mask_all, state_rep, prev_experts, deterministic=True
+        obs_all,
+        role_all,
+        mask_all,
+        goal_all,
+        state_rep,
+        prev_experts,
+        deterministic=True,
     ):
         with torch.no_grad():
             actions, _, _, _, _ = model.get_action_and_value(
                 obs_all.flatten(0, 1),
                 role_all.flatten(0, 1),
                 mask_all.flatten(0, 1),
+                goal_all.flatten(0, 1),
                 state_rep,
             )
             return actions, None
@@ -310,13 +283,20 @@ def load_marc_model(ckpt_path, state_dim, device):
     model.eval()
 
     def policy_fn(
-        obs_all, role_all, mask_all, state_rep, prev_experts, deterministic=True
+        obs_all,
+        role_all,
+        mask_all,
+        goal_all,
+        state_rep,
+        prev_experts,
+        deterministic=True,
     ):
         with torch.no_grad():
             actions, _, _, _ = model.get_action_and_value(
                 obs_all.flatten(0, 1),
                 role_all.flatten(0, 1),
                 mask_all.flatten(0, 1),
+                goal_all.flatten(0, 1),
                 state_rep,
             )
             return actions, None
@@ -339,13 +319,20 @@ def load_coma_model(ckpt_path, state_dim, device):
     model.eval()
 
     def policy_fn(
-        obs_all, role_all, mask_all, state_rep, prev_experts, deterministic=True
+        obs_all,
+        role_all,
+        mask_all,
+        goal_all,
+        state_rep,
+        prev_experts,
+        deterministic=True,
     ):
         with torch.no_grad():
             actions, _, _, _ = model.get_action(
                 obs_all.flatten(0, 1),
                 role_all.flatten(0, 1),
                 mask_all.flatten(0, 1),
+                goal_all.flatten(0, 1),
             )
             return actions, None
 
@@ -429,6 +416,9 @@ def evaluate_checkpoint(
             mask_all = torch.tensor(
                 stacked["action_mask"], dtype=torch.float32, device=device
             )
+            goal_all = torch.tensor(
+                stacked["goal_vector"], dtype=torch.float32, device=device
+            )
             state_rep = (
                 torch.tensor(next_state, dtype=torch.float32)
                 .to(device)
@@ -439,10 +429,10 @@ def evaluate_checkpoint(
                 obs_all,
                 role_all,
                 mask_all,
+                goal_all,
                 state_rep,
                 env_prev_experts,
                 deterministic=deterministic,
-                infos=infos,
             )
 
             if chosen_expert is not None:
@@ -635,8 +625,9 @@ def main():
                 ckpt_path = args.ckpt
             else:
                 ckpt_candidates = [
-                    f"results/{algo}/stage_{stage_idx}/model.pt",
+                    f"checkpoints/stage{stage_idx}/{algo}/model.pt",
                     f"results/{algo}/seed_0/stage_{stage_idx}/model.pt",
+                    f"results/{algo}/stage_{stage_idx}/model.pt",
                 ]
                 ckpt_path = next(
                     (c for c in ckpt_candidates if os.path.exists(c)), None

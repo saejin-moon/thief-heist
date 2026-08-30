@@ -21,7 +21,7 @@ def get_gpu_temperature():
         )
         temps = [float(x.strip()) for x in gpu_out.strip().split("\n") if x.strip()]
         return max(temps) if temps else None
-    except subprocess.SubprocessError, OSError, ValueError:
+    except (subprocess.SubprocessError, OSError, ValueError):
         return None
 
 
@@ -33,7 +33,7 @@ def get_cpu_temperature():
         try:
             with open(p) as f:
                 temps.append(float(f.read().strip()) / 1000.0)
-        except OSError, ValueError:
+        except (OSError, ValueError):
             continue
 
     # 2. Check /sys/class/thermal
@@ -41,7 +41,7 @@ def get_cpu_temperature():
         try:
             with open(p) as f:
                 temps.append(float(f.read().strip()) / 1000.0)
-        except OSError, ValueError:
+        except (OSError, ValueError):
             continue
 
     return max(temps) if temps else None

@@ -37,25 +37,16 @@ def _worker(remote, parent_remote, config):
                 term_state = None
                 if done:
                     # pack terminal observation
-                    n_agents = len(AGENTS)
-                    obs_shape = o["scout"]["observation"].shape
-                    mask_shape = o["scout"]["action_mask"].shape
-                    role_shape = o["scout"]["role_id"].shape
-                    obs_arr = np.empty((n_agents, 1) + obs_shape, dtype=np.int32)
-                    mask_arr = np.empty((n_agents, 1) + mask_shape, dtype=np.int8)
-                    role_arr = np.empty((n_agents, 1) + role_shape, dtype=np.int8)
-                    for i, a in enumerate(AGENTS):
-                        obs_arr[i, 0] = o[a]["observation"]
-                        mask_arr[i, 0] = o[a]["action_mask"]
-                        role_arr[i, 0] = o[a]["role_id"]
-                    term_obs = {}
-                    for i, a in enumerate(AGENTS):
-                        term_obs[a] = {
-                            "observation": obs_arr[i],
-                            "action_mask": mask_arr[i],
-                            "role_id": role_arr[i],
+                    term_obs = {
+                        a: {
+                            "observation": o[a]["observation"].copy(),
+                            "action_mask": o[a]["action_mask"].copy(),
+                            "role_id": o[a]["role_id"].copy(),
+                            "goal_vector": o[a]["goal_vector"].copy(),
                         }
-                    term_state = env.state()
+                        for a in AGENTS
+                    }
+                    term_state = env.state().copy()
                     o, _ = env.reset()
                 remote.send((o, r, t, tr, inf, done, term_obs, term_state, env.state()))
             elif cmd == "reset":
@@ -111,17 +102,20 @@ class VectorEnv:
         obs_shape = obs_list[0]["scout"]["observation"].shape
         mask_shape = obs_list[0]["scout"]["action_mask"].shape
         role_shape = obs_list[0]["scout"]["role_id"].shape
+        goal_shape = obs_list[0]["scout"]["goal_vector"].shape
 
         n_agents = len(AGENTS)
         obs_array = np.empty((n_agents, n_envs) + obs_shape, dtype=np.int32)
         mask_array = np.empty((n_agents, n_envs) + mask_shape, dtype=np.int8)
         role_array = np.empty((n_agents, n_envs) + role_shape, dtype=np.int8)
+        goal_array = np.empty((n_agents, n_envs) + goal_shape, dtype=np.float32)
 
         for i, a in enumerate(AGENTS):
             for j, o in enumerate(obs_list):
                 obs_array[i, j] = o[a]["observation"]
                 mask_array[i, j] = o[a]["action_mask"]
                 role_array[i, j] = o[a]["role_id"]
+                goal_array[i, j] = o[a]["goal_vector"]
 
         packed = {}
         for i, a in enumerate(AGENTS):
@@ -129,11 +123,13 @@ class VectorEnv:
                 "observation": obs_array[i],
                 "action_mask": mask_array[i],
                 "role_id": role_array[i],
+                "goal_vector": goal_array[i],
             }
         packed["_stacked"] = {
             "observation": obs_array,
             "action_mask": mask_array,
             "role_id": role_array,
+            "goal_vector": goal_array,
         }
         return packed
 

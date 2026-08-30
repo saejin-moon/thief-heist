@@ -119,6 +119,7 @@ def train(
     load_ckpt_path=None,
     save_ckpt_dir=None,
     log_dir=None,
+    seed=None,
 ):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -132,7 +133,9 @@ def train(
         os.makedirs(log_dir, exist_ok=True)
         file_logger = logging.getLogger(f"file_{algo_name}_{stage_idx}")
         file_logger.setLevel(logging.INFO)
-        file_handler = logging.FileHandler(os.path.join(log_dir, "train.log"), mode="w")
+        file_handler = logging.FileHandler(
+            os.path.join(log_dir, "train.log"), mode="w"
+        )
         file_handler.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
         file_logger.handlers = [file_handler]
         file_logger.propagate = False
@@ -144,7 +147,11 @@ def train(
 
     if env_config is None:
         env_config = dict(CURRICULUM_STAGES[stage_idx])
-    vec_env = VectorEnv(NUM_ENVS, config=env_config)
+    vec_env = VectorEnv(
+        NUM_ENVS,
+        config=env_config,
+        base_seed=seed * 1000 if seed is not None else 0,
+    )
     state_dim = vec_env.state_dim
     map_w, map_h = env_config["map_size"]
     map_diag = np.sqrt(map_w**2 + map_h**2)
@@ -153,7 +160,13 @@ def train(
     optimizer = torch.optim.Adam(agent.parameters(), lr=LR)
 
     if load_ckpt_path and os.path.exists(load_ckpt_path):
-        agent.load_state_dict(torch.load(load_ckpt_path, map_location=device))
+        ckpt = torch.load(load_ckpt_path, map_location=device, weights_only=False)
+        state_dict = (
+            ckpt["model_state"]
+            if (isinstance(ckpt, dict) and "model_state" in ckpt)
+            else ckpt
+        )
+        agent.load_state_dict(state_dict)
         logging.info(  # noqa: LOG015
             f"Loaded checkpoint from {load_ckpt_path}"
         )
@@ -365,11 +378,11 @@ def train(
                     float(map_h),
                 )
 
-                # Get actual agent positions from info
+                # Get actual agent positions from info (poses[:, 0] is row, poses[:, 1] is col)
                 poses = np.array(
                     [infos[e].get(a, {}).get("pos", (0, 0)) for e in range(NUM_ENVS)]
                 )
-                dist = np.sqrt((poses[:, 0] - gx) ** 2 + (poses[:, 1] - gy) ** 2)
+                dist = np.sqrt((poses[:, 0] - gy) ** 2 + (poses[:, 1] - gx) ** 2)
                 step_goal_distances.extend(dist.tolist())
                 intrinsic_reward = -(dist / max(1.0, map_diag))
 
@@ -438,13 +451,24 @@ def train(
 
         # --- MANAGER ADVANTAGE COMPUTATION (GAE) ---
         with torch.no_grad():
+            m_state_next_t = torch.tensor(next_state, dtype=torch.float32).to(device)
+            m_next_vals = {}
+            for a in AGENTS:
+                r_next = torch.tensor(
+                    next_obs[a]["role_id"], dtype=torch.float32, device=device
+                )
+                _, _, _, m_val = agent.get_manager_action_and_value(
+                    m_state_next_t, r_next
+                )
+                m_next_vals[a] = m_val
+
             m_adv = {a: torch.zeros_like(m_rewards_buf[a]) for a in AGENTS}
             for a in AGENTS:
                 lastgaelam = 0
                 for t in reversed(range(m_steps)):
                     if t == m_steps - 1:
                         nextnonterminal = 1.0 - next_done
-                        nextvalues = 0
+                        nextvalues = m_next_vals[a]
                     else:
                         nextnonterminal = 1.0 - m_dones_buf[t + 1]
                         nextvalues = m_values_buf[a][t + 1]

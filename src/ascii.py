@@ -34,6 +34,7 @@ from train_ecoop import EcoopNetwork
 from train_hmappo import HierarchicalNetwork
 from train_mappo import MappoNetwork
 from train_marc import MarcNetwork
+from train_thief import ThiefNetwork
 
 ACTION_NAMES = {
     0: "UP",
@@ -97,6 +98,8 @@ def load_model(algo: str, state_dim: int, checkpoint_path: str, device: str = "c
         agent = MarcNetwork(state_dim).to(device)
     elif algo == "coma":
         agent = ComaNetwork(state_dim).to(device)
+    elif algo == "thief":
+        agent = ThiefNetwork(state_dim, num_initial_experts=2).to(device)
     else:
         raise ValueError(f"Unknown algorithm: {algo}")
 
@@ -108,7 +111,7 @@ def load_model(algo: str, state_dim: int, checkpoint_path: str, device: str = "c
                 if (isinstance(ckpt, dict) and "model_state" in ckpt)
                 else ckpt
             )
-            if algo == "ecoop":
+            if algo in ("ecoop", "thief"):
                 expert_indices = {
                     int(k.split(".")[1]) for k in state_dict if k.startswith("experts.")
                 }
@@ -132,21 +135,21 @@ def load_model(algo: str, state_dim: int, checkpoint_path: str, device: str = "c
     return agent
 
 
-def render_alarm_bar(alarm: float, width: int = 24) -> str:
+def render_alarm_bar(alarm: float, width: int = 24, alarm_max: float = ALARM_MAX) -> str:
     """Return colored ANSI progress bar for alarm."""
-    ratio = min(max(alarm / ALARM_MAX, 0.0), 1.0)
+    ratio = min(max(alarm / max(1.0, alarm_max), 0.0), 1.0)
     filled = round(ratio * width)
     empty = width - filled
 
-    if alarm < 40:
+    if alarm < 0.4 * alarm_max:
         bar_color = BRIGHT_GREEN
-    elif alarm < 75:
+    elif alarm < 0.75 * alarm_max:
         bar_color = BRIGHT_YELLOW
     else:
         bar_color = BRIGHT_RED
 
     bar = f"{bar_color}{'█' * filled}{GRAY}{'░' * empty}{RESET}"
-    return f"[{bar}] {bar_color}{alarm:5.1f} / {ALARM_MAX:.1f}{RESET}"
+    return f"[{bar}] {bar_color}{alarm:5.1f} / {alarm_max:.1f}{RESET}"
 
 
 def render_ascii_frame(
@@ -175,7 +178,7 @@ def render_ascii_frame(
         f"{BOLD}{BRIGHT_BLUE}║ {BRIGHT_WHITE}HEIST DEBUGGER{BRIGHT_BLUE} │ Algo: {BRIGHT_CYAN}{algo.upper():<7}{BRIGHT_BLUE} │ Stage: {BRIGHT_YELLOW}{stage} ({h}x{w}){BRIGHT_BLUE} │ Step: {BRIGHT_WHITE}{step_num:03d}/{env.config.get('max_steps', 100):<3d}{BRIGHT_BLUE} ║{RESET}"
     )
     print(
-        f"{BOLD}{BRIGHT_BLUE}║ {WHITE}Alarm: {render_alarm_bar(env.alarm)}    Seed: {seed!s:<6}   {BRIGHT_BLUE}║{RESET}"
+        f"{BOLD}{BRIGHT_BLUE}║ {WHITE}Alarm: {render_alarm_bar(env.alarm, alarm_max=env.alarm_max)}    Seed: {seed!s:<6}   {BRIGHT_BLUE}║{RESET}"
     )
 
     # Objectives Status
@@ -333,7 +336,10 @@ def run_playback(
                     m = torch.tensor(
                         obs[a]["action_mask"], dtype=torch.float32
                     ).unsqueeze(0)
-                    act, _, _, _ = agent_model.get_action_and_value(o, r, m, state_t)
+                    g = torch.tensor(
+                        obs[a]["goal_vector"], dtype=torch.float32
+                    ).unsqueeze(0)
+                    act, _, _, _ = agent_model.get_action_and_value(o, r, m, g, state_t)
                     actions[a] = int(act.item())
             elif algo == "coop":
                 for a in AGENTS:
@@ -346,7 +352,10 @@ def run_playback(
                     m = torch.tensor(
                         obs[a]["action_mask"], dtype=torch.float32
                     ).unsqueeze(0)
-                    act, _, _, _, _ = agent_model.get_action_and_value(o, r, m, state_t)
+                    g = torch.tensor(
+                        obs[a]["goal_vector"], dtype=torch.float32
+                    ).unsqueeze(0)
+                    act, _, _, _, _ = agent_model.get_action_and_value(o, r, m, g, state_t)
                     actions[a] = int(act.item())
             elif algo == "ecoop":
                 for a in AGENTS:
@@ -359,10 +368,14 @@ def run_playback(
                     m = torch.tensor(
                         obs[a]["action_mask"], dtype=torch.float32
                     ).unsqueeze(0)
+                    g = torch.tensor(
+                        obs[a]["goal_vector"], dtype=torch.float32
+                    ).unsqueeze(0)
                     act, _, _, _, _ = agent_model.get_action_and_value(
                         o,
                         r,
                         m,
+                        g,
                         state_t,
                         active_experts=len(agent_model.experts),
                         deterministic=True,
@@ -405,7 +418,10 @@ def run_playback(
                     m = torch.tensor(
                         obs[a]["action_mask"], dtype=torch.float32
                     ).unsqueeze(0)
-                    act, _, _, _ = agent_model.get_action_and_value(o, r, m, state_t)
+                    g = torch.tensor(
+                        obs[a]["goal_vector"], dtype=torch.float32
+                    ).unsqueeze(0)
+                    act, _, _, _ = agent_model.get_action_and_value(o, r, m, g, state_t)
                     actions[a] = int(act.item())
             elif algo == "coma":
                 for a in AGENTS:
@@ -418,7 +434,35 @@ def run_playback(
                     m = torch.tensor(
                         obs[a]["action_mask"], dtype=torch.float32
                     ).unsqueeze(0)
-                    act, _, _, _ = agent_model.get_action(o, r, m)
+                    g = torch.tensor(
+                        obs[a]["goal_vector"], dtype=torch.float32
+                    ).unsqueeze(0)
+                    act, _, _, _ = agent_model.get_action(o, r, m, g)
+                    actions[a] = int(act.item())
+            elif algo == "thief":
+                for a in AGENTS:
+                    o = torch.tensor(
+                        obs[a]["observation"], dtype=torch.float32
+                    ).unsqueeze(0)
+                    r = torch.tensor(obs[a]["role_id"], dtype=torch.float32).unsqueeze(
+                        0
+                    )
+                    m = torch.tensor(
+                        obs[a]["action_mask"], dtype=torch.float32
+                    ).unsqueeze(0)
+                    g = torch.tensor(
+                        obs[a]["goal_vector"], dtype=torch.float32
+                    ).unsqueeze(0)
+                    act, _, _, _, _ = agent_model.get_action_and_value(
+                        o,
+                        r,
+                        m,
+                        g,
+                        state_t,
+                        active_experts=len(agent_model.experts),
+                        deterministic=True,
+                        num_envs=1,
+                    )
                     actions[a] = int(act.item())
 
         render_ascii_frame(
@@ -475,7 +519,7 @@ def main():
         "--algo",
         type=str,
         default="mappo",
-        choices=["mappo", "coop", "ecoop", "hmappo", "marc"],
+        choices=["mappo", "coop", "ecoop", "hmappo", "marc", "coma", "thief"],
         help="Algorithm network architecture to evaluate",
     )
     parser.add_argument(

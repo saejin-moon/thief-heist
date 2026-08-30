@@ -15,6 +15,7 @@ from constants import (
     ENT_COEF,
     GAE_LAMBDA,
     GAMMA,
+    GOAL_VECTOR_DIM,
     LR,
     N_AGENTS,
     NUM_ENVS,
@@ -30,8 +31,12 @@ from vec_env import VectorEnv
 class MappoNetwork(nn.Module):
     def __init__(self, state_dim):
         super().__init__()
-        # Actor sees: 7x7 Grid (49) + Role One-Hot (4) = 53 dims
-        actor_in_dim = (OBSERVATION_SIZE[0] * OBSERVATION_SIZE[1]) + N_AGENTS
+        # Actor sees: 11x11 Grid (121) + Role One-Hot (4) + Goal Vector (2) = 127 dims
+        actor_in_dim = (
+            (OBSERVATION_SIZE[0] * OBSERVATION_SIZE[1])
+            + N_AGENTS
+            + GOAL_VECTOR_DIM
+        )
         self.actor = nn.Sequential(
             nn.Linear(actor_in_dim, 64),
             nn.Tanh(),
@@ -40,18 +45,21 @@ class MappoNetwork(nn.Module):
             nn.Linear(64, ACTION_SPACE_SIZE),  # Outputs raw logits for 6 actions
         )
 
-        # Critic sees: Global state (everything)
+        # Critic sees: Global state + Role + Goal Vector
+        critic_in_dim = state_dim + N_AGENTS + GOAL_VECTOR_DIM
         self.critic = nn.Sequential(
-            nn.Linear(state_dim, 64),
+            nn.Linear(critic_in_dim, 64),
             nn.Tanh(),
             nn.Linear(64, 64),
             nn.Tanh(),
             nn.Linear(64, 1),  # Outputs a single expected reward (Value)
         )
 
-    def get_action_and_value(self, obs, role, mask, state=None, action=None):
+    def get_action_and_value(
+        self, obs, role, mask, goal, state=None, action=None
+    ):
         # 1. Prepare Actor Input
-        x_actor = torch.cat([obs.flatten(start_dim=1), role], dim=1)
+        x_actor = torch.cat([obs.flatten(start_dim=1), role, goal], dim=1)
         logits = self.actor(x_actor)
 
         # 2. THE MASKING TRICK: Make illegal actions infinitely bad (-1e9)
@@ -63,7 +71,10 @@ class MappoNetwork(nn.Module):
             action = probs.sample()
 
         # 4. Get Critic Value
-        value = self.critic(state).squeeze(-1) if state is not None else None
+        value = None
+        if state is not None:
+            x_critic = torch.cat([state, role, goal], dim=1)
+            value = self.critic(x_critic).squeeze(-1)
 
         return action, probs.log_prob(action), probs.entropy(), value
 
@@ -76,6 +87,7 @@ def train(
     load_ckpt_path=None,
     save_ckpt_dir=None,
     log_dir=None,
+    seed=None,
 ):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -89,7 +101,9 @@ def train(
         os.makedirs(log_dir, exist_ok=True)
         file_logger = logging.getLogger(f"file_{algo_name}_{stage_idx}")
         file_logger.setLevel(logging.INFO)
-        file_handler = logging.FileHandler(os.path.join(log_dir, "train.log"), mode="w")
+        file_handler = logging.FileHandler(
+            os.path.join(log_dir, "train.log"), mode="w"
+        )
         file_handler.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
         file_logger.handlers = [file_handler]
         file_logger.propagate = False
@@ -102,7 +116,11 @@ def train(
     # Stage 0: 11x11, no guards, role spawn
     if env_config is None:
         env_config = dict(CURRICULUM_STAGES[stage_idx])
-    vec_env = VectorEnv(NUM_ENVS, config=env_config)
+    vec_env = VectorEnv(
+        NUM_ENVS,
+        config=env_config,
+        base_seed=seed * 1000 if seed is not None else 0,
+    )
     state_dim = vec_env.state_dim
 
     agent = MappoNetwork(state_dim).to(device)
@@ -154,21 +172,36 @@ def train(
             for a in AGENTS
         }
         b_role = {
-            a: torch.zeros((NUM_STEPS, NUM_ENVS, N_AGENTS)).to(device) for a in AGENTS
+            a: torch.zeros((NUM_STEPS, NUM_ENVS, N_AGENTS)).to(device)
+            for a in AGENTS
         }
         b_mask = {
             a: torch.zeros((NUM_STEPS, NUM_ENVS, ACTION_SPACE_SIZE)).to(device)
             for a in AGENTS
         }
-        b_actions = {a: torch.zeros((NUM_STEPS, NUM_ENVS)).to(device) for a in AGENTS}
-        b_logprobs = {a: torch.zeros((NUM_STEPS, NUM_ENVS)).to(device) for a in AGENTS}
-        b_rewards = {a: torch.zeros((NUM_STEPS, NUM_ENVS)).to(device) for a in AGENTS}
-        b_values = {a: torch.zeros((NUM_STEPS, NUM_ENVS)).to(device) for a in AGENTS}
+        b_goal = {
+            a: torch.zeros((NUM_STEPS, NUM_ENVS, GOAL_VECTOR_DIM)).to(device)
+            for a in AGENTS
+        }
+        b_actions = {
+            a: torch.zeros((NUM_STEPS, NUM_ENVS)).to(device) for a in AGENTS
+        }
+        b_logprobs = {
+            a: torch.zeros((NUM_STEPS, NUM_ENVS)).to(device) for a in AGENTS
+        }
+        b_rewards = {
+            a: torch.zeros((NUM_STEPS, NUM_ENVS)).to(device) for a in AGENTS
+        }
+        b_values = {
+            a: torch.zeros((NUM_STEPS, NUM_ENVS)).to(device) for a in AGENTS
+        }
         b_dones = torch.zeros((NUM_STEPS, NUM_ENVS)).to(device)
         b_states = torch.zeros((NUM_STEPS, NUM_ENVS, state_dim)).to(device)
 
         for step in range(NUM_STEPS):
-            b_states[step] = torch.tensor(next_state, dtype=torch.float32).to(device)
+            b_states[step] = torch.tensor(next_state, dtype=torch.float32).to(
+                device
+            )
             b_dones[step] = next_done
 
             actions_dict = {}
@@ -184,6 +217,9 @@ def train(
                 mask_all = torch.tensor(
                     stacked["action_mask"], dtype=torch.float32, device=device
                 )
+                goals_all = torch.tensor(
+                    stacked["goal_vector"], dtype=torch.float32, device=device
+                )
 
                 # 2. ONE massive forward pass for all 4 agents across 8 envs (Batch Size = 32)
                 state_rep = b_states[step].repeat(
@@ -193,6 +229,7 @@ def train(
                     obs_all.flatten(0, 1),
                     role_all.flatten(0, 1),
                     mask_all.flatten(0, 1),
+                    goals_all.flatten(0, 1),
                     state_rep,
                 )
 
@@ -204,6 +241,7 @@ def train(
                     b_obs[a][step] = obs_all[i]
                     b_role[a][step] = role_all[i]
                     b_mask[a][step] = mask_all[i]
+                    b_goal[a][step] = goals_all[i]
                     b_actions[a][step] = actions[i]
                     b_logprobs[a][step] = logprobs[i]
                     b_values[a][step] = values[i]
@@ -227,24 +265,34 @@ def train(
                     if is_win:
                         global_wins += 1
                     completed_wins.append(float(is_win))
-                    completed_episode_returns.append(float(current_env_returns[e]))
+                    completed_episode_returns.append(
+                        float(current_env_returns[e])
+                    )
                     interval_wins.append(float(is_win))
-                    interval_episode_returns.append(float(current_env_returns[e]))
+                    interval_episode_returns.append(
+                        float(current_env_returns[e])
+                    )
                     current_env_returns[e] = 0.0
 
                     interact_succ = float(
                         scout_info.get("scout_interact_success", False)
                     )
                     pois_tagged = float(scout_info.get("scout_pois_tagged", 0))
-                    hack_succ = float(scout_info.get("hacker_hack_success", False))
+                    hack_succ = float(
+                        scout_info.get("hacker_hack_success", False)
+                    )
                     neutralize_succ = float(
                         scout_info.get("muscle_neutralize_success", False)
                     )
                     guards_neutralized = float(
                         scout_info.get("muscle_guards_neutralized", 0)
                     )
-                    loot_succ = float(scout_info.get("extractor_loot_success", False))
-                    agents_extract = float(scout_info.get("agents_at_extract", 0))
+                    loot_succ = float(
+                        scout_info.get("extractor_loot_success", False)
+                    )
+                    agents_extract = float(
+                        scout_info.get("agents_at_extract", 0)
+                    )
                     ep_steps = float(scout_info.get("steps", 0))
                     ep_alarm = float(scout_info.get("alarm", 0.0))
 
@@ -274,13 +322,15 @@ def train(
             ).to(device)
 
             for a in AGENTS:
-                b_rewards[a][step] = torch.tensor(rewards[a], dtype=torch.float32).to(
-                    device
-                )
+                b_rewards[a][step] = torch.tensor(
+                    rewards[a], dtype=torch.float32
+                ).to(device)
 
         # --- ADVANTAGE COMPUTATION (GAE) ---
         with torch.no_grad():
-            state_next_t = torch.tensor(next_state, dtype=torch.float32, device=device)
+            state_next_t = torch.tensor(
+                next_state, dtype=torch.float32, device=device
+            )
             stacked = next_obs["_stacked"]
             obs_all = torch.tensor(
                 stacked["observation"], dtype=torch.float32, device=device
@@ -291,11 +341,15 @@ def train(
             mask_all = torch.tensor(
                 stacked["action_mask"], dtype=torch.float32, device=device
             )
+            goals_all = torch.tensor(
+                stacked["goal_vector"], dtype=torch.float32, device=device
+            )
             state_rep = state_next_t.repeat(N_AGENTS, 1)
             _, _, _, next_values = agent.get_action_and_value(
                 obs_all.flatten(0, 1),
                 role_all.flatten(0, 1),
                 mask_all.flatten(0, 1),
+                goals_all.flatten(0, 1),
                 state_rep,
             )
             next_values = next_values.view(N_AGENTS, NUM_ENVS)
@@ -319,7 +373,8 @@ def train(
                         - b_values[a][t]
                     )
                     b_advantages[a][t] = lastgaelam = (
-                        delta + GAMMA * GAE_LAMBDA * nextnonterminal * lastgaelam
+                        delta
+                        + GAMMA * GAE_LAMBDA * nextnonterminal * lastgaelam
                     )
         b_returns = {a: b_advantages[a] + b_values[a] for a in AGENTS}
 
@@ -330,17 +385,21 @@ def train(
                 obs_flat = b_obs[a].reshape(-1, *OBSERVATION_SIZE)
                 role_flat = b_role[a].reshape(-1, N_AGENTS)
                 mask_flat = b_mask[a].reshape(-1, ACTION_SPACE_SIZE)
+                goal_flat = b_goal[a].reshape(-1, GOAL_VECTOR_DIM)
                 action_flat = b_actions[a].reshape(-1)
                 logprob_flat = b_logprobs[a].reshape(-1)
                 adv_flat = b_advantages[a].reshape(-1)
                 ret_flat = b_returns[a].reshape(-1)
 
-                adv_flat = (adv_flat - adv_flat.mean()) / (adv_flat.std() + 1e-8)
+                adv_flat = (adv_flat - adv_flat.mean()) / (
+                    adv_flat.std() + 1e-8
+                )
 
                 _, newlogprob, entropy, newvalue = agent.get_action_and_value(
                     obs_flat,
                     role_flat,
                     mask_flat,
+                    goal_flat,
                     b_states_flat,
                     action=action_flat,
                 )
