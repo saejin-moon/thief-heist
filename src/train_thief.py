@@ -882,59 +882,11 @@ def train(
                         g_act, g_lp, _, g_val = agent.get_manager_action_and_value(
                             b_states[step], role_onehot
                         )
+                        current_goals[a] = g_act
                         m_goals[a][macro_idx] = g_act
                         m_logprobs[a][macro_idx] = g_lp
                         m_values[a][macro_idx] = g_val
                         macro_reward_acc[a].zero_()
-
-                        # Compute Entity-Aware or Local Navigable Directional Sub-Goal
-                        g_act_np = g_act.cpu().numpy()
-                        u_target_arr = np.zeros(
-                            (num_envs, THIEF_HER_GOAL_DIM), dtype=np.float32
-                        )
-                        for e in range(num_envs):
-                            agent_info = infos[e].get(a, {}) if step > 0 else {}
-                            agent_pos = np.array(
-                                agent_info.get("pos", (0, 0)), dtype=np.float32
-                            )
-
-                            if a == "hacker":
-                                if (
-                                    not agent_info.get("hacker_hack_success", False)
-                                    and "terminal_pos" in agent_info
-                                ):
-                                    tgt = np.array(
-                                        agent_info["terminal_pos"],
-                                        dtype=np.float32,
-                                    )
-                                else:
-                                    tgt = np.array(
-                                        agent_info.get("extract_pos", agent_pos),
-                                        dtype=np.float32,
-                                    )
-                            elif a == "extractor":
-                                if (
-                                    not agent_info.get("extractor_loot_success", False)
-                                    and "loot_pos" in agent_info
-                                ):
-                                    tgt = np.array(
-                                        agent_info["loot_pos"], dtype=np.float32
-                                    )
-                                else:
-                                    tgt = np.array(
-                                        agent_info.get("extract_pos", agent_pos),
-                                        dtype=np.float32,
-                                    )
-                            else:
-                                tgt = agent_pos + (g_act_np[e] * THIEF_HER_LOCAL_RADIUS)
-
-                            diff = tgt - agent_pos
-                            norm = np.linalg.norm(diff) + 1e-5
-                            u_target_arr[e] = np.clip(diff / norm, -1.0, 1.0)
-
-                        current_goals[a] = torch.tensor(
-                            u_target_arr, dtype=torch.float32, device=device
-                        )
 
             actions_dict = {}
             with torch.no_grad():
@@ -1051,33 +1003,8 @@ def train(
                     agent_info = infos[e].get(a, {})
                     curr_pos = np.array(agent_info.get("pos", (0, 0)), dtype=np.float32)
 
-                    if a == "hacker":
-                        if (
-                            not agent_info.get("hacker_hack_success", False)
-                            and "terminal_pos" in agent_info
-                        ):
-                            tgt = np.array(agent_info["terminal_pos"], dtype=np.float32)
-                        else:
-                            tgt = np.array(
-                                agent_info.get("extract_pos", curr_pos),
-                                dtype=np.float32,
-                            )
-                    elif a == "extractor":
-                        if (
-                            not agent_info.get("extractor_loot_success", False)
-                            and "loot_pos" in agent_info
-                        ):
-                            tgt = np.array(agent_info["loot_pos"], dtype=np.float32)
-                        else:
-                            tgt = np.array(
-                                agent_info.get("extract_pos", curr_pos),
-                                dtype=np.float32,
-                            )
-                    else:
-                        g_act_np = (
-                            m_goals[a][step // THIEF_MACRO_HORIZON, e].cpu().numpy()
-                        )
-                        tgt = prev_poses[a][e] + (g_act_np * THIEF_HER_LOCAL_RADIUS)
+                    g_act_np = m_goals[a][step // THIEF_MACRO_HORIZON, e].cpu().numpy()
+                    tgt = prev_poses[a][e] + (g_act_np * THIEF_HER_LOCAL_RADIUS)
 
                     dist_val = float(np.linalg.norm(curr_pos - tgt))
 
