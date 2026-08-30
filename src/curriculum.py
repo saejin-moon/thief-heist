@@ -128,105 +128,151 @@ def aggregate_multiseed_results(algo_name, stages_to_run, seeds):
     print(f"\nSaved aggregated multi-seed summary to {summary_file}\n")
 
 
-def run_curriculum(
-    algo_name, stages_to_run=None, seeds=None, total_timesteps_override=None
+def run_single_seed(
+    algo_name,
+    seed,
+    stages_to_run,
+    total_timesteps_override=None,
+    is_multi_seed=True,
 ):
-    if stages_to_run is None:
-        stages_to_run = list(range(len(CURRICULUM_STAGES)))
-    if seeds is None:
-        seeds = [0]
-
-    print(
-        f"Starting Curriculum for {algo_name} | Stages: {stages_to_run} | Seeds: {seeds}"
-    )
+    """Executes the curriculum across stages for a single seed."""
+    # Seed global RNGs
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
     # Dynamically import the requested trainer
     module_name = f"train_{algo_name}"
     try:
         trainer = importlib.import_module(module_name)
     except ImportError:
-        print(f"Error: Could not import src/{module_name}.py")
+        print(f"[Seed {seed}] Error: Could not import src/{module_name}.py")
         return
 
-    is_multi_seed = len(seeds) > 1
+    base_dir = (
+        f"results/{algo_name}/seed_{seed}" if is_multi_seed else f"results/{algo_name}"
+    )
+    os.makedirs(base_dir, exist_ok=True)
 
-    for seed in seeds:
-        # Seed global RNGs
-        random.seed(seed)
-        np.random.seed(seed)
-        torch.manual_seed(seed)
-        if torch.cuda.is_available():
-            torch.cuda.manual_seed_all(seed)
+    print(f"\n{'#' * 60}")
+    print(
+        f"### RUNNING ALGO: {algo_name.upper()} | SEED: {seed} | STAGES: {stages_to_run}"
+    )
+    print(f"{'#' * 60}")
 
-        base_dir = (
-            f"results/{algo_name}/seed_{seed}"
-            if is_multi_seed
-            else f"results/{algo_name}"
-        )
-        os.makedirs(base_dir, exist_ok=True)
-
-        print(f"\n{'#' * 60}")
-        print(
-            f"### RUNNING ALGO: {algo_name.upper()} | SEED: {seed} | STAGES: {stages_to_run}"
-        )
-        print(f"{'#' * 60}")
-
-        # Automatically check if a checkpoint from the preceding stage exists
-        first_stage = stages_to_run[0]
-        load_ckpt_path = None
-        if first_stage > 0:
-            prev_ckpt = os.path.join(base_dir, f"stage_{first_stage - 1}", "model.pt")
-            if os.path.exists(prev_ckpt):
-                load_ckpt_path = prev_ckpt
-                print(
-                    f"Found preceding checkpoint for Stage {first_stage} at {load_ckpt_path}"
-                )
-
-        for stage_idx in stages_to_run:
-            if stage_idx < 0 or stage_idx >= len(CURRICULUM_STAGES):
-                print(
-                    f"Warning: Stage {stage_idx} out of bounds (0-{len(CURRICULUM_STAGES) - 1}). Skipping."
-                )
-                continue
-
-            stage_config = CURRICULUM_STAGES[stage_idx]
-            print(f"\n{'=' * 40}")
+    # Automatically check if a checkpoint from the preceding stage exists
+    first_stage = stages_to_run[0]
+    load_ckpt_path = None
+    if first_stage > 0:
+        prev_ckpt = os.path.join(base_dir, f"stage_{first_stage - 1}", "model.pt")
+        if os.path.exists(prev_ckpt):
+            load_ckpt_path = prev_ckpt
             print(
-                f"Executing Stage {stage_idx} (Seed {seed}) | Area: {stage_config['map_size'][0]}x{stage_config['map_size'][1]}"
-            )
-            print(f"{'=' * 40}")
-
-            env_config = stage_config.copy()
-            total_timesteps = (
-                total_timesteps_override
-                if total_timesteps_override is not None
-                else env_config.pop("timesteps")
+                f"[Seed {seed}] Found preceding checkpoint for Stage {first_stage} at {load_ckpt_path}"
             )
 
-            stage_dir = os.path.join(base_dir, f"stage_{stage_idx}")
-            os.makedirs(stage_dir, exist_ok=True)
-            save_ckpt_dir = stage_dir
-            log_dir = stage_dir
+    for stage_idx in stages_to_run:
+        if stage_idx < 0 or stage_idx >= len(CURRICULUM_STAGES):
+            print(
+                f"[Seed {seed}] Warning: Stage {stage_idx} out of bounds (0-{len(CURRICULUM_STAGES) - 1}). Skipping."
+            )
+            continue
 
-            # Build kwargs dynamically based on trainer signature
-            sig = inspect.signature(trainer.train)
-            train_kwargs = {
-                "algo_name": algo_name,
-                "stage_idx": stage_idx,
-                "env_config": env_config,
-                "total_timesteps": total_timesteps,
-                "load_ckpt_path": load_ckpt_path,
-                "save_ckpt_dir": save_ckpt_dir,
-                "log_dir": log_dir,
-            }
-            if "seed" in sig.parameters:
-                train_kwargs["seed"] = seed
+        stage_config = CURRICULUM_STAGES[stage_idx]
+        print(f"\n{'=' * 40}")
+        print(
+            f"[Seed {seed}] Executing Stage {stage_idx} | Area: {stage_config['map_size'][0]}x{stage_config['map_size'][1]}"
+        )
+        print(f"{'=' * 40}")
 
-            # Call the train function
-            trainer.train(**train_kwargs)
+        env_config = stage_config.copy()
+        total_timesteps = (
+            total_timesteps_override
+            if total_timesteps_override is not None
+            else env_config.pop("timesteps")
+        )
 
-            # Update checkpoint for next stage in sequence
-            load_ckpt_path = os.path.join(save_ckpt_dir, "model.pt")
+        stage_dir = os.path.join(base_dir, f"stage_{stage_idx}")
+        os.makedirs(stage_dir, exist_ok=True)
+        save_ckpt_dir = stage_dir
+        log_dir = stage_dir
+
+        # Build kwargs dynamically based on trainer signature
+        sig = inspect.signature(trainer.train)
+        train_kwargs = {
+            "algo_name": algo_name,
+            "stage_idx": stage_idx,
+            "env_config": env_config,
+            "total_timesteps": total_timesteps,
+            "load_ckpt_path": load_ckpt_path,
+            "save_ckpt_dir": save_ckpt_dir,
+            "log_dir": log_dir,
+        }
+        if "seed" in sig.parameters:
+            train_kwargs["seed"] = seed
+
+        # Call the train function
+        trainer.train(**train_kwargs)
+
+        # Update checkpoint for next stage in sequence
+        load_ckpt_path = os.path.join(save_ckpt_dir, "model.pt")
+
+
+def run_curriculum(
+    algo_name,
+    stages_to_run=None,
+    seeds=None,
+    total_timesteps_override=None,
+    parallel=True,
+):
+    if stages_to_run is None:
+        stages_to_run = list(range(len(CURRICULUM_STAGES)))
+    if seeds is None:
+        seeds = [0]
+
+    is_multi_seed = len(seeds) > 1
+    run_in_parallel = parallel and is_multi_seed
+
+    print(
+        f"Starting Curriculum for {algo_name} | Stages: {stages_to_run} | Seeds: {seeds} | Parallel: {run_in_parallel}"
+    )
+
+    if run_in_parallel:
+        import multiprocessing as mp
+
+        ctx = mp.get_context("spawn")
+        processes = []
+        for seed in seeds:
+            p = ctx.Process(
+                target=run_single_seed,
+                args=(
+                    algo_name,
+                    seed,
+                    stages_to_run,
+                    total_timesteps_override,
+                    is_multi_seed,
+                ),
+            )
+            p.start()
+            processes.append(p)
+
+        for p in processes:
+            p.join()
+            if p.exitcode != 0:
+                print(
+                    f"Warning: Seed process exited with non-zero exitcode {p.exitcode}"
+                )
+    else:
+        for seed in seeds:
+            run_single_seed(
+                algo_name,
+                seed,
+                stages_to_run,
+                total_timesteps_override,
+                is_multi_seed,
+            )
 
     # If multi-seed run, generate statistical aggregate report
     if is_multi_seed:
@@ -272,6 +318,12 @@ if __name__ == "__main__":
         default=None,
         help="Override total timesteps per stage (useful for fast testing/smoke tests)",
     )
+    parser.add_argument(
+        "--parallel",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Run multiple seeds simultaneously in parallel worker processes (default: True)",
+    )
     args = parser.parse_args()
 
     selected_stages = (
@@ -286,6 +338,7 @@ if __name__ == "__main__":
                 stages_to_run=selected_stages,
                 seeds=selected_seeds,
                 total_timesteps_override=args.timesteps,
+                parallel=args.parallel,
             )
     else:
         run_curriculum(
@@ -293,4 +346,5 @@ if __name__ == "__main__":
             stages_to_run=selected_stages,
             seeds=selected_seeds,
             total_timesteps_override=args.timesteps,
+            parallel=args.parallel,
         )
