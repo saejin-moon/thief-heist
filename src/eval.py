@@ -15,6 +15,7 @@ from constants import (
     AGENTS,
     CURRICULUM_STAGES,
     N_AGENTS,
+    THIEF_HER_GOAL_DIM,
     THIEF_MACRO_HORIZON,
 )
 from vec_env import VectorEnv
@@ -63,7 +64,13 @@ def load_thief_model(ckpt_path, state_dim, device):
     step_count = [0]
 
     def policy_fn(
-        obs_all, role_all, mask_all, state_rep, prev_experts, deterministic=True
+        obs_all,
+        role_all,
+        mask_all,
+        state_rep,
+        prev_experts,
+        deterministic=True,
+        infos=None,
     ):
         with torch.no_grad():
             num_agents_eval, num_envs_eval = obs_all.shape[0], obs_all.shape[1]
@@ -74,12 +81,45 @@ def load_thief_model(ckpt_path, state_dim, device):
             ):
                 goals_list = []
                 for a_idx in range(num_agents_eval):
+                    a_name = AGENTS[a_idx]
                     role_oh = torch.zeros(num_envs_eval, N_AGENTS, device=device)
                     role_oh[:, a_idx] = 1.0
                     g_act, _, _, _ = model.get_manager_action_and_value(
-                        state_rep[:num_envs_eval], role_oh
+                        state_rep[:num_envs_eval],
+                        role_oh,
+                        deterministic=deterministic,
                     )
-                    goals_list.append(g_act)
+                    g_act_np = g_act.cpu().numpy()
+                    u_target_arr = np.zeros(
+                        (num_envs_eval, THIEF_HER_GOAL_DIM), dtype=np.float32
+                    )
+                    for e in range(num_envs_eval):
+                        agent_info = (
+                            infos[e].get(a_name, {})
+                            if (infos is not None and e < len(infos))
+                            else {}
+                        )
+                        agent_pos = np.array(
+                            agent_info.get("pos", (0, 0)), dtype=np.float32
+                        )
+                        tgt_type = int(g_act_np[e])
+
+                        if tgt_type == 0 and "terminal_pos" in agent_info:
+                            tgt = np.array(agent_info["terminal_pos"], dtype=np.float32)
+                        elif tgt_type == 1 and "loot_pos" in agent_info:
+                            tgt = np.array(agent_info["loot_pos"], dtype=np.float32)
+                        elif tgt_type == 2 and "extract_pos" in agent_info:
+                            tgt = np.array(agent_info["extract_pos"], dtype=np.float32)
+                        else:
+                            tgt = agent_pos + np.array([1.0, 0.0], dtype=np.float32)
+
+                        diff = tgt - agent_pos
+                        norm = np.linalg.norm(diff) + 1e-5
+                        u_target_arr[e] = np.clip(diff / norm, -1.0, 1.0)
+
+                    goals_list.append(
+                        torch.tensor(u_target_arr, dtype=torch.float32, device=device)
+                    )
                 current_goals[0] = torch.cat(goals_list, dim=0)
 
             step_count[0] += 1
@@ -374,6 +414,7 @@ def evaluate_checkpoint(
     env_prev_experts = None
 
     next_obs, next_state = vec_env.reset(seed=base_seed)
+    infos = [{} for _ in range(num_envs)]
     start_time = time.time()
 
     while len(completed_wins) < target_episodes:
@@ -401,6 +442,7 @@ def evaluate_checkpoint(
                 state_rep,
                 env_prev_experts,
                 deterministic=deterministic,
+                infos=infos,
             )
 
             if chosen_expert is not None:

@@ -25,15 +25,13 @@ class ManagerNetwork(nn.Module):
     def __init__(self, state_dim):
         super().__init__()
         in_dim = state_dim + N_AGENTS
-        self.actor_mean = nn.Sequential(
+        self.actor_head = nn.Sequential(
             nn.Linear(in_dim, 64),
             nn.Tanh(),
             nn.Linear(64, 64),
             nn.Tanh(),
-            nn.Linear(64, THIEF_HER_GOAL_DIM),
-            nn.Tanh(),
+            nn.Linear(64, THIEF_MACRO_TARGETS),
         )
-        self.actor_logstd = nn.Parameter(torch.zeros(1, THIEF_HER_GOAL_DIM))
         self.critic = nn.Sequential(
             nn.Linear(state_dim, 64),
             nn.Tanh(),
@@ -42,19 +40,19 @@ class ManagerNetwork(nn.Module):
             nn.Linear(64, 1),
         )
 
-    def get_action_and_value(self, state, role, action=None):
+    def get_action_and_value(self, state, role, action=None, deterministic=False):
         x = torch.cat([state, role], dim=1)
-        action_mean = self.actor_mean(x)
-        action_logstd = self.actor_logstd.expand_as(action_mean)
-        action_std = torch.exp(action_logstd)
-        probs = torch.distributions.Normal(action_mean, action_std)
+        logits = self.actor_head(x)
+        probs = Categorical(logits=logits)
 
         if action is None:
-            action = probs.sample()
-            action = torch.clamp(action, -1.0, 1.0)
+            if deterministic:
+                action = logits.argmax(dim=-1)
+            else:
+                action = probs.sample()
 
         value = self.critic(state).squeeze(-1)
-        return action, probs.log_prob(action).sum(1), probs.entropy().sum(1), value
+        return action, probs.log_prob(action), probs.entropy(), value
 
 
 class MappoActor(nn.Module):
@@ -138,8 +136,12 @@ class ThiefNetwork(nn.Module):
             [MappoNetwork(state_dim) for _ in range(max(1, num_initial_experts))]
         )
 
-    def get_manager_action_and_value(self, state, role, action=None):
-        return self.manager.get_action_and_value(state, role, action)
+    def get_manager_action_and_value(
+        self, state, role, action=None, deterministic=False
+    ):
+        return self.manager.get_action_and_value(
+            state, role, action, deterministic=deterministic
+        )
 
     def add_expert(self):
         """Appends a fresh expert module onto the device of existing parameters and returns its index."""
@@ -828,7 +830,7 @@ def train(
         # Manager Macro Buffers (SMDP)
         m_states = torch.zeros((num_macro_steps, num_envs, state_dim)).to(device)
         m_goals = {
-            a: torch.zeros((num_macro_steps, num_envs, THIEF_HER_GOAL_DIM)).to(device)
+            a: torch.zeros((num_macro_steps, num_envs), dtype=torch.long).to(device)
             for a in AGENTS
         }
         m_logprobs = {
@@ -882,11 +884,43 @@ def train(
                         g_act, g_lp, _, g_val = agent.get_manager_action_and_value(
                             b_states[step], role_onehot
                         )
-                        current_goals[a] = g_act
                         m_goals[a][macro_idx] = g_act
                         m_logprobs[a][macro_idx] = g_lp
                         m_values[a][macro_idx] = g_val
                         macro_reward_acc[a].zero_()
+
+                        # Resolve Manager's Discrete Macro Action into Directional Guidance Vector
+                        g_act_np = g_act.cpu().numpy()
+                        u_target_arr = np.zeros(
+                            (num_envs, THIEF_HER_GOAL_DIM), dtype=np.float32
+                        )
+                        for e in range(num_envs):
+                            agent_info = infos[e].get(a, {}) if step > 0 else {}
+                            agent_pos = np.array(
+                                agent_info.get("pos", (0, 0)), dtype=np.float32
+                            )
+                            tgt_type = int(g_act_np[e])
+
+                            if tgt_type == 0 and "terminal_pos" in agent_info:
+                                tgt = np.array(
+                                    agent_info["terminal_pos"], dtype=np.float32
+                                )
+                            elif tgt_type == 1 and "loot_pos" in agent_info:
+                                tgt = np.array(agent_info["loot_pos"], dtype=np.float32)
+                            elif tgt_type == 2 and "extract_pos" in agent_info:
+                                tgt = np.array(
+                                    agent_info["extract_pos"], dtype=np.float32
+                                )
+                            else:
+                                tgt = agent_pos + np.array([1.0, 0.0], dtype=np.float32)
+
+                            diff = tgt - agent_pos
+                            norm = np.linalg.norm(diff) + 1e-5
+                            u_target_arr[e] = np.clip(diff / norm, -1.0, 1.0)
+
+                        current_goals[a] = torch.tensor(
+                            u_target_arr, dtype=torch.float32, device=device
+                        )
 
             actions_dict = {}
             with torch.no_grad():
@@ -1003,8 +1037,15 @@ def train(
                     agent_info = infos[e].get(a, {})
                     curr_pos = np.array(agent_info.get("pos", (0, 0)), dtype=np.float32)
 
-                    g_act_np = m_goals[a][step // THIEF_MACRO_HORIZON, e].cpu().numpy()
-                    tgt = prev_poses[a][e] + (g_act_np * THIEF_HER_LOCAL_RADIUS)
+                    tgt_type = int(m_goals[a][step // THIEF_MACRO_HORIZON, e].item())
+                    if tgt_type == 0 and "terminal_pos" in agent_info:
+                        tgt = np.array(agent_info["terminal_pos"], dtype=np.float32)
+                    elif tgt_type == 1 and "loot_pos" in agent_info:
+                        tgt = np.array(agent_info["loot_pos"], dtype=np.float32)
+                    elif tgt_type == 2 and "extract_pos" in agent_info:
+                        tgt = np.array(agent_info["extract_pos"], dtype=np.float32)
+                    else:
+                        tgt = prev_poses[a][e] + np.array([1.0, 0.0], dtype=np.float32)
 
                     dist_val = float(np.linalg.norm(curr_pos - tgt))
 
