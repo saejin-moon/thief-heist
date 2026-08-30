@@ -320,7 +320,16 @@ class HeistEnv(ParallelEnv):
             "extractor_loot_success": bool(self.loot_acquired),
             "agents_at_extract": agents_at_extract,
         }
-        infos = {a: episode_metrics for a in self.agents}
+        infos = {
+            a: {
+                **episode_metrics,
+                "pos": self.agent_positions[a],
+                "terminal_pos": self.terminal_pos,
+                "loot_pos": self.loot_pos,
+                "extract_pos": self.extract_pos,
+            }
+            for a in self.agents
+        }
 
         observations = self._get_all_obs()
         if any(terms.values()) or any(truncs.values()):

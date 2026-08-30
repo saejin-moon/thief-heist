@@ -226,7 +226,11 @@ class ThiefNetwork(nn.Module):
                     dim=-1,
                 ).squeeze(1)
 
-                best_candidate_idx = bids.argmax(dim=-1)
+                # Role-Centered Advantage Bidding: Subtract candidate pool mean for this state and role
+                bids_mean = bids.mean(dim=-1, keepdim=True)
+                adv_bids = bids - bids_mean
+
+                best_candidate_idx = adv_bids.argmax(dim=-1)
                 best_idx = torch.tensor(candidate_experts, device=obs.device)[
                     best_candidate_idx
                 ]
@@ -878,11 +882,59 @@ def train(
                         g_act, g_lp, _, g_val = agent.get_manager_action_and_value(
                             b_states[step], role_onehot
                         )
-                        current_goals[a] = g_act
                         m_goals[a][macro_idx] = g_act
                         m_logprobs[a][macro_idx] = g_lp
                         m_values[a][macro_idx] = g_val
                         macro_reward_acc[a].zero_()
+
+                        # Compute Entity-Aware or Local Navigable Directional Sub-Goal
+                        g_act_np = g_act.cpu().numpy()
+                        u_target_arr = np.zeros(
+                            (num_envs, THIEF_HER_GOAL_DIM), dtype=np.float32
+                        )
+                        for e in range(num_envs):
+                            agent_info = infos[e].get(a, {}) if step > 0 else {}
+                            agent_pos = np.array(
+                                agent_info.get("pos", (0, 0)), dtype=np.float32
+                            )
+
+                            if a == "hacker":
+                                if (
+                                    not agent_info.get("hacker_hack_success", False)
+                                    and "terminal_pos" in agent_info
+                                ):
+                                    tgt = np.array(
+                                        agent_info["terminal_pos"],
+                                        dtype=np.float32,
+                                    )
+                                else:
+                                    tgt = np.array(
+                                        agent_info.get("extract_pos", agent_pos),
+                                        dtype=np.float32,
+                                    )
+                            elif a == "extractor":
+                                if (
+                                    not agent_info.get("extractor_loot_success", False)
+                                    and "loot_pos" in agent_info
+                                ):
+                                    tgt = np.array(
+                                        agent_info["loot_pos"], dtype=np.float32
+                                    )
+                                else:
+                                    tgt = np.array(
+                                        agent_info.get("extract_pos", agent_pos),
+                                        dtype=np.float32,
+                                    )
+                            else:
+                                tgt = agent_pos + (g_act_np[e] * THIEF_HER_LOCAL_RADIUS)
+
+                            diff = tgt - agent_pos
+                            norm = np.linalg.norm(diff) + 1e-5
+                            u_target_arr[e] = np.clip(diff / norm, -1.0, 1.0)
+
+                        current_goals[a] = torch.tensor(
+                            u_target_arr, dtype=torch.float32, device=device
+                        )
 
             actions_dict = {}
             with torch.no_grad():
@@ -995,58 +1047,73 @@ def train(
 
             # Compute Goal Distances & Intrinsic Progress Reward
             for a in AGENTS:
-                gx = (current_goals[a][:, 0].cpu().numpy() + 1.0) * 0.5 * map_w
-                gy = (current_goals[a][:, 1].cpu().numpy() + 1.0) * 0.5 * map_h
-                curr_pos = np.array(
-                    [infos[e].get(a, {}).get("pos", (0, 0)) for e in range(num_envs)]
-                )
-                dist = np.sqrt((curr_pos[:, 0] - gx) ** 2 + (curr_pos[:, 1] - gy) ** 2)
+                for e in range(num_envs):
+                    agent_info = infos[e].get(a, {})
+                    curr_pos = np.array(agent_info.get("pos", (0, 0)), dtype=np.float32)
 
-                if step % THIEF_MACRO_HORIZON == 0:
-                    prev_poses[a] = curr_pos
+                    if a == "hacker":
+                        if (
+                            not agent_info.get("hacker_hack_success", False)
+                            and "terminal_pos" in agent_info
+                        ):
+                            tgt = np.array(agent_info["terminal_pos"], dtype=np.float32)
+                        else:
+                            tgt = np.array(
+                                agent_info.get("extract_pos", curr_pos),
+                                dtype=np.float32,
+                            )
+                    elif a == "extractor":
+                        if (
+                            not agent_info.get("extractor_loot_success", False)
+                            and "loot_pos" in agent_info
+                        ):
+                            tgt = np.array(agent_info["loot_pos"], dtype=np.float32)
+                        else:
+                            tgt = np.array(
+                                agent_info.get("extract_pos", curr_pos),
+                                dtype=np.float32,
+                            )
+                    else:
+                        g_act_np = (
+                            m_goals[a][step // THIEF_MACRO_HORIZON, e].cpu().numpy()
+                        )
+                        tgt = prev_poses[a][e] + (g_act_np * THIEF_HER_LOCAL_RADIUS)
 
-                prev_dist = np.sqrt(
-                    (prev_poses[a][:, 0] - gx) ** 2 + (prev_poses[a][:, 1] - gy) ** 2
-                )
-                progress = (prev_dist - dist) / max(1.0, map_diag)
-                prev_poses[a] = curr_pos
+                    dist_val = float(np.linalg.norm(curr_pos - tgt))
 
-                ext_r = torch.tensor(rewards[a], dtype=torch.float32, device=device)
-                int_r = torch.tensor(
-                    progress, dtype=torch.float32, device=device
-                ).clamp(-1.0, 1.0)
+                    if step % THIEF_MACRO_HORIZON == 0:
+                        prev_poses[a][e] = curr_pos
 
-                b_rewards[a][step] = ext_r + (THIEF_HER_REWARD_COEF * int_r)
-                macro_reward_acc[a] += ext_r
+                    prev_dist_val = float(np.linalg.norm(prev_poses[a][e] - tgt))
+                    progress_val = (prev_dist_val - dist_val) / max(1.0, map_diag)
+                    prev_poses[a][e] = curr_pos
 
-                # End of Macro Segment: Record Manager Reward & HER Hindsight Relabeling
-                if (step + 1) % THIEF_MACRO_HORIZON == 0:
-                    macro_idx = step // THIEF_MACRO_HORIZON
-                    m_rewards[a][macro_idx] = macro_reward_acc[a].clone()
+                    ext_r_val = float(rewards[a][e])
+                    int_r_val = float(np.clip(progress_val, -1.0, 1.0))
 
-                    for e in range(num_envs):
+                    b_rewards[a][step, e] = ext_r_val + (
+                        THIEF_HER_REWARD_COEF * int_r_val
+                    )
+                    macro_reward_acc[a][e] += ext_r_val
+
+                    # End of Macro Segment: Record Manager Reward & HER Hindsight Relabeling
+                    if (step + 1) % THIEF_MACRO_HORIZON == 0:
                         her_goals_assigned += 1
-                        her_total_dist += float(dist[e])
+                        her_total_dist += dist_val
 
-                        if dist[e] <= THIEF_HER_REACH_DIST:
+                        if dist_val <= THIEF_HER_REACH_DIST:
                             her_goals_reached += 1
                         else:
-                            # Hindsight Relabeling: Goal achieved was the actual reached position
-                            hgx = float(
-                                np.clip(
-                                    (curr_pos[e, 0] / (0.5 * map_w)) - 1.0, -1.0, 1.0
-                                )
-                            )
-                            hgy = float(
-                                np.clip(
-                                    (curr_pos[e, 1] / (0.5 * map_h)) - 1.0, -1.0, 1.0
-                                )
-                            )
+                            seg_start = step - THIEF_MACRO_HORIZON + 1
+                            start_pos = prev_poses[a][e]
+                            disp = curr_pos - start_pos
+                            disp_norm = np.linalg.norm(disp) + 1e-5
                             hg = torch.tensor(
-                                [hgx, hgy], dtype=torch.float32, device=device
+                                np.clip(disp / disp_norm, -1.0, 1.0),
+                                dtype=torch.float32,
+                                device=device,
                             )
 
-                            seg_start = step - THIEF_MACRO_HORIZON + 1
                             for tau in range(seg_start, step + 1):
                                 her_relabeled_obs.append(b_obs[a][tau, e])
                                 her_relabeled_role.append(b_role[a][tau, e])
@@ -1054,6 +1121,10 @@ def train(
                                 her_relabeled_actions.append(b_actions[a][tau, e])
                                 her_relabeled_goal.append(hg)
                                 her_relabeled_expert.append(b_experts[a][tau, e])
+
+                if (step + 1) % THIEF_MACRO_HORIZON == 0:
+                    macro_idx = step // THIEF_MACRO_HORIZON
+                    m_rewards[a][macro_idx] = macro_reward_acc[a].clone()
 
         last_her_reach_rate = (
             (her_goals_reached / max(1, her_goals_assigned)) * 100

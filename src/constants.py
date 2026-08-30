@@ -227,6 +227,7 @@ THIEF_MACRO_HORIZON = (
     5  # Sub-goal duration (K steps per macro action, 125 / 5 = 25 macro steps)
 )
 THIEF_HER_GOAL_DIM = 2  # (gx, gy) 2D continuous waypoint coordinates
+THIEF_HER_LOCAL_RADIUS = 5.0  # Max local reachable displacement radius in tiles
 THIEF_HER_REWARD_COEF = 0.05  # Intrinsic distance reduction reward weight
 THIEF_HER_AUX_COEF = 0.10  # Weight of auxiliary HER hindsight navigation policy loss
 THIEF_HER_REACH_DIST = 1.5  # Distance threshold in tiles to consider sub-goal reached
