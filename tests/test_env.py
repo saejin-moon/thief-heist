@@ -182,9 +182,7 @@ class TestHeistEnv(unittest.TestCase):
 
         # 4. H-MAPPO
         hmappo = HierarchicalNetwork(state_dim)
-        m_act, _m_logp, _, _m_val = hmappo.get_manager_action_and_value(
-            state, role
-        )
+        m_act, _m_logp, _, _m_val = hmappo.get_manager_action_and_value(state, role)
         w_act, _w_logp, _, _w_val = hmappo.get_worker_action_and_value(
             obs, role, mask, m_act, state
         )
@@ -193,9 +191,7 @@ class TestHeistEnv(unittest.TestCase):
 
         # 5. MARC
         marc = MarcNetwork(state_dim)
-        act, _logp, _ent, _val = marc.get_action_and_value(
-            obs, role, mask, goal, state
-        )
+        act, _logp, _ent, _val = marc.get_action_and_value(obs, role, mask, goal, state)
         self.assertEqual(act.shape, (1,))
 
         # 6. COMA

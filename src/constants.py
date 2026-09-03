@@ -74,6 +74,7 @@ ALARM_HACK_TURN = 1.0
 ALARM_BYPASS = 3.0
 ALARM_NEUTRALIZE = 5.0
 ALARM_GUARD_SPOT = 10.0
+ALARM_GUARD_CONTINUOUS = 1.5
 ALARM_EXTRACTION_TIMEOUT = 15.0
 CAMERA_RANGE = 12
 CATCH_DISTANCE = 1
@@ -117,7 +118,7 @@ GAMMA_CAUSAL = 0.95
 AFFORDANCE_COEF = 0.5
 
 # --- CURRICULUM STAGES ---
-# Padded step horizons for realistic partial-observability maze traversal
+# Right-sized timesteps matching true empirical convergence horizons (3.2x faster training)
 CURRICULUM_STAGES = [
     {
         "map_size": (11, 11),
@@ -127,7 +128,7 @@ CURRICULUM_STAGES = [
         "max_steps": 300,
         "alarm_max": 100.0,
         "spawn_mode": "role",
-        "timesteps": 1250 * 300,
+        "timesteps": 200_000,
     },
     {
         "map_size": (17, 17),
@@ -137,7 +138,7 @@ CURRICULUM_STAGES = [
         "max_steps": 400,
         "alarm_max": 100.0,
         "spawn_mode": "role",
-        "timesteps": 1250 * 400,
+        "timesteps": 200_000,
     },
     {
         "map_size": (25, 25),
@@ -147,7 +148,7 @@ CURRICULUM_STAGES = [
         "max_steps": 900,
         "alarm_max": 125.0,
         "spawn_mode": "role",
-        "timesteps": 1250 * 900,
+        "timesteps": 500_000,
     },
     {
         "map_size": (35, 35),
@@ -157,7 +158,7 @@ CURRICULUM_STAGES = [
         "max_steps": 2000,
         "alarm_max": 150.0,
         "spawn_mode": "role",
-        "timesteps": 1250 * 2000,
+        "timesteps": 900_000,
     },
     {
         "map_size": (50, 50),
@@ -167,7 +168,7 @@ CURRICULUM_STAGES = [
         "max_steps": 5000,
         "alarm_max": 175.0,
         "spawn_mode": "role",
-        "timesteps": 1250 * 5000,
+        "timesteps": 1_600_000,
     },
 ]
 
@@ -180,9 +181,10 @@ WIN_REWARD_THRESHOLD = 5.0
 MAX_GPU_TEMP = 85.0
 MAX_CPU_TEMP = 85.0
 
-# E-COOP Specific
+# E-COOP Specific (Aligned with THIEF for fair head-to-head benchmarking)
+ECOOP_NUM_ENVS = 16
 ECOOP_EVOLUTION_INTERVAL = 125
-ECOOP_GRACE_UPDATES = 15
+ECOOP_GRACE_UPDATES = 20
 ECOOP_RAMP_UPDATES = 15
 ECOOP_CULL_WINDOW_UPDATES = (
     20  # Consecutive 0% usage updates before an expert goes extinct
@@ -190,36 +192,42 @@ ECOOP_CULL_WINDOW_UPDATES = (
 ECOOP_MUTATION_NOISE = 0.03  # Calibrated micro-exploration along flat Fisher manifolds
 ECOOP_CROSSOVER_DAMPING = 1e-4
 ECOOP_MUTANT_ENVS = (
-    1  # Number of dedicated exploration envs during burn-in grace period
+    4  # 4 dedicated exploration envs during burn-in grace period (25% of 16 envs)
 )
 ECOOP_HYSTERESIS_EPSILON = (
-    0.10  # Decisive threshold to enforce temporal policy coherence
+    0.05  # Calibrated threshold to enforce temporal policy coherence
 )
+ECOOP_PROGRESS_COEF = 0.05  # Potential-based sub-goal progress shaping coefficient
 
 # MAHIRO / H-MAPPO Specific
 MAHIRO_INTRINSIC_REWARD_COEF = 0.015
 
 # --- THIEF ALGORITHM CONSTANTS ---
 THIEF_NUM_ENVS = 16
-THIEF_INITIAL_EXPERTS = 2
-THIEF_MAX_EXPERTS = 16
-THIEF_MAX_SANDBOX_EXPERTS = (
-    4  # Max 4 concurrent mutants in sandbox (4 * 2 = 8 envs, exactly 50% of 16 envs)
-)
-THIEF_ENVS_PER_MUTANT = 2
-THIEF_DEFICIT_THRESHOLD = 0.5
-THIEF_DEFICIT_RATIO_TRIGGER = 0.20
-THIEF_WARMUP_UPDATES = 25
-THIEF_POST_GRACE_COOLDOWN_UPDATES = (
-    30  # Must wait 30 updates post-grace before another deficit spawn
-)
+THIEF_INITIAL_EXPERTS = 1
+THIEF_MAX_EXPERTS = 8
+THIEF_MAX_SANDBOX_EXPERTS = 1  # 1 dedicated specialist in sandbox
+THIEF_ENVS_PER_MUTANT = 8  # 8 dedicated environments for the child specialist (50% of cluster)
+THIEF_WARMUP_UPDATES = 20
+THIEF_POST_GRACE_COOLDOWN_UPDATES = 30
 THIEF_ISOLATION_UPDATES = 20
-THIEF_TARGETED_LR = 0.05
-THIEF_MUTATION_NOISE = 0.03
-THIEF_CROSSOVER_DAMPING = 1e-4
-THIEF_HYSTERESIS_EPSILON = (
-    0.05  # Calibrated for responsive switching without corridor thrashing
-)
+THIEF_TARGETED_LR = 0.08
+THIEF_GRADIENT_CONFLICT_THRESHOLD = -0.20  # Trigger when cos(g+, g-) < -0.20
+THIEF_DEFICIT_MIN_SAMPLES = 32  # Minimum failure transition count
+THIEF_HYSTERESIS_EPSILON = 0.05
 THIEF_TARGET_VECTOR_DIM = 2  # 2D continuous unit orientation vector (ux, uy)
 THIEF_HER_GOAL_DIM = 2  # Alias for backward compatibility
 GOAL_VECTOR_DIM = 2  # 2D continuous unit orientation vector (ux, uy) for all MARL algos
+THIEF_PROGRESS_COEF = (
+    0.05  # Dense potential-based sub-goal progress shaping coefficient
+)
+THIEF_DORMANCY_WINDOW = (
+    20  # Consecutive zero-usage updates before specialist enters dormancy
+)
+THIEF_CULL_WINDOW_UPDATES = 20
+THIEF_MACRO_HORIZON = (
+    5  # Sub-goal duration (K steps per macro action, 125 / 5 = 25 macro steps)
+)
+THIEF_HER_REWARD_COEF = 0.05  # Intrinsic distance reduction reward weight
+THIEF_HER_AUX_COEF = 0.10  # Weight of auxiliary HER hindsight navigation policy loss
+THIEF_HER_REACH_DIST = 1.5  # Distance threshold in tiles to consider sub-goal reached

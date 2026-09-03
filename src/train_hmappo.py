@@ -27,7 +27,7 @@ from constants import (
     VF_COEF,
 )
 from thermal_guard import check_thermal_guard
-from vec_env import VectorEnv
+from vec_env import make_vec_env
 
 # Manager makes a decision every 5 steps
 total_timesteps = 300_000
@@ -120,6 +120,7 @@ def train(
     save_ckpt_dir=None,
     log_dir=None,
     seed=None,
+    use_rust=False,
 ):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -133,24 +134,24 @@ def train(
         os.makedirs(log_dir, exist_ok=True)
         file_logger = logging.getLogger(f"file_{algo_name}_{stage_idx}")
         file_logger.setLevel(logging.INFO)
-        file_handler = logging.FileHandler(
-            os.path.join(log_dir, "train.log"), mode="w"
-        )
+        file_handler = logging.FileHandler(os.path.join(log_dir, "train.log"), mode="w")
         file_handler.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
         file_logger.handlers = [file_handler]
         file_logger.propagate = False
 
-    msg = f"Training {algo_name} Stage {stage_idx} on {device}..."
+    engine_tag = "Native Rust Rayon" if use_rust else "Python Multiprocessing"
+    msg = f"Training {algo_name} Stage {stage_idx} on {device} ({engine_tag})..."
     console_logger.info(msg)
     if file_logger:
         file_logger.info(msg)
 
     if env_config is None:
         env_config = dict(CURRICULUM_STAGES[stage_idx])
-    vec_env = VectorEnv(
+    vec_env = make_vec_env(
         NUM_ENVS,
         config=env_config,
         base_seed=seed * 1000 if seed is not None else 0,
+        use_rust=use_rust,
     )
     state_dim = vec_env.state_dim
     map_w, map_h = env_config["map_size"]

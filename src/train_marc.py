@@ -28,7 +28,7 @@ from constants import (
     VF_COEF,
 )
 from thermal_guard import check_thermal_guard
-from vec_env import VectorEnv
+from vec_env import make_vec_env
 
 # Controls how severely the alarm penalizes macro credit
 
@@ -43,9 +43,7 @@ class MarcNetwork(nn.Module):
     def __init__(self, state_dim):
         super().__init__()
         actor_in_dim = (
-            (OBSERVATION_SIZE[0] * OBSERVATION_SIZE[1])
-            + N_AGENTS
-            + GOAL_VECTOR_DIM
+            (OBSERVATION_SIZE[0] * OBSERVATION_SIZE[1]) + N_AGENTS + GOAL_VECTOR_DIM
         )
         self.actor = nn.Sequential(
             nn.Linear(actor_in_dim, 64),
@@ -63,9 +61,7 @@ class MarcNetwork(nn.Module):
             nn.Linear(64, 1),
         )
 
-    def get_action_and_value(
-        self, obs, role, mask, goal, state=None, action=None
-    ):
+    def get_action_and_value(self, obs, role, mask, goal, state=None, action=None):
         x_actor = torch.cat([obs.flatten(start_dim=1), role, goal], dim=1)
         logits = self.actor(x_actor)
         masked_logits = logits + ((1.0 - mask) * -1e9)
@@ -88,6 +84,7 @@ def train(
     save_ckpt_dir=None,
     log_dir=None,
     seed=None,
+    use_rust=False,
 ):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -101,24 +98,24 @@ def train(
         os.makedirs(log_dir, exist_ok=True)
         file_logger = logging.getLogger(f"file_{algo_name}_{stage_idx}")
         file_logger.setLevel(logging.INFO)
-        file_handler = logging.FileHandler(
-            os.path.join(log_dir, "train.log"), mode="w"
-        )
+        file_handler = logging.FileHandler(os.path.join(log_dir, "train.log"), mode="w")
         file_handler.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
         file_logger.handlers = [file_handler]
         file_logger.propagate = False
 
-    msg = f"Training {algo_name} Stage {stage_idx} on {device}..."
+    engine_tag = "Native Rust Rayon" if use_rust else "Python Multiprocessing"
+    msg = f"Training {algo_name} Stage {stage_idx} on {device} ({engine_tag})..."
     console_logger.info(msg)
     if file_logger:
         file_logger.info(msg)
 
     if env_config is None:
         env_config = dict(CURRICULUM_STAGES[stage_idx])
-    vec_env = VectorEnv(
+    vec_env = make_vec_env(
         NUM_ENVS,
         config=env_config,
         base_seed=seed * 1000 if seed is not None else 0,
+        use_rust=use_rust,
     )
     state_dim = vec_env.state_dim
 
@@ -169,8 +166,7 @@ def train(
             for a in AGENTS
         }
         b_role = {
-            a: torch.zeros((NUM_STEPS, NUM_ENVS, N_AGENTS)).to(device)
-            for a in AGENTS
+            a: torch.zeros((NUM_STEPS, NUM_ENVS, N_AGENTS)).to(device) for a in AGENTS
         }
         b_mask = {
             a: torch.zeros((NUM_STEPS, NUM_ENVS, ACTION_SPACE_SIZE)).to(device)
@@ -180,18 +176,10 @@ def train(
             a: torch.zeros((NUM_STEPS, NUM_ENVS, GOAL_VECTOR_DIM)).to(device)
             for a in AGENTS
         }
-        b_actions = {
-            a: torch.zeros((NUM_STEPS, NUM_ENVS)).to(device) for a in AGENTS
-        }
-        b_logprobs = {
-            a: torch.zeros((NUM_STEPS, NUM_ENVS)).to(device) for a in AGENTS
-        }
-        b_rewards = {
-            a: torch.zeros((NUM_STEPS, NUM_ENVS)).to(device) for a in AGENTS
-        }
-        b_values = {
-            a: torch.zeros((NUM_STEPS, NUM_ENVS)).to(device) for a in AGENTS
-        }
+        b_actions = {a: torch.zeros((NUM_STEPS, NUM_ENVS)).to(device) for a in AGENTS}
+        b_logprobs = {a: torch.zeros((NUM_STEPS, NUM_ENVS)).to(device) for a in AGENTS}
+        b_rewards = {a: torch.zeros((NUM_STEPS, NUM_ENVS)).to(device) for a in AGENTS}
+        b_values = {a: torch.zeros((NUM_STEPS, NUM_ENVS)).to(device) for a in AGENTS}
         b_dones = torch.zeros((NUM_STEPS, NUM_ENVS)).to(device)
         b_states = torch.zeros((NUM_STEPS, NUM_ENVS, state_dim)).to(device)
 
@@ -204,9 +192,7 @@ def train(
 
         # --- ROLLOUT PHASE ---
         for step in range(NUM_STEPS):
-            b_states[step] = torch.tensor(next_state, dtype=torch.float32).to(
-                device
-            )
+            b_states[step] = torch.tensor(next_state, dtype=torch.float32).to(device)
             b_dones[step] = next_done
 
             actions_dict = {}
@@ -249,9 +235,7 @@ def train(
                     actions_dict[a] = actions[i].cpu().numpy()
 
             # Step the environment!
-            next_obs_new, rewards, terms, truncs, infos = vec_env.step(
-                actions_dict
-            )
+            next_obs_new, rewards, terms, truncs, infos = vec_env.step(actions_dict)
 
             # Accumulate per-agent average return per env
             step_agent_reward = sum(rewards[a] for a in AGENTS) / N_AGENTS
@@ -270,34 +254,24 @@ def train(
                     if is_win:
                         global_wins += 1
                     completed_wins.append(float(is_win))
-                    completed_episode_returns.append(
-                        float(current_env_returns[e])
-                    )
+                    completed_episode_returns.append(float(current_env_returns[e]))
                     interval_wins.append(float(is_win))
-                    interval_episode_returns.append(
-                        float(current_env_returns[e])
-                    )
+                    interval_episode_returns.append(float(current_env_returns[e]))
                     current_env_returns[e] = 0.0
 
                     interact_succ = float(
                         scout_info.get("scout_interact_success", False)
                     )
                     pois_tagged = float(scout_info.get("scout_pois_tagged", 0))
-                    hack_succ = float(
-                        scout_info.get("hacker_hack_success", False)
-                    )
+                    hack_succ = float(scout_info.get("hacker_hack_success", False))
                     neutralize_succ = float(
                         scout_info.get("muscle_neutralize_success", False)
                     )
                     guards_neutralized = float(
                         scout_info.get("muscle_guards_neutralized", 0)
                     )
-                    loot_succ = float(
-                        scout_info.get("extractor_loot_success", False)
-                    )
-                    agents_extract = float(
-                        scout_info.get("agents_at_extract", 0)
-                    )
+                    loot_succ = float(scout_info.get("extractor_loot_success", False))
+                    agents_extract = float(scout_info.get("agents_at_extract", 0))
                     ep_steps = float(scout_info.get("steps", 0))
                     ep_alarm = float(scout_info.get("alarm", 0.0))
 
@@ -323,9 +297,7 @@ def train(
 
             # The team unlocked an affordance if an agent interacted and the mask volume increased.
             mask_new = next_obs_new["_stacked"]["action_mask"]
-            mask_vol_new = mask_new.sum(
-                axis=(0, 2)
-            )  # sum over agents and action dims
+            mask_vol_new = mask_new.sum(axis=(0, 2))  # sum over agents and action dims
             mask_vol_old = stacked["action_mask"].sum(axis=(0, 2))
             unlocked = mask_vol_new > mask_vol_old
 
@@ -347,17 +319,15 @@ def train(
             ).to(device)
 
             for a in AGENTS:
-                b_rewards[a][step] = torch.tensor(
-                    rewards[a], dtype=torch.float32
-                ).to(device)
+                b_rewards[a][step] = torch.tensor(rewards[a], dtype=torch.float32).to(
+                    device
+                )
 
             next_obs = next_obs_new
 
         # --- MARC CAUSAL REWARD & ADVANTAGE RESTRUCTURING ---
         alarm_weights = torch.exp(-ALPHA_ALARM * (b_alarms / 100.0))
-        win_tensor = torch.tensor(
-            b_wins, dtype=torch.float32, device=device
-        )
+        win_tensor = torch.tensor(b_wins, dtype=torch.float32, device=device)
         macro_weights = (1.0 + 2.0 * win_tensor) * alarm_weights
 
         b_shaped_rewards = {}
@@ -366,9 +336,7 @@ def train(
             b_shaped_rewards[a] = macro_weights * r_imm
 
         with torch.no_grad():
-            state_next_t = torch.tensor(
-                next_state, dtype=torch.float32, device=device
-            )
+            state_next_t = torch.tensor(next_state, dtype=torch.float32, device=device)
             stacked_next = next_obs["_stacked"]
             next_obs_all = torch.tensor(
                 stacked_next["observation"], dtype=torch.float32, device=device
@@ -432,9 +400,7 @@ def train(
                 adv_flat = b_adv[a].reshape(-1)
                 ret_flat = b_returns[a].reshape(-1)
 
-                adv_norm = (adv_flat - adv_flat.mean()) / (
-                    adv_flat.std() + 1e-8
-                )
+                adv_norm = (adv_flat - adv_flat.mean()) / (adv_flat.std() + 1e-8)
 
                 _, newlogprob, entropy, newvalue = agent.get_action_and_value(
                     obs_flat,

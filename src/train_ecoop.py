@@ -25,20 +25,21 @@ from constants import (
     ECOOP_HYSTERESIS_EPSILON,
     ECOOP_MUTANT_ENVS,
     ECOOP_MUTATION_NOISE,
+    ECOOP_NUM_ENVS,
+    ECOOP_PROGRESS_COEF,
     ENT_COEF,
     GAE_LAMBDA,
     GAMMA,
     GOAL_VECTOR_DIM,
     LR,
     N_AGENTS,
-    NUM_ENVS,
     NUM_STEPS,
     OBSERVATION_SIZE,
     UPDATE_EPOCHS,
     VF_COEF,
 )
 from thermal_guard import check_thermal_guard
-from vec_env import VectorEnv
+from vec_env import make_vec_env
 
 
 class MappoNetwork(nn.Module):
@@ -53,9 +54,7 @@ class MappoNetwork(nn.Module):
     def __init__(self, state_dim):
         super().__init__()
         actor_in_dim = (
-            (OBSERVATION_SIZE[0] * OBSERVATION_SIZE[1])
-            + N_AGENTS
-            + GOAL_VECTOR_DIM
+            (OBSERVATION_SIZE[0] * OBSERVATION_SIZE[1]) + N_AGENTS + GOAL_VECTOR_DIM
         )
         critic_in_dim = state_dim + N_AGENTS + GOAL_VECTOR_DIM
 
@@ -77,9 +76,7 @@ class MappoNetwork(nn.Module):
             nn.Linear(64, 1),
         )
 
-    def get_action_and_value(
-        self, obs, role, mask, goal, state=None, action=None
-    ):
+    def get_action_and_value(self, obs, role, mask, goal, state=None, action=None):
         """
         Forward pass for a batch of transitions assigned to this expert.
         Applies invalid action masking (-1e9) prior to categorical sampling.
@@ -113,10 +110,7 @@ class EcoopNetwork(nn.Module):
         super().__init__()
         self.state_dim = state_dim
         self.experts = nn.ModuleList(
-            [
-                MappoNetwork(state_dim)
-                for _ in range(max(1, num_initial_experts))
-            ]
+            [MappoNetwork(state_dim) for _ in range(max(1, num_initial_experts))]
         )
 
     def add_expert(self):
@@ -132,9 +126,7 @@ class EcoopNetwork(nn.Module):
 
     def prune_experts(self, survivor_indices):
         """Retains only the surviving expert modules in contiguous order."""
-        self.experts = nn.ModuleList(
-            [self.experts[i] for i in survivor_indices]
-        )
+        self.experts = nn.ModuleList([self.experts[i] for i in survivor_indices])
 
     def get_action_and_value(
         self,
@@ -216,8 +208,8 @@ class EcoopNetwork(nn.Module):
 
             # Environment Sharding Grace Routing
             if grace_expert is not None and grace_expert < active_experts:
-                threshold_env = max(0, NUM_ENVS - ECOOP_MUTANT_ENVS)
-                env_ids = torch.arange(batch_size, device=obs.device) % NUM_ENVS
+                threshold_env = max(0, ECOOP_NUM_ENVS - ECOOP_MUTANT_ENVS)
+                env_ids = torch.arange(batch_size, device=obs.device) % ECOOP_NUM_ENVS
                 is_grace_env = env_ids >= threshold_env
                 chosen_expert = torch.where(
                     is_grace_env,
@@ -315,6 +307,7 @@ def train(
     save_ckpt_dir=None,
     log_dir=None,
     seed=None,
+    use_rust=False,
 ):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -328,24 +321,25 @@ def train(
         os.makedirs(log_dir, exist_ok=True)
         file_logger = logging.getLogger(f"file_{algo_name}_{stage_idx}")
         file_logger.setLevel(logging.INFO)
-        file_handler = logging.FileHandler(
-            os.path.join(log_dir, "train.log"), mode="w"
-        )
+        file_handler = logging.FileHandler(os.path.join(log_dir, "train.log"), mode="w")
         file_handler.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
         file_logger.handlers = [file_handler]
         file_logger.propagate = False
 
-    msg = f"Training {algo_name} Stage {stage_idx} on {device}..."
+    engine_tag = "Native Rust Rayon" if use_rust else "Python Multiprocessing"
+    msg = f"Training {algo_name} Stage {stage_idx} on {device} ({engine_tag})..."
     console_logger.info(msg)
     if file_logger:
         file_logger.info(msg)
 
     if env_config is None:
         env_config = dict(CURRICULUM_STAGES[stage_idx])
-    vec_env = VectorEnv(
-        NUM_ENVS,
+    num_envs = ECOOP_NUM_ENVS
+    vec_env = make_vec_env(
+        num_envs,
         config=env_config,
         base_seed=seed * 1000 if seed is not None else 0,
+        use_rust=use_rust,
     )
     state_dim = vec_env.state_dim
 
@@ -362,18 +356,14 @@ def train(
 
     if load_ckpt_path and os.path.exists(load_ckpt_path):
         try:
-            ckpt = torch.load(
-                load_ckpt_path, map_location=device, weights_only=False
-            )
+            ckpt = torch.load(load_ckpt_path, map_location=device, weights_only=False)
             state_dict = (
                 ckpt["model_state"]
                 if (isinstance(ckpt, dict) and "model_state" in ckpt)
                 else ckpt
             )
             expert_indices = {
-                int(k.split(".")[1])
-                for k in state_dict
-                if k.startswith("experts.")
+                int(k.split(".")[1]) for k in state_dict if k.startswith("experts.")
             }
             needed_experts = max(expert_indices) + 1 if expert_indices else 1
             while len(agent.experts) < needed_experts:
@@ -399,17 +389,15 @@ def train(
             if file_logger:
                 file_logger.info(msg)
         except Exception as e:  # noqa: BLE001
-            print(
-                f"Warning: Could not load full checkpoint ({e}). Initializing fresh."
-            )
+            print(f"Warning: Could not load full checkpoint ({e}). Initializing fresh.")
 
     next_obs, next_state = vec_env.reset()
-    next_done = torch.zeros(NUM_ENVS).to(device)
+    next_done = torch.zeros(num_envs).to(device)
 
-    num_updates = total_timesteps // (NUM_ENVS * NUM_STEPS)
+    num_updates = total_timesteps // (num_envs * NUM_STEPS)
     global_episodes = 0
     global_wins = 0
-    current_env_returns = np.zeros(NUM_ENVS)
+    current_env_returns = np.zeros(num_envs)
     completed_episode_returns = []
     completed_wins = []
     completed_episode_steps = []
@@ -425,6 +413,10 @@ def train(
     last_expert_usage = {}
     last_switch_rate = 0.0
 
+    prev_poses = {
+        a: [np.zeros(2, dtype=np.float32) for _ in range(num_envs)] for a in AGENTS
+    }
+
     for update in range(1, num_updates + 1):
         check_thermal_guard()
         if grace_updates_remaining > 0:
@@ -433,37 +425,28 @@ def train(
                 current_grace_expert = None
 
         b_obs = {
-            a: torch.zeros((NUM_STEPS, NUM_ENVS, *OBSERVATION_SIZE)).to(device)
+            a: torch.zeros((NUM_STEPS, num_envs, *OBSERVATION_SIZE)).to(device)
             for a in AGENTS
         }
         b_role = {
-            a: torch.zeros((NUM_STEPS, NUM_ENVS, N_AGENTS)).to(device)
-            for a in AGENTS
+            a: torch.zeros((NUM_STEPS, num_envs, N_AGENTS)).to(device) for a in AGENTS
         }
         b_mask = {
-            a: torch.zeros((NUM_STEPS, NUM_ENVS, ACTION_SPACE_SIZE)).to(device)
+            a: torch.zeros((NUM_STEPS, num_envs, ACTION_SPACE_SIZE)).to(device)
             for a in AGENTS
         }
         b_goal = {
-            a: torch.zeros((NUM_STEPS, NUM_ENVS, GOAL_VECTOR_DIM)).to(device)
+            a: torch.zeros((NUM_STEPS, num_envs, GOAL_VECTOR_DIM)).to(device)
             for a in AGENTS
         }
-        b_actions = {
-            a: torch.zeros((NUM_STEPS, NUM_ENVS)).to(device) for a in AGENTS
-        }
-        b_logprobs = {
-            a: torch.zeros((NUM_STEPS, NUM_ENVS)).to(device) for a in AGENTS
-        }
-        b_rewards = {
-            a: torch.zeros((NUM_STEPS, NUM_ENVS)).to(device) for a in AGENTS
-        }
-        b_values = {
-            a: torch.zeros((NUM_STEPS, NUM_ENVS)).to(device) for a in AGENTS
-        }
-        b_dones = torch.zeros((NUM_STEPS, NUM_ENVS)).to(device)
-        b_states = torch.zeros((NUM_STEPS, NUM_ENVS, state_dim)).to(device)
+        b_actions = {a: torch.zeros((NUM_STEPS, num_envs)).to(device) for a in AGENTS}
+        b_logprobs = {a: torch.zeros((NUM_STEPS, num_envs)).to(device) for a in AGENTS}
+        b_rewards = {a: torch.zeros((NUM_STEPS, num_envs)).to(device) for a in AGENTS}
+        b_values = {a: torch.zeros((NUM_STEPS, num_envs)).to(device) for a in AGENTS}
+        b_dones = torch.zeros((NUM_STEPS, num_envs)).to(device)
+        b_states = torch.zeros((NUM_STEPS, num_envs, state_dim)).to(device)
         b_experts = {
-            a: torch.zeros((NUM_STEPS, NUM_ENVS), dtype=torch.long).to(device)
+            a: torch.zeros((NUM_STEPS, num_envs), dtype=torch.long).to(device)
             for a in AGENTS
         }
 
@@ -472,9 +455,7 @@ def train(
 
         # --- ROLLOUT PHASE ---
         for step in range(NUM_STEPS):
-            b_states[step] = torch.tensor(next_state, dtype=torch.float32).to(
-                device
-            )
+            b_states[step] = torch.tensor(next_state, dtype=torch.float32).to(device)
             b_dones[step] = next_done
 
             actions_dict = {}
@@ -509,10 +490,10 @@ def train(
 
                 env_previous_expert = chosen_expert
 
-                actions = actions.view(N_AGENTS, NUM_ENVS)
-                logprobs = logprobs.view(N_AGENTS, NUM_ENVS)
-                values = values.view(N_AGENTS, NUM_ENVS)
-                experts_unflattened = chosen_expert.view(N_AGENTS, NUM_ENVS)
+                actions = actions.view(N_AGENTS, num_envs)
+                logprobs = logprobs.view(N_AGENTS, num_envs)
+                values = values.view(N_AGENTS, num_envs)
+                experts_unflattened = chosen_expert.view(N_AGENTS, num_envs)
 
                 for i, a in enumerate(AGENTS):
                     b_experts[a][step] = experts_unflattened[i]
@@ -527,11 +508,29 @@ def train(
 
             next_obs, rewards, terms, truncs, infos = vec_env.step(actions_dict)
 
+            # Sub-Goal Potential-Based Progress Reward Shaping
+            for i, a in enumerate(AGENTS):
+                for e in range(num_envs):
+                    agent_info = infos[e].get(a, {})
+                    curr_pos = np.array(agent_info.get("pos", (0, 0)), dtype=np.float32)
+                    goal_vec_np = goals_all[i, e].cpu().numpy()
+
+                    if step == 0:
+                        prev_poses[a][e] = curr_pos
+
+                    delta_step = curr_pos - prev_poses[a][e]
+                    progress_val = float(np.dot(delta_step, goal_vec_np))
+                    prev_poses[a][e] = curr_pos
+
+                    int_r = float(np.clip(progress_val, -1.0, 1.0))
+                    ext_r = float(rewards[a][e])
+                    b_rewards[a][step, e] = ext_r + (ECOOP_PROGRESS_COEF * int_r)
+
             # Accumulate per-agent average return per env
             step_agent_reward = sum(rewards[a] for a in AGENTS) / N_AGENTS
             current_env_returns += step_agent_reward
 
-            for e in range(NUM_ENVS):
+            for e in range(num_envs):
                 is_done = terms["scout"][e] or truncs["scout"][e]
                 if is_done:
                     global_episodes += 1
@@ -540,30 +539,22 @@ def train(
                     if is_win:
                         global_wins += 1
                     completed_wins.append(float(is_win))
-                    completed_episode_returns.append(
-                        float(current_env_returns[e])
-                    )
+                    completed_episode_returns.append(float(current_env_returns[e]))
                     current_env_returns[e] = 0.0
 
                     interact_succ = float(
                         scout_info.get("scout_interact_success", False)
                     )
                     pois_tagged = float(scout_info.get("scout_pois_tagged", 0))
-                    hack_succ = float(
-                        scout_info.get("hacker_hack_success", False)
-                    )
+                    hack_succ = float(scout_info.get("hacker_hack_success", False))
                     neutralize_succ = float(
                         scout_info.get("muscle_neutralize_success", False)
                     )
                     guards_neutralized = float(
                         scout_info.get("muscle_guards_neutralized", 0)
                     )
-                    loot_succ = float(
-                        scout_info.get("extractor_loot_success", False)
-                    )
-                    agents_extract = float(
-                        scout_info.get("agents_at_extract", 0)
-                    )
+                    loot_succ = float(scout_info.get("extractor_loot_success", False))
+                    agents_extract = float(scout_info.get("agents_at_extract", 0))
                     ep_steps = float(scout_info.get("steps", 0))
                     ep_alarm = float(scout_info.get("alarm", 0.0))
 
@@ -579,17 +570,12 @@ def train(
 
                     if env_previous_expert is not None:
                         for ag_i in range(N_AGENTS):
-                            env_previous_expert[ag_i * NUM_ENVS + e] = -1
+                            env_previous_expert[ag_i * num_envs + e] = -1
 
             next_state = vec_env.state
             next_done = torch.tensor(
                 terms["scout"] | truncs["scout"], dtype=torch.float32
             ).to(device)
-
-            for a in AGENTS:
-                b_rewards[a][step] = torch.tensor(
-                    rewards[a], dtype=torch.float32
-                ).to(device)
 
         # Track usage and switch rate
         experts_stacked = torch.stack([b_experts[a] for a in AGENTS])
@@ -597,9 +583,7 @@ def train(
         total_decisions = max(1, all_experts_tensor.numel())
         last_expert_usage = {
             str(k): round(
-                float((all_experts_tensor == k).sum().item())
-                / total_decisions
-                * 100.0,
+                float((all_experts_tensor == k).sum().item()) / total_decisions * 100.0,
                 1,
             )
             for k in range(active_experts)
@@ -628,9 +612,7 @@ def train(
             next_goals_all = torch.tensor(
                 stacked_next["goal_vector"], dtype=torch.float32, device=device
             )
-            next_state_t = torch.tensor(
-                next_state, dtype=torch.float32, device=device
-            )
+            next_state_t = torch.tensor(next_state, dtype=torch.float32, device=device)
 
             _, _, _, next_val, _ = agent.get_action_and_value(
                 next_obs_all.flatten(0, 1),
@@ -642,7 +624,7 @@ def train(
                 previous_expert=env_previous_expert,
                 grace_expert=current_grace_expert,
             )
-            next_val = next_val.view(N_AGENTS, NUM_ENVS)
+            next_val = next_val.view(N_AGENTS, num_envs)
 
             b_adv = {a: torch.zeros_like(b_rewards[a]) for a in AGENTS}
             for i, a in enumerate(AGENTS):
@@ -661,8 +643,7 @@ def train(
                         - b_values[a][t]
                     )
                     b_adv[a][t] = lastgaelam = (
-                        delta
-                        + GAMMA * GAE_LAMBDA * nextnonterminal * lastgaelam
+                        delta + GAMMA * GAE_LAMBDA * nextnonterminal * lastgaelam
                     )
 
         b_returns = {a: b_adv[a] + b_values[a] for a in AGENTS}
@@ -762,12 +743,7 @@ def train(
                         x_critic_eval = torch.cat(
                             [sample_states, sample_roles, sample_goals], dim=1
                         )
-                        mean_v = (
-                            agent.experts[k]
-                            .critic(x_critic_eval)
-                            .mean()
-                            .item()
-                        )
+                        mean_v = agent.experts[k].critic(x_critic_eval).mean().item()
                 expert_mean_vals[k] = mean_v
                 if mean_v > best_val:
                     best_val = mean_v
@@ -778,8 +754,7 @@ def train(
                 k
                 for k in range(active_experts)
                 if k != best_expert
-                and expert_consecutive_zero_usage[k]
-                >= ECOOP_CULL_WINDOW_UPDATES
+                and expert_consecutive_zero_usage[k] >= ECOOP_CULL_WINDOW_UPDATES
                 and k != current_grace_expert
             ]
 
@@ -801,16 +776,12 @@ def train(
                 agent.prune_experts(survivors)
                 optimizer.param_groups.clear()
                 for exp in agent.experts:
-                    optimizer.add_param_group(
-                        {"params": exp.parameters(), "lr": LR}
-                    )
+                    optimizer.add_param_group({"params": exp.parameters(), "lr": LR})
                 env_previous_expert = None
 
                 if current_grace_expert is not None:
                     if current_grace_expert in survivors:
-                        current_grace_expert = survivors.index(
-                            current_grace_expert
-                        )
+                        current_grace_expert = survivors.index(current_grace_expert)
                     else:
                         current_grace_expert = None
                         grace_updates_remaining = 0
@@ -821,9 +792,7 @@ def train(
                 new_zero_usage = collections.defaultdict(int)
 
                 for new_idx, old_idx in enumerate(survivors):
-                    new_zero_usage[new_idx] = expert_consecutive_zero_usage[
-                        old_idx
-                    ]
+                    new_zero_usage[new_idx] = expert_consecutive_zero_usage[old_idx]
 
                 expert_consecutive_zero_usage = new_zero_usage
                 best_expert = survivors.index(best_expert)
@@ -1081,8 +1050,44 @@ def train(
         if file_logger:
             file_logger.info(msg)
 
-    vec_env.close()
-
 
 if __name__ == "__main__":
-    train()
+    import argparse
+
+    parser = argparse.ArgumentParser(description="E-COOP Training")
+    parser.add_argument("--stage", type=int, default=0, help="Stage index")
+    parser.add_argument(
+        "--timesteps", type=int, default=120_000, help="Total timesteps"
+    )
+    parser.add_argument("--seed", type=int, default=0, help="Random seed")
+    parser.add_argument(
+        "--save-dir",
+        "--save-ckpt-dir",
+        dest="save_dir",
+        type=str,
+        default=None,
+        help="Directory to save checkpoint and logs",
+    )
+    parser.add_argument(
+        "--load-ckpt", type=str, default=None, help="Path to checkpoint to load"
+    )
+    parser.add_argument(
+        "--rust",
+        "--use-rust",
+        dest="rust",
+        action="store_true",
+        default=False,
+        help="Use high-throughput native Rust environment",
+    )
+    args = parser.parse_args()
+
+    train(
+        algo_name="ecoop",
+        stage_idx=args.stage,
+        total_timesteps=args.timesteps,
+        load_ckpt_path=args.load_ckpt,
+        save_ckpt_dir=args.save_dir,
+        log_dir=args.save_dir,
+        seed=args.seed,
+        use_rust=args.rust,
+    )

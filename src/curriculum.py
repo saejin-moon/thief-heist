@@ -49,16 +49,21 @@ def parse_seeds(seeds_arg):
     return [0]
 
 
-def aggregate_multiseed_results(algo_name, stages_to_run, seeds):
+def aggregate_multiseed_results(algo_name, stages_to_run, seeds, run_id=None):
     """Aggregates per-seed results.json files into a unified multi-seed statistical report."""
     summary = {}
+    title_suffix = f" (Run: {run_id})" if run_id else ""
     print(f"\n{'=' * 75}")
-    print(f"MULTI-SEED STATISTICAL SUMMARY: {algo_name.upper()} (Seeds: {seeds})")
+    print(
+        f"MULTI-SEED STATISTICAL SUMMARY: {algo_name.upper()} (Seeds: {seeds}){title_suffix}"
+    )
     print(f"{'=' * 75}")
     print(
         f"{'Stage':<8} | {'Win Rate (Mean±Std)':<22} | {'Return (Mean±Std)':<20} | {'Steps':<12} | {'Alarm':<10}"
     )
     print("-" * 75)
+
+    base_prefix = f"results/{run_id}" if run_id else "results"
 
     for stage_idx in stages_to_run:
         seed_win_rates = []
@@ -72,8 +77,10 @@ def aggregate_multiseed_results(algo_name, stages_to_run, seeds):
 
         for s in seeds:
             # Check seed-specific path first, then legacy flat path
-            seed_path = f"results/{algo_name}/seed_{s}/stage_{stage_idx}/results.json"
-            flat_path = f"results/{algo_name}/stage_{stage_idx}/results.json"
+            seed_path = (
+                f"{base_prefix}/{algo_name}/seed_{s}/stage_{stage_idx}/results.json"
+            )
+            flat_path = f"{base_prefix}/{algo_name}/stage_{stage_idx}/results.json"
             target_path = seed_path if os.path.exists(seed_path) else flat_path
 
             if os.path.exists(target_path):
@@ -121,8 +128,8 @@ def aggregate_multiseed_results(algo_name, stages_to_run, seeds):
             "seeds_evaluated": seeds,
         }
 
-    summary_file = f"results/{algo_name}/multiseed_summary.json"
-    os.makedirs(f"results/{algo_name}", exist_ok=True)
+    summary_file = f"{base_prefix}/{algo_name}/multiseed_summary.json"
+    os.makedirs(f"{base_prefix}/{algo_name}", exist_ok=True)
     with open(summary_file, "w") as f:
         json.dump(summary, f, indent=4)
     print(f"\nSaved aggregated multi-seed summary to {summary_file}\n")
@@ -134,6 +141,10 @@ def run_single_seed(
     stages_to_run,
     total_timesteps_override=None,
     is_multi_seed=True,
+    run_id=None,
+    prev_run_id=None,
+    use_rust=False,
+    no_load_ckpt=False,
 ):
     """Executes the curriculum across stages for a single seed."""
     # Seed global RNGs
@@ -151,27 +162,47 @@ def run_single_seed(
         print(f"[Seed {seed}] Error: Could not import src/{module_name}.py")
         return
 
+    base_prefix = f"results/{run_id}" if run_id else "results"
     base_dir = (
-        f"results/{algo_name}/seed_{seed}" if is_multi_seed else f"results/{algo_name}"
+        f"{base_prefix}/{algo_name}/seed_{seed}"
+        if is_multi_seed
+        else f"{base_prefix}/{algo_name}"
     )
     os.makedirs(base_dir, exist_ok=True)
 
+    engine_tag = " [NATIVE RUST]" if use_rust else ""
     print(f"\n{'#' * 60}")
     print(
-        f"### RUNNING ALGO: {algo_name.upper()} | SEED: {seed} | STAGES: {stages_to_run}"
+        f"### RUNNING ALGO: {algo_name.upper()}{engine_tag} | SEED: {seed} | STAGES: {stages_to_run}"
     )
     print(f"{'#' * 60}")
 
     # Automatically check if a checkpoint from the preceding stage exists
     first_stage = stages_to_run[0]
     load_ckpt_path = None
-    if first_stage > 0:
-        prev_ckpt = os.path.join(base_dir, f"stage_{first_stage - 1}", "model.pt")
-        if os.path.exists(prev_ckpt):
-            load_ckpt_path = prev_ckpt
-            print(
-                f"[Seed {seed}] Found preceding checkpoint for Stage {first_stage} at {load_ckpt_path}"
+    if first_stage > 0 and not no_load_ckpt:
+        candidate_paths = []
+        if prev_run_id:
+            candidate_paths.extend(
+                [
+                    f"results/{prev_run_id}/{algo_name}/seed_{seed}/stage_{first_stage - 1}/model.pt",
+                    f"results/{prev_run_id}/{algo_name}/stage_{first_stage - 1}/model.pt",
+                ]
             )
+        candidate_paths.extend(
+            [
+                os.path.join(base_dir, f"stage_{first_stage - 1}", "model.pt"),
+                f"results/{algo_name}/seed_{seed}/stage_{first_stage - 1}/model.pt",
+                f"results/{algo_name}/stage_{first_stage - 1}/model.pt",
+            ]
+        )
+        for p in candidate_paths:
+            if os.path.exists(p):
+                load_ckpt_path = p
+                print(
+                    f"[Seed {seed}] Found preceding checkpoint for Stage {first_stage} at {load_ckpt_path}"
+                )
+                break
 
     for stage_idx in stages_to_run:
         if stage_idx < 0 or stage_idx >= len(CURRICULUM_STAGES):
@@ -212,6 +243,8 @@ def run_single_seed(
         }
         if "seed" in sig.parameters:
             train_kwargs["seed"] = seed
+        if "use_rust" in sig.parameters:
+            train_kwargs["use_rust"] = use_rust
 
         # Call the train function
         trainer.train(**train_kwargs)
@@ -226,6 +259,10 @@ def run_curriculum(
     seeds=None,
     total_timesteps_override=None,
     parallel=False,
+    run_id=None,
+    prev_run_id=None,
+    use_rust=False,
+    no_load_ckpt=False,
 ):
     if stages_to_run is None:
         stages_to_run = list(range(len(CURRICULUM_STAGES)))
@@ -235,8 +272,9 @@ def run_curriculum(
     is_multi_seed = len(seeds) > 1
     run_in_parallel = parallel and is_multi_seed
 
+    engine_tag = " [NATIVE RUST]" if use_rust else ""
     print(
-        f"Starting Curriculum for {algo_name} | Stages: {stages_to_run} | Seeds: {seeds} | Parallel: {run_in_parallel}"
+        f"Starting Curriculum for {algo_name}{engine_tag} | Stages: {stages_to_run} | Seeds: {seeds} | Parallel: {run_in_parallel}"
     )
 
     if run_in_parallel:
@@ -253,6 +291,10 @@ def run_curriculum(
                     stages_to_run,
                     total_timesteps_override,
                     is_multi_seed,
+                    run_id,
+                    prev_run_id,
+                    use_rust,
+                    no_load_ckpt,
                 ),
             )
             p.start()
@@ -272,17 +314,19 @@ def run_curriculum(
                 stages_to_run,
                 total_timesteps_override,
                 is_multi_seed,
+                run_id,
+                prev_run_id,
+                use_rust,
+                no_load_ckpt,
             )
 
     # If multi-seed run, generate statistical aggregate report
     if is_multi_seed:
-        aggregate_multiseed_results(algo_name, stages_to_run, seeds)
+        aggregate_multiseed_results(algo_name, stages_to_run, seeds, run_id=run_id)
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Multi-Agent RL Curriculum Runner"
-    )
+    parser = argparse.ArgumentParser(description="Multi-Agent RL Curriculum Runner")
     parser.add_argument(
         "--algo",
         type=str,
@@ -330,10 +374,39 @@ if __name__ == "__main__":
         help="Override total timesteps per stage (useful for fast testing/smoke tests)",
     )
     parser.add_argument(
+        "--run-id",
+        type=str,
+        default=None,
+        help="Optional experiment run subdirectory name under results/ (e.g. 'benchmark_v2')",
+    )
+    parser.add_argument(
+        "--prev-run-id",
+        type=str,
+        default=None,
+        help="Optional preceding run ID under results/ from which to load checkpoints for the initial stage (e.g. 'step-reduce')",
+    )
+    parser.add_argument(
+        "--no-load-ckpt",
+        "--scratch",
+        "--fresh",
+        dest="no_load_ckpt",
+        action="store_true",
+        default=False,
+        help="Do not load preceding stage checkpoints; train stage(s) completely from scratch (useful for dry runs and stage testing)",
+    )
+    parser.add_argument(
         "--parallel",
         action=argparse.BooleanOptionalAction,
         default=False,
         help="Run multiple seeds simultaneously in parallel worker processes (default: False)",
+    )
+    parser.add_argument(
+        "--rust",
+        "--use-rust",
+        dest="rust",
+        action="store_true",
+        default=False,
+        help="Use high-throughput native Rust environment",
     )
     args = parser.parse_args()
 
@@ -350,6 +423,10 @@ if __name__ == "__main__":
                 seeds=selected_seeds,
                 total_timesteps_override=args.timesteps,
                 parallel=args.parallel,
+                run_id=args.run_id,
+                prev_run_id=args.prev_run_id,
+                use_rust=args.rust,
+                no_load_ckpt=args.no_load_ckpt,
             )
     else:
         run_curriculum(
@@ -358,4 +435,8 @@ if __name__ == "__main__":
             seeds=selected_seeds,
             total_timesteps_override=args.timesteps,
             parallel=args.parallel,
+            run_id=args.run_id,
+            prev_run_id=args.prev_run_id,
+            use_rust=args.rust,
+            no_load_ckpt=args.no_load_ckpt,
         )

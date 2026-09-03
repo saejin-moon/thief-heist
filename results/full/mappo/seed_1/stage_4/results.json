@@ -1,0 +1,19 @@
+{
+    "algo": "mappo",
+    "stage": 4,
+    "win_rate": 0.11,
+    "lifetime_win_rate": 0.10810810810810811,
+    "mean_reward": -1.7759160514760879,
+    "avg_episode_steps": 2448.56,
+    "max_stage_steps": 5000,
+    "avg_alarm": 118.4655987906456,
+    "stage_alarm_max": 175.0,
+    "scout_interact_rate": 0.94,
+    "scout_avg_pois_tagged": 3.54,
+    "hacker_hack_rate": 0.54,
+    "muscle_neutralize_rate": 0.94,
+    "muscle_avg_guards_neutralized": 2.94,
+    "total_stage_guards": 4,
+    "extractor_loot_rate": 0.29,
+    "avg_agents_at_extract": 1.42
+}

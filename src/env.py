@@ -109,6 +109,7 @@ class HeistEnv(ParallelEnv):
         self.room_rects = []
         self.tagged_pois = set()
         self.explored_map = np.zeros((self.map_h, self.map_w), dtype=bool)
+        self._guard_contact = []
 
     def reset(self, seed=None, _options=None):
         if seed is not None:
@@ -180,6 +181,7 @@ class HeistEnv(ParallelEnv):
         self.guard_states = ["patrol"] * len(self.guard_positions)
         self._guard_search_target = [None] * len(self.guard_positions)
         self._guard_search_turns = [0] * len(self.guard_positions)
+        self._guard_contact = [False] * len(self.guard_positions)
 
         self._refresh_scout_fov()
         for a in self.agents:
@@ -275,8 +277,7 @@ class HeistEnv(ParallelEnv):
 
         # 2. Guard Movement & Spotting
         self._move_guards()
-        if self._check_caught():
-            self._add_alarm(ALARM_GUARD_SPOT, rewards)
+        self._handle_guard_spotting(rewards)
 
         # 3. Camera Exposure
         if not self.terminal_disabled and self.camera_positions:
@@ -531,6 +532,25 @@ class HeistEnv(ParallelEnv):
             else:
                 self.guard_positions[gi] = valid[int(self.rng.integers(len(valid)))]
 
+    def _handle_guard_spotting(self, rewards):
+        for gi, gpos in enumerate(self.guard_positions):
+            if self.neutralized[gi] > 0:
+                self._guard_contact[gi] = False
+                continue
+
+            in_contact = any(
+                manhattan(gpos, apos) <= CATCH_DISTANCE
+                for apos in self.agent_positions.values()
+            )
+            if in_contact:
+                if not self._guard_contact[gi]:
+                    self._add_alarm(ALARM_GUARD_SPOT, rewards)
+                    self._guard_contact[gi] = True
+                else:
+                    self._add_alarm(ALARM_GUARD_CONTINUOUS, rewards)
+            else:
+                self._guard_contact[gi] = False
+
     def _check_caught(self):
         for gi, gpos in enumerate(self.guard_positions):
             if self.neutralized[gi] > 0:
@@ -648,8 +668,10 @@ class HeistEnv(ParallelEnv):
                         pad + int(np.clip(dc, -pad, pad)),
                     ] = WAYPOINT
 
-            # 3. 2D Mission Orientation Unit Vector
+            # 3. 2D Tactical Role Mission Orientation Unit Vector
+            agent_pos = np.array([r, c], dtype=np.float32)
             tgt = None
+
             if agent == "hacker":
                 if not self.terminal_disabled and self.terminal_pos is not None:
                     tgt = np.array(self.terminal_pos, dtype=np.float32)
@@ -676,7 +698,7 @@ class HeistEnv(ParallelEnv):
             else:  # Scout
                 tgt = np.array(self.extract_pos, dtype=np.float32)
 
-            diff = tgt - np.array([r, c], dtype=np.float32)
+            diff = tgt - agent_pos
             norm = np.linalg.norm(diff) + 1e-5
             goal_vec = np.clip(diff / norm, -1.0, 1.0)
 

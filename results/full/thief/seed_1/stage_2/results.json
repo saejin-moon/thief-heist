@@ -1,0 +1,107 @@
+{
+    "algo": "thief",
+    "stage": 2,
+    "win_rate": 0.79,
+    "lifetime_win_rate": 0.7695133149678605,
+    "mean_reward": 14.937204082435928,
+    "avg_episode_steps": 203.88,
+    "max_stage_steps": 900,
+    "avg_alarm": 45.72817534446716,
+    "stage_alarm_max": 125.0,
+    "her_goal_reach_rate": 17.9375,
+    "her_avg_goal_distance": 1.3069365910440682,
+    "scout_interact_rate": 1.0,
+    "scout_avg_pois_tagged": 4.61,
+    "hacker_hack_rate": 0.96,
+    "muscle_neutralize_rate": 0.98,
+    "muscle_avg_guards_neutralized": 1.88,
+    "total_stage_guards": 2,
+    "extractor_loot_rate": 0.9,
+    "avg_agents_at_extract": 3.63,
+    "active_experts": 8,
+    "dormant_experts": [],
+    "total_spawns": 7,
+    "expert_switch_rate": 0.8161727774987443,
+    "expert_usage_pct": {
+        "0": 48.6,
+        "1": 1.9,
+        "2": 0.8,
+        "3": 3.3,
+        "4": 0.0,
+        "5": 1.1,
+        "6": 1.1,
+        "7": 43.1
+    },
+    "spawn_history": [
+        {
+            "update": 28,
+            "parent_expert": 0,
+            "child_expert": 1,
+            "parent_value": 3.470665216445923,
+            "active_experts": 2,
+            "total_spawns": 1,
+            "trigger": "gradient_interference",
+            "cos_sim": -0.5194477438926697
+        },
+        {
+            "update": 63,
+            "parent_expert": 0,
+            "child_expert": 2,
+            "parent_value": 14.590641021728516,
+            "active_experts": 3,
+            "total_spawns": 2,
+            "trigger": "gradient_interference",
+            "cos_sim": -0.2145223766565323
+        },
+        {
+            "update": 24,
+            "parent_expert": 0,
+            "child_expert": 3,
+            "parent_value": 13.198416709899902,
+            "active_experts": 4,
+            "total_spawns": 3,
+            "trigger": "gradient_interference",
+            "cos_sim": -0.21937856078147888
+        },
+        {
+            "update": 77,
+            "parent_expert": 0,
+            "child_expert": 4,
+            "parent_value": 13.575936317443848,
+            "active_experts": 5,
+            "total_spawns": 4,
+            "trigger": "gradient_interference",
+            "cos_sim": -0.2306976169347763
+        },
+        {
+            "update": 31,
+            "parent_expert": 2,
+            "child_expert": 5,
+            "parent_value": 1.7539304494857788,
+            "active_experts": 6,
+            "total_spawns": 5,
+            "trigger": "gradient_interference",
+            "cos_sim": -0.29953840374946594
+        },
+        {
+            "update": 81,
+            "parent_expert": 2,
+            "child_expert": 6,
+            "parent_value": 1.4005613327026367,
+            "active_experts": 7,
+            "total_spawns": 6,
+            "trigger": "gradient_interference",
+            "cos_sim": -0.3271312415599823
+        },
+        {
+            "update": 134,
+            "parent_expert": 0,
+            "child_expert": 7,
+            "parent_value": 2.756484031677246,
+            "active_experts": 8,
+            "total_spawns": 7,
+            "trigger": "gradient_interference",
+            "cos_sim": -0.27660155296325684
+        }
+    ]
+}

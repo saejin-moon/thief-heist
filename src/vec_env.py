@@ -191,3 +191,22 @@ class VectorEnv:
                 pass
         for p in self.ps:
             p.join(timeout=1.0)
+
+
+def make_vec_env(num_envs=16, config=None, base_seed=0, use_rust=False):
+    """
+    Factory function returning either RustVectorEnv (if use_rust=True) or VectorEnv.
+    """
+    if use_rust:
+        import os
+        import sys
+
+        rust_path = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", "rust", "python")
+        )
+        if rust_path not in sys.path:
+            sys.path.insert(0, rust_path)
+        from vec_env_rust import RustVectorEnv
+
+        return RustVectorEnv(num_envs=num_envs, config=config, base_seed=base_seed)
+    return VectorEnv(num_envs=num_envs, config=config, base_seed=base_seed)

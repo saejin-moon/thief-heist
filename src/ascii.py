@@ -135,7 +135,9 @@ def load_model(algo: str, state_dim: int, checkpoint_path: str, device: str = "c
     return agent
 
 
-def render_alarm_bar(alarm: float, width: int = 24, alarm_max: float = ALARM_MAX) -> str:
+def render_alarm_bar(
+    alarm: float, width: int = 24, alarm_max: float = ALARM_MAX
+) -> str:
     """Return colored ANSI progress bar for alarm."""
     ratio = min(max(alarm / max(1.0, alarm_max), 0.0), 1.0)
     filled = round(ratio * width)
@@ -355,7 +357,9 @@ def run_playback(
                     g = torch.tensor(
                         obs[a]["goal_vector"], dtype=torch.float32
                     ).unsqueeze(0)
-                    act, _, _, _, _ = agent_model.get_action_and_value(o, r, m, g, state_t)
+                    act, _, _, _, _ = agent_model.get_action_and_value(
+                        o, r, m, g, state_t
+                    )
                     actions[a] = int(act.item())
             elif algo == "ecoop":
                 for a in AGENTS:

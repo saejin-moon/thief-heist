@@ -1,0 +1,87 @@
+{
+    "stage_0": {
+        "win_rate_mean": 100.0,
+        "win_rate_std": 0.0,
+        "mean_reward_mean": 17.709133452742048,
+        "mean_reward_std": 0.006147809904864583,
+        "avg_steps_mean": 18.05,
+        "avg_alarm_mean": 3.0366666666666666,
+        "hacker_hack_mean": 100.0,
+        "muscle_neut_mean": 0.0,
+        "extractor_loot_mean": 100.0,
+        "agents_extract_mean": 4.0,
+        "seeds_evaluated": [
+            0,
+            1,
+            2
+        ]
+    },
+    "stage_1": {
+        "win_rate_mean": 100.0,
+        "win_rate_std": 0.0,
+        "mean_reward_mean": 18.686883452807862,
+        "mean_reward_std": 0.017885582900759242,
+        "avg_steps_mean": 27.233333333333334,
+        "avg_alarm_mean": 16.716666666666665,
+        "hacker_hack_mean": 100.0,
+        "muscle_neut_mean": 99.66666666666667,
+        "extractor_loot_mean": 100.0,
+        "agents_extract_mean": 4.0,
+        "seeds_evaluated": [
+            0,
+            1,
+            2
+        ]
+    },
+    "stage_2": {
+        "win_rate_mean": 80.66666666666667,
+        "win_rate_std": 1.699673171197595,
+        "mean_reward_mean": 15.422468153164566,
+        "mean_reward_std": 0.36461633346777894,
+        "avg_steps_mean": 187.13666666666666,
+        "avg_alarm_mean": 43.17161199251811,
+        "hacker_hack_mean": 98.0,
+        "muscle_neut_mean": 98.0,
+        "extractor_loot_mean": 91.33333333333333,
+        "agents_extract_mean": 3.6266666666666665,
+        "seeds_evaluated": [
+            0,
+            1,
+            2
+        ]
+    },
+    "stage_3": {
+        "win_rate_mean": 45.0,
+        "win_rate_std": 6.164414002968976,
+        "mean_reward_mean": 6.8145909332359835,
+        "mean_reward_std": 1.5345660441092324,
+        "avg_steps_mean": 842.23,
+        "avg_alarm_mean": 82.5428065131108,
+        "hacker_hack_mean": 83.0,
+        "muscle_neut_mean": 90.66666666666667,
+        "extractor_loot_mean": 69.33333333333333,
+        "agents_extract_mean": 2.653333333333333,
+        "seeds_evaluated": [
+            0,
+            1,
+            2
+        ]
+    },
+    "stage_4": {
+        "win_rate_mean": 12.333333333333334,
+        "win_rate_std": 2.6246692913372702,
+        "mean_reward_mean": -1.6210269966589597,
+        "mean_reward_std": 0.7532113239852605,
+        "avg_steps_mean": 2559.68,
+        "avg_alarm_mean": 122.3819444767634,
+        "hacker_hack_mean": 60.333333333333336,
+        "muscle_neut_mean": 91.0,
+        "extractor_loot_mean": 35.666666666666664,
+        "agents_extract_mean": 1.5033333333333332,
+        "seeds_evaluated": [
+            0,
+            1,
+            2
+        ]
+    }
+}

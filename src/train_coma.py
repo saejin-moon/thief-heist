@@ -32,7 +32,7 @@ from constants import (
     VF_COEF,
 )
 from thermal_guard import check_thermal_guard
-from vec_env import VectorEnv
+from vec_env import make_vec_env
 
 
 class ComaNetwork(nn.Module):
@@ -46,9 +46,7 @@ class ComaNetwork(nn.Module):
         super().__init__()
         # Actor sees: 11x11 local view (121) + Role One-Hot (4) + Goal Vector (2) = 127
         actor_in_dim = (
-            (OBSERVATION_SIZE[0] * OBSERVATION_SIZE[1])
-            + N_AGENTS
-            + GOAL_VECTOR_DIM
+            (OBSERVATION_SIZE[0] * OBSERVATION_SIZE[1]) + N_AGENTS + GOAL_VECTOR_DIM
         )
         self.actor = nn.Sequential(
             nn.Linear(actor_in_dim, 64),
@@ -114,6 +112,7 @@ def train(
     save_ckpt_dir=None,
     log_dir=None,
     seed=None,
+    use_rust=False,
 ):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -127,24 +126,24 @@ def train(
         os.makedirs(log_dir, exist_ok=True)
         file_logger = logging.getLogger(f"file_{algo_name}_{stage_idx}")
         file_logger.setLevel(logging.INFO)
-        file_handler = logging.FileHandler(
-            os.path.join(log_dir, "train.log"), mode="w"
-        )
+        file_handler = logging.FileHandler(os.path.join(log_dir, "train.log"), mode="w")
         file_handler.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
         file_logger.handlers = [file_handler]
         file_logger.propagate = False
 
-    msg = f"Training {algo_name} Stage {stage_idx} on {device}..."
+    engine_tag = "Native Rust Rayon" if use_rust else "Python Multiprocessing"
+    msg = f"Training {algo_name} Stage {stage_idx} on {device} ({engine_tag})..."
     console_logger.info(msg)
     if file_logger:
         file_logger.info(msg)
 
     if env_config is None:
         env_config = dict(CURRICULUM_STAGES[stage_idx])
-    vec_env = VectorEnv(
+    vec_env = make_vec_env(
         NUM_ENVS,
         config=env_config,
         base_seed=seed * 1000 if seed is not None else 0,
+        use_rust=use_rust,
     )
     state_dim = vec_env.state_dim
 
@@ -197,8 +196,7 @@ def train(
             for a in AGENTS
         }
         b_role = {
-            a: torch.zeros((NUM_STEPS, NUM_ENVS, N_AGENTS)).to(device)
-            for a in AGENTS
+            a: torch.zeros((NUM_STEPS, NUM_ENVS, N_AGENTS)).to(device) for a in AGENTS
         }
         b_mask = {
             a: torch.zeros((NUM_STEPS, NUM_ENVS, ACTION_SPACE_SIZE)).to(device)
@@ -208,12 +206,8 @@ def train(
             a: torch.zeros((NUM_STEPS, NUM_ENVS, GOAL_VECTOR_DIM)).to(device)
             for a in AGENTS
         }
-        b_actions = {
-            a: torch.zeros((NUM_STEPS, NUM_ENVS)).to(device) for a in AGENTS
-        }
-        b_logprobs = {
-            a: torch.zeros((NUM_STEPS, NUM_ENVS)).to(device) for a in AGENTS
-        }
+        b_actions = {a: torch.zeros((NUM_STEPS, NUM_ENVS)).to(device) for a in AGENTS}
+        b_logprobs = {a: torch.zeros((NUM_STEPS, NUM_ENVS)).to(device) for a in AGENTS}
         b_probs = {
             a: torch.zeros((NUM_STEPS, NUM_ENVS, ACTION_SPACE_SIZE)).to(device)
             for a in AGENTS
@@ -222,19 +216,13 @@ def train(
             a: torch.zeros((NUM_STEPS, NUM_ENVS, other_act_dim)).to(device)
             for a in AGENTS
         }
-        b_rewards = {
-            a: torch.zeros((NUM_STEPS, NUM_ENVS)).to(device) for a in AGENTS
-        }
-        b_q_taken = {
-            a: torch.zeros((NUM_STEPS, NUM_ENVS)).to(device) for a in AGENTS
-        }
+        b_rewards = {a: torch.zeros((NUM_STEPS, NUM_ENVS)).to(device) for a in AGENTS}
+        b_q_taken = {a: torch.zeros((NUM_STEPS, NUM_ENVS)).to(device) for a in AGENTS}
         b_dones = torch.zeros((NUM_STEPS, NUM_ENVS)).to(device)
         b_states = torch.zeros((NUM_STEPS, NUM_ENVS, state_dim)).to(device)
 
         for step in range(NUM_STEPS):
-            b_states[step] = torch.tensor(next_state, dtype=torch.float32).to(
-                device
-            )
+            b_states[step] = torch.tensor(next_state, dtype=torch.float32).to(device)
             b_dones[step] = next_done
 
             actions_dict = {}
@@ -277,9 +265,7 @@ def train(
                     step_actions_dict[a] = actions[i]
 
                 # 2. Build other agents' one-hot actions and evaluate Q(s, u)
-                other_onehots = _build_other_actions_onehot(
-                    step_actions_dict, device
-                )
+                other_onehots = _build_other_actions_onehot(step_actions_dict, device)
                 for a in AGENTS:
                     b_other_actions[a][step] = other_onehots[a]
                     q_vals = agent.get_q_values(
@@ -307,34 +293,24 @@ def train(
                     if is_win:
                         global_wins += 1
                     completed_wins.append(float(is_win))
-                    completed_episode_returns.append(
-                        float(current_env_returns[e])
-                    )
+                    completed_episode_returns.append(float(current_env_returns[e]))
                     interval_wins.append(float(is_win))
-                    interval_episode_returns.append(
-                        float(current_env_returns[e])
-                    )
+                    interval_episode_returns.append(float(current_env_returns[e]))
                     current_env_returns[e] = 0.0
 
                     interact_succ = float(
                         scout_info.get("scout_interact_success", False)
                     )
                     pois_tagged = float(scout_info.get("scout_pois_tagged", 0))
-                    hack_succ = float(
-                        scout_info.get("hacker_hack_success", False)
-                    )
+                    hack_succ = float(scout_info.get("hacker_hack_success", False))
                     neutralize_succ = float(
                         scout_info.get("muscle_neutralize_success", False)
                     )
                     guards_neutralized = float(
                         scout_info.get("muscle_guards_neutralized", 0)
                     )
-                    loot_succ = float(
-                        scout_info.get("extractor_loot_success", False)
-                    )
-                    agents_extract = float(
-                        scout_info.get("agents_at_extract", 0)
-                    )
+                    loot_succ = float(scout_info.get("extractor_loot_success", False))
+                    agents_extract = float(scout_info.get("agents_at_extract", 0))
                     ep_steps = float(scout_info.get("steps", 0))
                     ep_alarm = float(scout_info.get("alarm", 0.0))
 
@@ -364,9 +340,9 @@ def train(
             ).to(device)
 
             for a in AGENTS:
-                b_rewards[a][step] = torch.tensor(
-                    rewards[a], dtype=torch.float32
-                ).to(device)
+                b_rewards[a][step] = torch.tensor(rewards[a], dtype=torch.float32).to(
+                    device
+                )
 
         # --- COUNTERFACTUAL ADVANTAGE & TD(lambda) CRITIC TARGETS ---
         with torch.no_grad():
@@ -384,9 +360,7 @@ def train(
             next_goals_all = torch.tensor(
                 stacked_next["goal_vector"], dtype=torch.float32, device=device
             )
-            next_state_t = torch.tensor(
-                next_state, dtype=torch.float32, device=device
-            )
+            next_state_t = torch.tensor(next_state, dtype=torch.float32, device=device)
 
             next_act, _, _, _ = agent.get_action(
                 next_obs_all.flatten(0, 1),
@@ -396,9 +370,7 @@ def train(
             )
             next_act = next_act.view(N_AGENTS, NUM_ENVS)
             next_act_dict = {a: next_act[i] for i, a in enumerate(AGENTS)}
-            next_other_onehots = _build_other_actions_onehot(
-                next_act_dict, device
-            )
+            next_other_onehots = _build_other_actions_onehot(next_act_dict, device)
 
             next_q_taken = {}
             for i, a in enumerate(AGENTS):
@@ -433,8 +405,7 @@ def train(
                         - b_q_taken[a][t]
                     )
                     lastgaelam = (
-                        delta
-                        + GAMMA * GAE_LAMBDA * nextnonterminal * lastgaelam
+                        delta + GAMMA * GAE_LAMBDA * nextnonterminal * lastgaelam
                     )
                     b_returns[a][t] = lastgaelam + b_q_taken[a][t]
 
@@ -463,9 +434,7 @@ def train(
                 adv_flat = b_adv[a].reshape(-1)
                 ret_flat = b_returns[a].reshape(-1)
 
-                adv_flat = (adv_flat - adv_flat.mean()) / (
-                    adv_flat.std() + 1e-8
-                )
+                adv_flat = (adv_flat - adv_flat.mean()) / (adv_flat.std() + 1e-8)
 
                 # Actor Forward
                 _, newlogprob, entropy, newprobs = agent.get_action(

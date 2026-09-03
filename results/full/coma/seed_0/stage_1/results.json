@@ -1,0 +1,19 @@
+{
+    "algo": "coma",
+    "stage": 1,
+    "win_rate": 0.38,
+    "lifetime_win_rate": 0.11861861861861862,
+    "mean_reward": 2.150850764247589,
+    "avg_episode_steps": 236.7,
+    "max_stage_steps": 400,
+    "avg_alarm": 65.37,
+    "stage_alarm_max": 100.0,
+    "scout_interact_rate": 1.0,
+    "scout_avg_pois_tagged": 3.16,
+    "hacker_hack_rate": 1.0,
+    "muscle_neutralize_rate": 0.98,
+    "muscle_avg_guards_neutralized": 0.98,
+    "total_stage_guards": 1,
+    "extractor_loot_rate": 0.97,
+    "avg_agents_at_extract": 2.56
+}

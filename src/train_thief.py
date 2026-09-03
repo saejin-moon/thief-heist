@@ -13,19 +13,51 @@ import os
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from torch import nn
 from torch.distributions.categorical import Categorical
 
-from constants import *
+from constants import (
+    ACTION_SPACE_SIZE,
+    AGENTS,
+    CLIP_COEF,
+    CURRICULUM_STAGES,
+    ENT_COEF,
+    GAE_LAMBDA,
+    GAMMA,
+    GOAL_VECTOR_DIM,
+    LR,
+    N_AGENTS,
+    NUM_STEPS,
+    OBSERVATION_SIZE,
+    THIEF_DEFICIT_MIN_SAMPLES,
+    THIEF_ENVS_PER_MUTANT,
+    THIEF_GRADIENT_CONFLICT_THRESHOLD,
+    THIEF_HER_AUX_COEF,
+    THIEF_HER_REACH_DIST,
+    THIEF_HYSTERESIS_EPSILON,
+    THIEF_INITIAL_EXPERTS,
+    THIEF_ISOLATION_UPDATES,
+    THIEF_MACRO_HORIZON,
+    THIEF_MAX_EXPERTS,
+    THIEF_MAX_SANDBOX_EXPERTS,
+    THIEF_NUM_ENVS,
+    THIEF_POST_GRACE_COOLDOWN_UPDATES,
+    THIEF_PROGRESS_COEF,
+    THIEF_TARGETED_LR,
+    THIEF_WARMUP_UPDATES,
+    UPDATE_EPOCHS,
+    VF_COEF,
+)
 from thermal_guard import check_thermal_guard
-from vec_env import VectorEnv
+from vec_env import make_vec_env
 
 
 class MappoActor(nn.Module):
     def __init__(self):
         super().__init__()
         in_dim = (
-            (OBSERVATION_SIZE[0] * OBSERVATION_SIZE[1]) + N_AGENTS + THIEF_HER_GOAL_DIM
+            (OBSERVATION_SIZE[0] * OBSERVATION_SIZE[1]) + N_AGENTS + GOAL_VECTOR_DIM
         )
         self.network = nn.Sequential(
             nn.Linear(in_dim, 64),
@@ -42,7 +74,7 @@ class MappoActor(nn.Module):
 class MappoCritic(nn.Module):
     def __init__(self, state_dim):
         super().__init__()
-        in_dim = state_dim + N_AGENTS + THIEF_HER_GOAL_DIM
+        in_dim = state_dim + N_AGENTS + GOAL_VECTOR_DIM
         self.network = nn.Sequential(
             nn.Linear(in_dim, 64),
             nn.Tanh(),
@@ -134,7 +166,7 @@ class ThiefNetwork(nn.Module):
         num_envs=THIEF_NUM_ENVS,
     ):
         """
-        Executes routing and policy forward passes across the expert pool conditioned on sub-goals.
+        Executes routing and policy forward passes across the expert pool conditioned on mission targets.
         Implements Dynamic Environment Sharding & Dormancy Freezing:
         - When grace_experts is empty: 100% of environments run competitive bidding across active, non-dormant experts.
         - When M mutants incubate: each occupies 2 dedicated sandbox envs (max 8 envs),
@@ -186,11 +218,18 @@ class ThiefNetwork(nn.Module):
                     dim=-1,
                 ).squeeze(1)
 
-                # Role-Centered Advantage Bidding: Subtract candidate pool mean for this state and role
-                bids_mean = bids.mean(dim=-1, keepdim=True)
-                adv_bids = bids - bids_mean
+                if deterministic:
+                    best_candidate_idx = bids.argmax(dim=-1)
+                else:
+                    # 10% epsilon-greedy candidate exploration during training
+                    eps = 0.10
+                    greedy_idx = bids.argmax(dim=-1)
+                    rand_idx = torch.randint(
+                        0, len(candidate_experts), (batch_size,), device=obs.device
+                    )
+                    explore_mask = torch.rand(batch_size, device=obs.device) < eps
+                    best_candidate_idx = torch.where(explore_mask, rand_idx, greedy_idx)
 
-                best_candidate_idx = adv_bids.argmax(dim=-1)
                 best_idx = torch.tensor(candidate_experts, device=obs.device)[
                     best_candidate_idx
                 ]
@@ -291,109 +330,106 @@ def update_optimizer_params(old_optimizer, agent, lr=LR):
     return new_optimizer
 
 
-def compute_fim_diagonal(
-    agent, expert_idx, b_obs, b_role, b_mask, b_actions, b_goal, device
-):
-    """
-    Computes the exact diagonal of the empirical Fisher Information Matrix (FIM)
-    strictly for Actor parameters across 100% of the rollout buffer transitions.
-    """
-    actor = agent.experts[expert_idx].actor
-    x_actor = torch.cat([b_obs.flatten(1), b_role, b_goal], dim=1).to(device)
-    b_mask_dev = b_mask.to(device)
-    b_actions_dev = b_actions.to(device)
-    total_samples = x_actor.shape[0]
-
-    fisher_diag = [
-        torch.zeros_like(p, device=device)
-        for p in actor.parameters()
-        if p.requires_grad
-    ]
-
-    chunk_size = 256
-    for start in range(0, total_samples, chunk_size):
-        end = min(start + chunk_size, total_samples)
-        sub_x = x_actor[start:end]
-        sub_mask = b_mask_dev[start:end]
-        sub_actions = b_actions_dev[start:end]
-
-        logits = actor(sub_x)
-        masked_logits = logits + ((1.0 - sub_mask) * -1e9)
-        dist = Categorical(logits=masked_logits)
-        log_probs = dist.log_prob(sub_actions)
-
-        for i in range(len(sub_actions)):
-            actor.zero_grad()
-            log_probs[i].backward(retain_graph=(i < len(sub_actions) - 1))
-            with torch.no_grad():
-                for f_p, p in zip(
-                    fisher_diag,
-                    [p for p in actor.parameters() if p.requires_grad],
-                ):
-                    if p.grad is not None:
-                        f_p.add_(p.grad.data.pow(2))
-
-    with torch.no_grad():
-        for f_p in fisher_diag:
-            f_p.div_(total_samples)
-
-    return fisher_diag
-
-
-def check_deficit_trigger(
+def check_gradient_interference_trigger(
     agent,
     active_experts,
     b_obs,
     b_role,
-    b_state,
+    b_mask,
+    b_actions,
     b_goal,
+    b_advantages,
     update,
     last_grace_end_update,
     active_sandbox_mutants,
     incubation_queue,
     device,
     dormant_experts=None,
+    num_updates=None,
 ):
     """
-    Online rollout deficit detection: triggers only when:
-    1. Warmup period has completed (update > THIEF_WARMUP_UPDATES).
-    2. Zero mutants are in training/grace AND zero mutants in incubation queue.
-    3. Exactly THIEF_POST_GRACE_COOLDOWN_UPDATES have elapsed since the last mutant graduated.
-    4. Active expert pool capacity has not reached maximum.
-    5. >20% of transitions exhibit confidence deficit (max_k V_k < THIEF_DEFICIT_THRESHOLD).
+    Evaluates whether the active policy is experiencing catastrophic gradient interference
+    between positive-advantage (success) and negative-advantage (failure) sub-tasks.
     """
-    if update <= THIEF_WARMUP_UPDATES:
-        return False, None
+    warmup = (
+        min(THIEF_WARMUP_UPDATES, int(0.15 * num_updates))
+        if num_updates
+        else THIEF_WARMUP_UPDATES
+    )
+    if update <= warmup:
+        return False, None, 0.0
+    if num_updates is not None and update > int(0.85 * num_updates):
+        return False, None, 0.0
     if active_sandbox_mutants or incubation_queue:
-        return False, None
-    if (update - last_grace_end_update) < THIEF_POST_GRACE_COOLDOWN_UPDATES:
-        return False, None
+        return False, None, 0.0
+    cooldown = (
+        min(THIEF_POST_GRACE_COOLDOWN_UPDATES, int(0.20 * num_updates))
+        if num_updates
+        else THIEF_POST_GRACE_COOLDOWN_UPDATES
+    )
+    if (update - last_grace_end_update) < cooldown:
+        return False, None, 0.0
+    if active_experts >= THIEF_MAX_EXPERTS:
+        return False, None, 0.0
+
+    adv = b_advantages.to(device)
+    pos_mask = adv > 0.0
+    neg_mask = adv < -0.5
+
+    if (
+        pos_mask.sum().item() < THIEF_DEFICIT_MIN_SAMPLES
+        or neg_mask.sum().item() < THIEF_DEFICIT_MIN_SAMPLES
+    ):
+        return False, None, 0.0
 
     dormant_set = set(dormant_experts) if dormant_experts is not None else set()
-    active_bidding_count = active_experts - len(dormant_set)
-    if active_bidding_count >= THIEF_MAX_EXPERTS:
-        return False, None
+    parent_candidates = [
+        k for k in range(active_experts) if k not in dormant_set
+    ] or list(range(active_experts))
+    parent_idx = parent_candidates[0]
+    actor = agent.experts[parent_idx].actor
 
-    non_dormant = [k for k in range(active_experts) if k not in dormant_set]
-    if not non_dormant:
-        non_dormant = list(range(active_experts))
+    def compute_partition_grad(mask):
+        sub_inds = torch.where(mask)[0]
+        if len(sub_inds) > 256:
+            perm = torch.randperm(len(sub_inds))[:256]
+            sub_inds = sub_inds[perm]
 
-    x_critic = torch.cat([b_state, b_role, b_goal], dim=1).to(device)
-    with torch.no_grad():
-        bids = torch.stack(
-            [agent.experts[k].critic(x_critic) for k in non_dormant],
-            dim=-1,
-        ).squeeze(1)
-        v_max = bids.max(dim=-1).values
+        x_act = torch.cat(
+            [b_obs[sub_inds].flatten(1), b_role[sub_inds], b_goal[sub_inds]], dim=1
+        ).to(device)
+        m_act = b_mask[sub_inds].to(device)
+        a_act = b_actions[sub_inds].to(device)
+        adv_sub = adv[sub_inds]
 
-    deficit_mask = v_max < THIEF_DEFICIT_THRESHOLD
-    deficit_count = deficit_mask.sum().item()
-    deficit_ratio = deficit_count / float(len(v_max))
+        logits = actor(x_act)
+        masked_logits = logits + ((1.0 - m_act) * -1e9)
+        dist = Categorical(logits=masked_logits)
+        log_prob = dist.log_prob(a_act)
+        loss = -(log_prob * adv_sub).mean()
 
-    if deficit_ratio >= THIEF_DEFICIT_RATIO_TRIGGER and deficit_count >= 32:
-        return True, deficit_mask
+        actor.zero_grad()
+        loss.backward()
 
-    return False, None
+        grads = []
+        with torch.no_grad():
+            for p in actor.parameters():
+                if p.grad is not None:
+                    grads.append(p.grad.data.flatten())
+        return torch.cat(grads) if grads else None
+
+    g_pos = compute_partition_grad(pos_mask)
+    g_neg = compute_partition_grad(neg_mask)
+
+    if g_pos is None or g_neg is None:
+        return False, None, 0.0
+
+    cos_sim = (torch.dot(g_pos, g_neg) / (g_pos.norm() * g_neg.norm() + 1e-8)).item()
+
+    if cos_sim < THIEF_GRADIENT_CONFLICT_THRESHOLD:
+        return True, neg_mask, cos_sim
+
+    return False, None, cos_sim
 
 
 def compute_deficit_gradient(
@@ -445,7 +481,7 @@ def compute_deficit_gradient(
     return deficit_grads
 
 
-def recombine_and_mutate_thief(
+def spawn_directed_specialist(
     agent,
     active_experts,
     b_obs,
@@ -461,18 +497,13 @@ def recombine_and_mutate_thief(
     dormant_experts=None,
 ):
     """
-    Executes THIEF Evolutionary Operator:
-    1. Multi-parent empirical return fitness weighting across active non-dormant parents.
-    2. All-Pool Full-Buffer Fisher Information Matrix evaluation on Actors.
-    3. Geometry-aware Fisher crossover across active parents.
-    4. Recombined Critic initialization (clean pool baseline, no E0 carbon copy).
-    5. Deficit-directed gradient mutation on failure transitions + Riemannian noise.
-    6. Structured Orthogonal Antithetic Sampling (capped at THIEF_MAX_SANDBOX_EXPERTS = 4).
+    Clones the dominant parent and applies a policy gradient step specifically
+    on the failure sub-manifold to spawn 1 dedicated specialist.
     """
     dormant_set = set(dormant_experts) if dormant_experts is not None else set()
-    parent_candidates = [k for k in range(active_experts) if k not in dormant_set]
-    if not parent_candidates:
-        parent_candidates = list(range(active_experts))
+    parent_candidates = [
+        k for k in range(active_experts) if k not in dormant_set
+    ] or list(range(active_experts))
 
     x_critic = torch.cat([b_state, b_role, b_goal], dim=1).to(device)
     with torch.no_grad():
@@ -480,134 +511,44 @@ def recombine_and_mutate_thief(
             agent.experts[k].critic(x_critic).mean().item() for k in parent_candidates
         ]
 
-    val_tensor = torch.tensor(parent_values, device=device)
-    val_norm = val_tensor - val_tensor.max()
-    weights = torch.softmax(val_norm / 1.0, dim=0).cpu().numpy()
-
-    # Compute FIM for each active parent Actor
-    fims = [
-        compute_fim_diagonal(agent, k, b_obs, b_role, b_mask, b_actions, b_goal, device)
-        for k in parent_candidates
-    ]
-
-    # Recombine Actor Parameters
-    actor_params = [
-        [p.data for p in agent.experts[k].actor.parameters()] for k in parent_candidates
-    ]
-    recombined_actor_params = []
-    effective_fishers = []
-    damping = THIEF_CROSSOVER_DAMPING
-
-    for p_idx in range(len(actor_params[0])):
-        weighted_p_sum = torch.zeros_like(actor_params[0][p_idx])
-        weight_sum = torch.zeros_like(actor_params[0][p_idx])
-        eff_f = torch.zeros_like(actor_params[0][p_idx])
-
-        for i, k in enumerate(parent_candidates):
-            w = weights[i]
-            f = fims[i][p_idx]
-            eff_f += w * f
-            inv_var = w * (f + damping)
-            weighted_p_sum += inv_var * actor_params[i][p_idx]
-            weight_sum += inv_var
-
-        recomb_p = weighted_p_sum / (weight_sum + 1e-8)
-        recombined_actor_params.append(recomb_p)
-        effective_fishers.append(eff_f)
-
-    # Recombine Critic Parameters (clean weighted average across parent pool)
-    critic_params = [
-        [p.data for p in agent.experts[k].critic.parameters()]
-        for k in parent_candidates
-    ]
-    recombined_critic_params = []
-    for p_idx in range(len(critic_params[0])):
-        w_crit = torch.zeros_like(critic_params[0][p_idx])
-        for i, k in enumerate(parent_candidates):
-            w_crit += weights[i] * critic_params[i][p_idx]
-        recombined_critic_params.append(w_crit)
-
-    # Build temporary recombined Actor to compute deficit gradient
-    temp_actor = MappoActor().to(device)
-    for p, r_p in zip(temp_actor.parameters(), recombined_actor_params):
-        p.data.copy_(r_p)
-
-    deficit_grads = None
-    if deficit_mask is not None and deficit_mask.sum().item() >= 32:
-        deficit_grads = compute_deficit_gradient(
-            temp_actor,
-            b_obs,
-            b_role,
-            b_mask,
-            b_actions,
-            b_goal,
-            b_returns,
-            b_values,
-            deficit_mask,
-            device,
-        )
-
-    # Structured Orthogonal Antithetic Sampling capped at THIEF_MAX_SANDBOX_EXPERTS (4)
-    num_mutants = min(max(2, len(parent_candidates)), THIEF_MAX_SANDBOX_EXPERTS)
-    child_indices = []
-
-    # Exploration temperature spectrum per mutant:
-    # M0: Gradient follower (+z0, low noise, high grad)
-    # M1: Antithetic mirror 1 (-z0, medium noise, medium grad)
-    # M2: Orthogonal explorer (+z1, medium noise, medium grad)
-    # M3: Broad basin explorer (-z1, high noise, low grad)
-    grad_scales = [0.08, 0.05, 0.05, 0.02]
-    noise_scales = [0.015, 0.030, 0.030, 0.060]
-
-    all_child_actor_params = [[] for _ in range(num_mutants)]
-
-    for p_idx, (r_p, eff_f) in enumerate(
-        zip(recombined_actor_params, effective_fishers)
-    ):
-        f_safe = torch.clamp(eff_f, min=1e-6)
-        inv_f_sqrt = 1.0 / torch.sqrt(f_safe + 1e-4)
-        inv_f_scaled = inv_f_sqrt / (inv_f_sqrt.mean() + 1e-8)
-        inv_f_damped = torch.clamp(inv_f_scaled, max=10.0)
-
-        # Base orthogonal noise vectors z0, z1
-        z0 = torch.randn_like(r_p)
-        z0 = z0 / (z0.norm() + 1e-8) * np.sqrt(z0.numel())
-
-        raw_z1 = torch.randn_like(r_p)
-        proj = (z0 * raw_z1).sum() / ((z0 * z0).sum() + 1e-8)
-        z1 = raw_z1 - proj * z0
-        z1 = z1 / (z1.norm() + 1e-8) * np.sqrt(z1.numel())
-
-        dir_vectors = [z0, -z0, z1, -z1]
-        g_p = deficit_grads[p_idx] if deficit_grads is not None else None
-
-        for m in range(num_mutants):
-            vec = dir_vectors[m % len(dir_vectors)]
-            noise = vec * noise_scales[m % len(noise_scales)] * inv_f_damped
-            mutated_p = r_p + noise
-
-            if g_p is not None:
-                mutated_p = mutated_p - (grad_scales[m % len(grad_scales)] * g_p)
-
-            all_child_actor_params[m].append(mutated_p)
-
-    for m in range(num_mutants):
-        c_idx = agent.add_expert()
-        for p, c_p in zip(
-            agent.experts[c_idx].actor.parameters(), all_child_actor_params[m]
-        ):
-            p.data.copy_(c_p)
-        for p, c_p in zip(
-            agent.experts[c_idx].critic.parameters(), recombined_critic_params
-        ):
-            p.data.copy_(c_p)
-        child_indices.append(c_idx)
-
     best_parent_cand_idx = int(np.argmax(parent_values))
     best_parent_idx = parent_candidates[best_parent_cand_idx]
     best_parent_val = float(parent_values[best_parent_cand_idx])
 
-    return child_indices, weights, best_parent_idx, best_parent_val
+    # Clone parent actor to compute clean failure gradient
+    temp_actor = MappoActor().to(device)
+    for p, parent_p in zip(
+        temp_actor.parameters(), agent.experts[best_parent_idx].actor.parameters()
+    ):
+        p.data.copy_(parent_p.data)
+
+    deficit_grads = compute_deficit_gradient(
+        temp_actor,
+        b_obs,
+        b_role,
+        b_mask,
+        b_actions,
+        b_goal,
+        b_returns,
+        b_values,
+        deficit_mask,
+        device,
+    )
+
+    # Spawn 1 child expert with directed gradient step
+    c_idx = agent.add_expert()
+    for p_idx, (p_child, p_parent) in enumerate(
+        zip(
+            agent.experts[c_idx].actor.parameters(),
+            agent.experts[best_parent_idx].actor.parameters(),
+        )
+    ):
+        mutated_p = p_parent.data.clone()
+        if deficit_grads is not None and deficit_grads[p_idx] is not None:
+            mutated_p = mutated_p - (THIEF_TARGETED_LR * deficit_grads[p_idx])
+        p_child.data.copy_(mutated_p)
+
+    return c_idx, best_parent_idx, best_parent_val
 
 
 def train(
@@ -619,6 +560,7 @@ def train(
     save_ckpt_dir=None,
     log_dir=None,
     seed=0,
+    use_rust=False,
 ):
     import random
 
@@ -647,9 +589,10 @@ def train(
         file_logger.handlers = [file_handler]
         file_logger.propagate = False
 
+    engine_tag = "Native Rust Rayon" if use_rust else "Python Multiprocessing"
     msg = (
         f"Training {algo_name} Stage {stage_idx} (Seed {seed}) on {device} ("
-        f"16 Envs | HER Sub-Goal Navigation | Dynamic Sharding | Pool Doubling | FIFO Queue | 30-Update Post-Grace Cooldown)..."
+        f"16 Envs | {engine_tag} | HER Sub-Goal Navigation | Dynamic Sharding | Pool Doubling | FIFO Queue | 30-Update Post-Grace Cooldown)..."
     )
     console_logger.info(msg)
     if file_logger:
@@ -657,8 +600,11 @@ def train(
 
     if env_config is None:
         env_config = dict(CURRICULUM_STAGES[stage_idx])
-    vec_env = VectorEnv(
-        num_envs, config=env_config, base_seed=seed * 1000 if seed is not None else 0
+    vec_env = make_vec_env(
+        num_envs,
+        config=env_config,
+        base_seed=seed * 1000 if seed is not None else 0,
+        use_rust=use_rust,
     )
     state_dim = vec_env.state_dim
 
@@ -670,13 +616,7 @@ def train(
     active_experts = THIEF_INITIAL_EXPERTS
     total_spawns = 0
     spawn_history = []
-
-    # Queue, Dynamic Incubation & Dormancy Tracking
-    active_sandbox_mutants = {}  # Dict mapping active mutant_idx -> updates_completed
-    incubation_queue = []  # FIFO list of waiting mutant_idx
-    last_grace_end_update = 0  # Timestamp of when last mutant finished grace
-    expert_consecutive_zero_usage = collections.defaultdict(int)
-    dormant_experts = set()  # Set of frozen inactive expert indices
+    dormant_experts = set()
     env_previous_expert = None
 
     if load_ckpt_path and os.path.exists(load_ckpt_path):
@@ -684,20 +624,19 @@ def train(
             ckpt = torch.load(load_ckpt_path, map_location=device, weights_only=False)
             state_dict = (
                 ckpt["model_state"]
-                if (isinstance(ckpt, dict) and "model_state" in ckpt)
+                if isinstance(ckpt, dict) and "model_state" in ckpt
                 else ckpt
             )
             expert_indices = {
                 int(k.split(".")[1]) for k in state_dict if k.startswith("experts.")
             }
-            needed_experts = (
-                max(expert_indices) + 1 if expert_indices else THIEF_INITIAL_EXPERTS
-            )
+            needed_experts = max(expert_indices) + 1 if expert_indices else 1
             while len(agent.experts) < needed_experts:
                 agent.add_expert()
             if len(agent.experts) > needed_experts:
                 agent.prune_experts(list(range(needed_experts)))
-            agent.load_state_dict(state_dict)
+
+            agent.load_state_dict(state_dict, strict=False)
             optimizer = torch.optim.Adam(agent.parameters(), lr=LR, eps=1e-5)
             if isinstance(ckpt, dict) and "model_state" in ckpt:
                 active_experts = int(ckpt.get("active_experts", len(agent.experts)))
@@ -706,8 +645,8 @@ def train(
                 spawn_history = list(ckpt.get("spawn_history", []))
             else:
                 active_experts = len(agent.experts)
+                dormant_experts = set()
 
-            # If loaded checkpoint has uncompacted dormant experts, prune them immediately
             surviving_indices = [
                 k for k in range(active_experts) if k not in dormant_experts
             ]
@@ -726,14 +665,13 @@ def train(
             if file_logger:
                 file_logger.info(msg)
         except Exception as e:  # noqa: BLE001
-            print(f"Warning: Could not load full checkpoint ({e}). Initializing fresh.")
+            print(f"Warning: Could not load checkpoint ({e}). Initializing fresh.")
 
     next_obs, next_state = vec_env.reset()
     next_done = torch.zeros(num_envs).to(device)
-    infos = [{} for _ in range(num_envs)]
 
     num_updates = total_timesteps // (num_envs * NUM_STEPS)
-    dynamic_cull_window = max(20, min(200, int(20 * np.sqrt(num_updates / 25.0))))
+    dynamic_cull_window = max(60, int(0.40 * num_updates))
 
     global_episodes = 0
     global_wins = 0
@@ -750,8 +688,22 @@ def train(
     completed_extractor_loot = []
     completed_agents_at_extract = []
 
+    active_sandbox_mutants = collections.OrderedDict()
+    incubation_queue = []
+    last_grace_end_update = 0
+    expert_consecutive_zero_usage = collections.defaultdict(int)
+
     last_expert_usage = {}
     last_switch_rate = 0.0
+    last_her_reach_rate = 0.0
+    last_her_avg_dist = 0.0
+
+    prev_poses = {
+        a: [np.zeros(2, dtype=np.float32) for _ in range(num_envs)] for a in AGENTS
+    }
+    macro_start_poses = {
+        a: [np.zeros(2, dtype=np.float32) for _ in range(num_envs)] for a in AGENTS
+    }
 
     for update in range(1, num_updates + 1):
         check_thermal_guard()
@@ -769,7 +721,7 @@ def train(
             for a in AGENTS
         }
         b_goal = {
-            a: torch.zeros((NUM_STEPS, num_envs, THIEF_HER_GOAL_DIM)).to(device)
+            a: torch.zeros((NUM_STEPS, num_envs, GOAL_VECTOR_DIM)).to(device)
             for a in AGENTS
         }
         b_actions = {a: torch.zeros((NUM_STEPS, num_envs)).to(device) for a in AGENTS}
@@ -783,15 +735,25 @@ def train(
             for a in AGENTS
         }
 
+        # HER Buffers
+        her_relabeled_obs = []
+        her_relabeled_role = []
+        her_relabeled_mask = []
+        her_relabeled_actions = []
+        her_relabeled_goal = []
+        her_relabeled_expert = []
+
+        her_goals_assigned = 0
+        her_goals_reached = 0
+        her_total_dist = 0.0
+
         total_switches = 0
         total_switch_opportunities = 0
         current_sandbox_list = list(active_sandbox_mutants.keys())
 
         # --- ROLLOUT PHASE ---
         for step in range(NUM_STEPS):
-            b_states[step] = torch.tensor(next_state, dtype=torch.float32).to(
-                device
-            )
+            b_states[step] = torch.tensor(next_state, dtype=torch.float32).to(device)
             b_dones[step] = next_done
 
             actions_dict = {}
@@ -828,9 +790,7 @@ def train(
 
                 if env_previous_expert is not None:
                     valid_prev = env_previous_expert >= 0
-                    switches = (
-                        chosen_expert != env_previous_expert
-                    ) & valid_prev
+                    switches = (chosen_expert != env_previous_expert) & valid_prev
                     total_switches += switches.sum().item()
                     total_switch_opportunities += valid_prev.sum().item()
 
@@ -854,9 +814,49 @@ def train(
 
             next_obs, rewards, terms, truncs, infos = vec_env.step(actions_dict)
 
-            for a in AGENTS:
+            # Sub-Goal Potential-Based Progress Reward Shaping & HER Relabeling
+            for i, a in enumerate(AGENTS):
                 for e in range(num_envs):
-                    b_rewards[a][step, e] = float(rewards[a][e])
+                    agent_info = infos[e].get(a, {})
+                    curr_pos = np.array(agent_info.get("pos", (0, 0)), dtype=np.float32)
+                    goal_vec_np = goals_all[i, e].cpu().numpy()
+
+                    if step == 0 or (update == 1 and prev_poses[a][e].sum() == 0):
+                        prev_poses[a][e] = curr_pos.copy()
+                        macro_start_poses[a][e] = curr_pos.copy()
+
+                    delta_step = curr_pos - prev_poses[a][e]
+                    progress_val = float(np.dot(delta_step, goal_vec_np))
+                    prev_poses[a][e] = curr_pos.copy()
+
+                    int_r = float(np.clip(progress_val, -1.0, 1.0))
+                    ext_r = float(rewards[a][e])
+                    b_rewards[a][step, e] = ext_r + (THIEF_PROGRESS_COEF * int_r)
+
+                    # HER Macro Horizon Segmentation & Hindsight Relabeling
+                    if (step + 1) % THIEF_MACRO_HORIZON == 0:
+                        start_pos = macro_start_poses[a][e]
+                        disp = curr_pos - start_pos
+                        dist_covered = float(np.linalg.norm(disp))
+                        her_goals_assigned += 1
+                        her_total_dist += dist_covered
+
+                        if dist_covered >= THIEF_HER_REACH_DIST:
+                            her_goals_reached += 1
+                        elif dist_covered > 0.1:
+                            hg = np.clip(disp / (dist_covered + 1e-5), -1.0, 1.0)
+                            hg_t = torch.tensor(hg, dtype=torch.float32, device=device)
+
+                            seg_start = step - THIEF_MACRO_HORIZON + 1
+                            for tau in range(seg_start, step + 1):
+                                her_relabeled_obs.append(b_obs[a][tau, e])
+                                her_relabeled_role.append(b_role[a][tau, e])
+                                her_relabeled_mask.append(b_mask[a][tau, e])
+                                her_relabeled_actions.append(b_actions[a][tau, e])
+                                her_relabeled_goal.append(hg_t)
+                                her_relabeled_expert.append(b_experts[a][tau, e])
+
+                        macro_start_poses[a][e] = curr_pos.copy()
 
             # Accumulate per-agent average return per env
             step_agent_reward = sum(rewards[a] for a in AGENTS) / N_AGENTS
@@ -874,11 +874,17 @@ def train(
                     completed_episode_returns.append(float(current_env_returns[e]))
                     current_env_returns[e] = 0.0
 
-                    interact_succ = float(scout_info.get("scout_interact_success", False))
+                    interact_succ = float(
+                        scout_info.get("scout_interact_success", False)
+                    )
                     pois_tagged = float(scout_info.get("scout_pois_tagged", 0))
                     hack_succ = float(scout_info.get("hacker_hack_success", False))
-                    neutralize_succ = float(scout_info.get("muscle_neutralize_success", False))
-                    guards_neutralized = float(scout_info.get("muscle_guards_neutralized", 0))
+                    neutralize_succ = float(
+                        scout_info.get("muscle_neutralize_success", False)
+                    )
+                    guards_neutralized = float(
+                        scout_info.get("muscle_guards_neutralized", 0)
+                    )
                     loot_succ = float(scout_info.get("extractor_loot_success", False))
                     agents_extract = float(scout_info.get("agents_at_extract", 0))
                     ep_steps = float(scout_info.get("steps", 0))
@@ -902,6 +908,28 @@ def train(
             next_done = torch.tensor(
                 terms["scout"] | truncs["scout"], dtype=torch.float32
             ).to(device)
+
+        # Track usage and switch rate
+        experts_stacked = torch.stack([b_experts[a] for a in AGENTS])
+        all_experts_tensor = experts_stacked.view(-1)
+        usage_counts = torch.bincount(all_experts_tensor, minlength=active_experts)
+        total_samples = all_experts_tensor.numel()
+        last_expert_usage = {
+            k: round(float(usage_counts[k].item() / total_samples) * 100, 1)
+            for k in range(active_experts)
+        }
+
+        last_switch_rate = (
+            (total_switches / total_switch_opportunities) * 100
+            if total_switch_opportunities > 0
+            else 0.0
+        )
+
+        for k in range(active_experts):
+            if usage_counts[k] == 0:
+                expert_consecutive_zero_usage[k] += 1
+            else:
+                expert_consecutive_zero_usage[k] = 0
 
         # --- GAE CALCULATION (WORKERS) ---
         with torch.no_grad():
@@ -963,6 +991,10 @@ def train(
                     )
                 b_returns[a] = b_advantages[a] + b_values[a]
 
+        if her_goals_assigned > 0:
+            last_her_reach_rate = (her_goals_reached / her_goals_assigned) * 100.0
+            last_her_avg_dist = her_total_dist / her_goals_assigned
+
         # Flatten worker transitions across all roles and environments
         flat_obs = torch.cat([b_obs[a].flatten(0, 1) for a in AGENTS], dim=0)
         flat_role = torch.cat([b_role[a].flatten(0, 1) for a in AGENTS], dim=0)
@@ -978,29 +1010,32 @@ def train(
         flat_states = b_states.repeat(N_AGENTS, 1, 1).flatten(0, 1)
         flat_experts = torch.cat([b_experts[a].flatten(0, 1) for a in AGENTS], dim=0)
 
-        total_samples = flat_obs.shape[0]
-        usage_counts = torch.bincount(flat_experts, minlength=active_experts)
-        last_expert_usage = {
-            k: round(float(usage_counts[k].item() / total_samples) * 100, 1)
-            for k in range(active_experts)
-        }
-
-        last_switch_rate = (
-            (total_switches / total_switch_opportunities) * 100
-            if total_switch_opportunities > 0
-            else 0.0
-        )
-
-        for k in range(active_experts):
-            if usage_counts[k] == 0:
-                expert_consecutive_zero_usage[k] += 1
-            else:
-                expert_consecutive_zero_usage[k] = 0
+        # HER auxiliary tensors
+        has_her = len(her_relabeled_actions) > 0
+        if has_her:
+            her_obs_t = torch.stack(her_relabeled_obs, dim=0)
+            her_role_t = torch.stack(her_relabeled_role, dim=0)
+            her_mask_t = torch.stack(her_relabeled_mask, dim=0)
+            her_act_t = torch.stack(her_relabeled_actions, dim=0)
+            her_goal_t = torch.stack(her_relabeled_goal, dim=0)
+            her_exp_t = torch.stack(her_relabeled_expert, dim=0)
+            her_total = her_act_t.shape[0]
 
         # --- PPO OPTIMIZATION LOOP ---
         batch_size = total_samples
         minibatch_size = batch_size // 4
         b_inds = np.arange(batch_size)
+
+        # Full-Batch Advantage Normalization per expert
+        flat_adv_norm = torch.zeros_like(flat_advantages)
+        for k in range(active_experts):
+            k_mask = flat_experts == k
+            if k_mask.sum() > 1:
+                k_adv = flat_advantages[k_mask]
+                flat_adv_norm[k_mask] = (k_adv - k_adv.mean()) / (k_adv.std() + 1e-8)
+            elif k_mask.sum() == 1:
+                flat_adv_norm[k_mask] = 0.0
+        flat_advantages = flat_adv_norm
 
         for _ in range(UPDATE_EPOCHS):
             np.random.shuffle(b_inds)
@@ -1012,18 +1047,6 @@ def train(
 
                 mb_exp = flat_experts[mb_inds]
                 mb_adv = flat_advantages[mb_inds]
-
-                # Per-expert advantage normalization
-                mb_adv_norm = torch.zeros_like(mb_adv)
-                for k in range(active_experts):
-                    k_mask = mb_exp == k
-                    if k_mask.sum() > 1:
-                        k_adv = mb_adv[k_mask]
-                        mb_adv_norm[k_mask] = (k_adv - k_adv.mean()) / (
-                            k_adv.std() + 1e-8
-                        )
-                    elif k_mask.sum() == 1:
-                        mb_adv_norm[k_mask] = 0.0
 
                 mb_obs = flat_obs[mb_inds]
                 mb_role = flat_role[mb_inds]
@@ -1050,27 +1073,75 @@ def train(
                 logratio = newlogprob - mb_logprobs
                 ratio = logratio.exp()
 
-                pg_loss1 = -mb_adv_norm * ratio
-                pg_loss2 = -mb_adv_norm * torch.clamp(
-                    ratio, 1 - CLIP_COEF, 1 + CLIP_COEF
-                )
+                pg_loss1 = -mb_adv * ratio
+                pg_loss2 = -mb_adv * torch.clamp(ratio, 1 - CLIP_COEF, 1 + CLIP_COEF)
                 pg_loss = torch.max(pg_loss1, pg_loss2).mean()
 
-                v_loss = 0.5 * ((newvalue - mb_returns) ** 2).mean()
+                v_loss = F.smooth_l1_loss(newvalue, mb_returns, beta=1.0)
                 entropy_loss = entropy.mean()
 
-                loss = pg_loss - (ENT_COEF * entropy_loss) + (VF_COEF * v_loss)
+                # Auxiliary HER Hindsight Navigation Policy Loss
+                her_loss = torch.tensor(0.0, device=device)
+                if has_her:
+                    her_mb_size = min(minibatch_size, her_total)
+                    her_mb_inds = np.random.choice(
+                        her_total, size=her_mb_size, replace=False
+                    )
+                    h_obs = her_obs_t[her_mb_inds]
+                    h_role = her_role_t[her_mb_inds]
+                    h_mask = her_mask_t[her_mb_inds]
+                    h_goal = her_goal_t[her_mb_inds]
+                    h_act = her_act_t[her_mb_inds]
+                    h_exp = her_exp_t[her_mb_inds]
+
+                    total_her_loss = 0.0
+                    n_expert_groups = 0
+                    for k in range(active_experts):
+                        k_sel = h_exp == k
+                        if k_sel.sum() > 0:
+                            k_obs = h_obs[k_sel]
+                            k_role = h_role[k_sel]
+                            k_mask = h_mask[k_sel]
+                            k_goal = h_goal[k_sel]
+                            k_act = h_act[k_sel]
+
+                            bk = k_obs.shape[0]
+                            x_actor = torch.cat(
+                                [k_obs.view(bk, -1), k_role, k_goal], dim=1
+                            )
+                            logits = agent.experts[k].actor(x_actor)
+                            logits = logits.masked_fill(k_mask == 0, -1e8)
+                            probs = Categorical(logits=logits)
+                            total_her_loss = (
+                                total_her_loss - probs.log_prob(k_act).mean()
+                            )
+                            n_expert_groups += 1
+
+                    if n_expert_groups > 0:
+                        her_loss = total_her_loss / n_expert_groups
+
+                loss = (
+                    pg_loss
+                    - (ENT_COEF * entropy_loss)
+                    + (VF_COEF * v_loss)
+                    + (THIEF_HER_AUX_COEF * her_loss)
+                )
 
                 optimizer.zero_grad()
                 loss.backward()
                 nn.utils.clip_grad_norm_(agent.parameters(), 0.5)
                 optimizer.step()
 
-        # Lifecycle Step A: Sandbox Incubation Progression
+        # Lifecycle Step A: Sandbox Incubation Progression & Queue Processing
+        isolation_window = (
+            min(THIEF_ISOLATION_UPDATES, max(5, int(0.15 * num_updates)))
+            if num_updates
+            else THIEF_ISOLATION_UPDATES
+        )
         graduated_this_update = []
         for m_idx in list(active_sandbox_mutants.keys()):
             active_sandbox_mutants[m_idx] += 1
-            if active_sandbox_mutants[m_idx] >= THIEF_ISOLATION_UPDATES:
+            if active_sandbox_mutants[m_idx] >= isolation_window:
                 graduated_this_update.append(m_idx)
                 del active_sandbox_mutants[m_idx]
 
@@ -1128,24 +1199,29 @@ def train(
                 if file_logger:
                     file_logger.info(msg)
 
-        # Lifecycle Step B: Dynamic Deficit Spawning Check
-        deficit_triggered, deficit_mask = check_deficit_trigger(
-            agent,
-            active_experts,
-            flat_obs,
-            flat_role,
-            flat_states,
-            flat_goal,
-            update,
-            last_grace_end_update,
-            active_sandbox_mutants,
-            incubation_queue,
-            device,
-            dormant_experts=dormant_experts,
+        # Lifecycle Step B: Dynamic Gradient Interference Spawning Check
+        conflict_triggered, deficit_mask, cos_sim = (
+            check_gradient_interference_trigger(
+                agent,
+                active_experts,
+                flat_obs,
+                flat_role,
+                flat_mask,
+                flat_actions,
+                flat_goal,
+                flat_advantages,
+                update,
+                last_grace_end_update,
+                active_sandbox_mutants,
+                incubation_queue,
+                device,
+                dormant_experts=dormant_experts,
+                num_updates=num_updates,
+            )
         )
 
-        if deficit_triggered:
-            child_indices, weights, best_parent, parent_val = recombine_and_mutate_thief(
+        if conflict_triggered:
+            c_idx, best_parent, parent_val = spawn_directed_specialist(
                 agent,
                 active_experts,
                 flat_obs,
@@ -1161,42 +1237,34 @@ def train(
                 dormant_experts=dormant_experts,
             )
             old_count = active_experts
-            active_experts += len(child_indices)
-            total_spawns += len(child_indices)
+            active_experts += 1
+            total_spawns += 1
 
             # Preserve Adam momentum and variance state for surviving parents
             optimizer = update_optimizer_params(optimizer, agent, lr=LR)
 
-            for c_idx in child_indices:
-                if len(active_sandbox_mutants) < THIEF_MAX_SANDBOX_EXPERTS:
-                    active_sandbox_mutants[c_idx] = 0
-                else:
-                    incubation_queue.append(c_idx)
+            if len(active_sandbox_mutants) < THIEF_MAX_SANDBOX_EXPERTS:
+                active_sandbox_mutants[c_idx] = 0
+            else:
+                incubation_queue.append(c_idx)
 
-                spawn_history.append(
-                    {
-                        "update": update,
-                        "parent_expert": best_parent,
-                        "child_expert": c_idx,
-                        "parent_value": parent_val,
-                        "active_experts": active_experts,
-                        "total_spawns": total_spawns,
-                        "trigger": "critic_deficit_dynamic",
-                    }
-                )
-
-            spawned_names = ", ".join(f"E{i}" for i in child_indices)
-            parent_mix_str = ", ".join(
-                f"E{k}: {weights[i] * 100:.1f}%"
-                for i, k in enumerate(
-                    [idx for idx in range(old_count) if idx not in dormant_experts]
-                    or range(old_count)
-                )
+            spawn_history.append(
+                {
+                    "update": update,
+                    "parent_expert": best_parent,
+                    "child_expert": c_idx,
+                    "parent_value": parent_val,
+                    "active_experts": active_experts,
+                    "total_spawns": total_spawns,
+                    "trigger": "gradient_interference",
+                    "cos_sim": cos_sim,
+                }
             )
+
             msg = (
-                f"[Deficit Evolution Event] Update: {update} | Triggered Dynamic Deficit Spawn! "
-                f"Spawned {len(child_indices)} Structured Orthogonal Mutants (Pool: {old_count} -> {active_experts} experts) "
-                f"({spawned_names} recombined from active parents [{parent_mix_str}]) | "
+                f"[Gradient Interference Event] Update: {update} | Severe gradient conflict detected "
+                f"(cos_sim = {cos_sim:.3f} < {THIEF_GRADIENT_CONFLICT_THRESHOLD})! "
+                f"Spawned directed specialist E{c_idx} from parent E{best_parent} (Pool: {old_count} -> {active_experts} experts) | "
                 f"Active Sandbox Mutants: {list(active_sandbox_mutants.keys())}, Queue: {incubation_queue}"
             )
             console_logger.info(msg)
@@ -1268,13 +1336,14 @@ def train(
                 f"Update: {update}/{num_updates} | "
                 f"Win Rate: {avg_win:.2f} | "
                 f"Episodic Return: {avg_rew:.3f} | "
+                f"Goals Reached: {last_her_reach_rate:.1f}% (Dist: {last_her_avg_dist:.1f}) | "
                 f"Steps: {avg_steps:.1f}/{stage_max_steps} | "
                 f"Alarm: {avg_alarm:.1f}/{stage_alarm_max:.0f} | "
                 f"Active Experts: {active_bidding_count}/{active_experts}"
             )
             console_logger.info(console_str)
 
-            # Comprehensive file log (full sub-task breakdown)
+            # Comprehensive file log
             if file_logger:
                 file_str = (
                     f"Update: {update}/{num_updates} | "
@@ -1282,6 +1351,7 @@ def train(
                     f"Episodic Return: {avg_rew:.3f} | "
                     f"Steps: {avg_steps:.1f}/{stage_max_steps} | "
                     f"Alarm: {avg_alarm:.1f}/{stage_alarm_max:.0f} | "
+                    f"Goals Reached: {last_her_reach_rate:.1f}% (Avg Dist: {last_her_avg_dist:.1f} tiles, Relabeled: {len(her_relabeled_actions)}) | "
                     f"Scout Tag Rate: {avg_scout_int:.2f} (Avg POIs: {avg_scout_pois:.1f}) | "
                     f"Hacker Hack Rate: {avg_hacker_hack:.2f} | "
                     f"Muscle Neutralize Rate: {avg_muscle_neut:.2f} (Avg Guards: {avg_muscle_guards:.1f}/{stage_guards}) | "
@@ -1297,9 +1367,7 @@ def train(
     vec_env.close()
 
     # Final Evaluation & Inter-Stage Compaction (prune dormant experts cleanly for saved model)
-    surviving_indices = [
-        k for k in range(active_experts) if k not in dormant_experts
-    ]
+    surviving_indices = [k for k in range(active_experts) if k not in dormant_experts]
     if len(surviving_indices) < active_experts and len(surviving_indices) >= 1:
         agent.prune_experts(surviving_indices)
         active_experts = len(surviving_indices)
@@ -1343,14 +1411,10 @@ def train(
         else 0.0
     )
     avg_scout_pois = (
-        float(np.mean(completed_scout_pois[-100:]))
-        if completed_scout_pois
-        else 0.0
+        float(np.mean(completed_scout_pois[-100:])) if completed_scout_pois else 0.0
     )
     avg_hacker_hack = (
-        float(np.mean(completed_hacker_hack[-100:]))
-        if completed_hacker_hack
-        else 0.0
+        float(np.mean(completed_hacker_hack[-100:])) if completed_hacker_hack else 0.0
     )
     avg_muscle_neut = (
         float(np.mean(completed_muscle_neutralize[-100:]))
@@ -1387,6 +1451,8 @@ def train(
         "max_stage_steps": stage_max_steps,
         "avg_alarm": avg_alarm,
         "stage_alarm_max": stage_alarm_max,
+        "her_goal_reach_rate": last_her_reach_rate,
+        "her_avg_goal_distance": last_her_avg_dist,
         "scout_interact_rate": avg_scout_int,
         "scout_avg_pois_tagged": avg_scout_pois,
         "hacker_hack_rate": avg_hacker_hack,
@@ -1430,6 +1496,14 @@ if __name__ == "__main__":
     parser.add_argument(
         "--load-ckpt", type=str, default=None, help="Path to checkpoint to load"
     )
+    parser.add_argument(
+        "--rust",
+        "--use-rust",
+        dest="rust",
+        action="store_true",
+        default=False,
+        help="Use high-throughput native Rust environment",
+    )
     args = parser.parse_args()
 
     train(
@@ -1440,4 +1514,5 @@ if __name__ == "__main__":
         save_ckpt_dir=args.save_dir,
         log_dir=args.save_dir,
         seed=args.seed,
+        use_rust=args.rust,
     )

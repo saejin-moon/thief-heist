@@ -5,16 +5,29 @@ build/
 dist/
 wheels/
 *.egg-info
+*.so
+*.dylib
+*.dll
 
 # Virtual environments
 .venv
 
+# Rust build artifacts
+target/
+**/target/
+rust/target/
+
 # repomix
 *.xml
 
-# results
-results/
+# Checkpoints and logs
 checkpoints/
-
-# logs
 *.log
+results/**/*.log
+results/**/*.pt
+results/**/model.pt
+
+# Track results JSON files
+results/*
+!results/**/
+!results/**/*.json
