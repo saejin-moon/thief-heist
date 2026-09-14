@@ -252,9 +252,9 @@ uv run python -m unittest discover -s tests
 This project is licensed under the MIT License.
 
 ```bibtex
-@article{moon2025thief,
+@article{moon2026thief,
   title={THIEF: Targeted Hysteresis-routed Incubated Evolution via Fisher-geometry for Heterogeneous Multi-Agent Coordination},
   author={Sae-Jin Moon},
-  year={2025}
+  year={2026}
 }
 ```
