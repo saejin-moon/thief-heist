@@ -5,7 +5,7 @@ build-backend = "maturin"
 [project]
 name = "thief-heist"
 version = "0.1.0"
-description = "THIEF: Targeted Hysteresis-routed Incubated Evolution via Fisher-geometry in the HEIST Multi-Agent RL Benchmark"
+description = "THIEF in HEIST: Dynamic Mixture-of-Experts for Heterogeneous Multi-Agent Cooperation"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }

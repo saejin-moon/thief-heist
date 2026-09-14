@@ -1,4 +1,4 @@
-# HEIST & THIEF: Multi-Agent RL Benchmark and Dynamic Mixture-of-Experts
+# THIEF in HEIST: Dynamic Mixture-of-Experts for Heterogeneous Multi-Agent Cooperation
 
 [![Rust Engine](https://img.shields.io/badge/Engine-Native%20Rust%20Rayon-orange.svg)](src/rs)
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](src/py)
@@ -253,7 +253,7 @@ This project is licensed under the MIT License.
 
 ```bibtex
 @article{moon2026thief,
-  title={THIEF: Targeted Hysteresis-routed Incubated Evolution via Fisher-geometry for Heterogeneous Multi-Agent Coordination},
+  title={THIEF in HEIST: Dynamic Mixture-of-Experts for Heterogeneous Multi-Agent Cooperation},
   author={Sae-Jin Moon},
   year={2026}
 }
