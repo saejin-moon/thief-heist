@@ -8,8 +8,8 @@ ablation table into paper/tables/ablation.tex.
 
 Variants:
   - none:           Full THIEF (control)
-  - no_incubation:  w/o incubation (tau_iso = 0, child skips sandbox)
-  - uniform_recomb: w/o Fisher geometry (uniform parameter recombination)
+  - no_incubation:  w/o warmup (tau_iso = 0, child joins pool immediately)
+  - uniform_recomb: w/o weighted recombination (uniform parameter blend)
   - clone_best:     clone-best-parent (child = best parent + noise)
   - no_balance:     w/o load balancing (alpha_bal = 0)
   - no_hysteresis:  w/o hysteresis (epsilon = 0)
@@ -42,8 +42,8 @@ ABLATION_VARIANTS = [
 
 VARIANT_META = {
     "none":           ("Full THIEF", "nothing ablated"),
-    "no_incubation":  ("w/o incubation", r"$\tau_{\mathrm{iso}}=0$ (child skips sandbox)"),
-    "uniform_recomb": ("w/o Fisher geometry", "uniform recombination"),
+    "no_incubation":  ("w/o warmup", r"$\tau_{\mathrm{iso}}=0$ (child joins pool immediately)"),
+    "uniform_recomb": ("w/o weighted recombination", "uniform recombination"),
     "clone_best":     ("clone-best-parent", r"child $=$ best parent $+$ noise"),
     "no_balance":     (r"w/o load balancing", r"$\alpha_{\mathrm{bal}}=0$"),
     "no_hysteresis":  ("w/o hysteresis", r"$\epsilon=0$"),

@@ -186,35 +186,35 @@ ECOOP_NUM_ENVS = 16
 ECOOP_EVOLUTION_INTERVAL = 125
 ECOOP_GRACE_UPDATES = 10
 ECOOP_CULL_WINDOW_UPDATES = (
-    20  # Consecutive 0% usage updates before an expert goes extinct
+    20  # Consecutive 0% usage updates before pruning inactive expert
 )
-ECOOP_MUTATION_NOISE = 0.03  # Calibrated micro-exploration along flat Fisher manifolds
+ECOOP_MUTATION_NOISE = 0.03  # Exploration noise scale for spawned experts
 ECOOP_CROSSOVER_DAMPING = 1e-4
 ECOOP_MUTANT_ENVS = (
-    4  # 4 dedicated envs for the mutant during grace period (25% of 16 envs)
+    4  # Dedicated environments for new expert during warmup (25% of 16 envs)
 )
 ECOOP_HYSTERESIS_EPSILON = (
-    0.05  # Calibrated threshold to enforce temporal policy coherence
+    0.05  # Threshold to prevent rapid switching between experts
 )
-ECOOP_PROGRESS_COEF = 0.05  # Potential-based sub-goal progress shaping coefficient
+ECOOP_PROGRESS_COEF = 0.05  # Sub-goal progress reward coefficient
 
-# MAHIRO / H-MAPPO Specific
+# H-MAPPO Specific
 MAHIRO_INTRINSIC_REWARD_COEF = 0.015
 
 # --- THIEF ALGORITHM CONSTANTS ---
 THIEF_NUM_ENVS = 16
 THIEF_INITIAL_EXPERTS = 1
-THIEF_MAX_SANDBOX_EXPERTS = 1  # 1 dedicated specialist in sandbox
+THIEF_MAX_SANDBOX_EXPERTS = 1  # Max concurrent experts in warmup
 THIEF_ENVS_PER_MUTANT = (
-    4  # 4 dedicated environments for the child specialist (25% of cluster)
+    4  # Dedicated environments for child expert during warmup (25% of envs)
 )
 THIEF_WARMUP_UPDATES = 20
 THIEF_POST_GRACE_COOLDOWN_UPDATES = 25
 THIEF_ISOLATION_UPDATES = 10
 THIEF_TARGETED_LR = 0.08
-THIEF_MUTATION_NOISE = 0.03  # Geometry-aware mutation noise for all-pool recombination
+THIEF_MUTATION_NOISE = 0.03  # Noise scale for spawned expert parameters
 THIEF_HYSTERESIS_EPSILON = 0.05
-GOAL_VECTOR_DIM = 2  # 2D continuous unit orientation vector (ux, uy) for all MARL algos
+GOAL_VECTOR_DIM = 2  # 2D unit orientation vector (ux, uy)
 THIEF_PROGRESS_COEF = (
-    0.05  # Dense potential-based sub-goal progress shaping coefficient
+    0.05  # Sub-goal progress reward coefficient
 )

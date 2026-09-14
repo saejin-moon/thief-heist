@@ -1,6 +1,6 @@
 # MARL Benchmark Master Results Summary
 
-> **Format Note**: This document is formatted in standard GitHub Flavored Markdown with precise tabular layouts and statistical aggregates (Mean ± Std, Interquartile Mean [IQM], and 95% Bootstrap Confidence Intervals) specifically designed for direct ingestion and reasoning by Large Language Models.
+> **Format Note**: This document contains tabular benchmark results with statistical aggregates (Mean ± Std, Interquartile Mean [IQM], and 95% Bootstrap Confidence Intervals).
 
 - **Run ID**: `test_run`
 - **Generated At**: 2026-09-14 18:54:52 UTC

@@ -145,21 +145,21 @@
     \tiny stagnation: $\Delta W_{100} < 0.03$
 };
 \node[evobox, below=of plateau] (deficit) {
-    \textbf{\footnotesize Deficit Mutation}\\[-1pt]
-    \tiny failure manifold $\mathcal{D}_{\mathrm{fail}}$
+    \textbf{\footnotesize Deficit Gradient}\\[-1pt]
+    \tiny failure transitions $\mathcal{D}_{\mathrm{fail}}$
 };
 \node[evobox, below=of deficit] (fisher) {
     \textbf{\footnotesize Fisher Recombination}\\[-1pt]
     \tiny $\theta_{\mathrm{recomb}} \propto \sum_k w_k F_k \theta_k$
 };
 \node[evobox, below=of fisher] (incubate) {
-    \textbf{\footnotesize Sandbox Incubation}\\[-1pt]
+    \textbf{\footnotesize Expert Warmup}\\[-1pt]
     \tiny $25\%$ env.\ shards, $\tau_{\mathrm{iso}}=10$
 };
 
 \node[above=0.28cm of plateau, align=center] (col3_title) {
-    \textbf{\small 3. Evolutionary Engine}\\[-2pt]
-    {\scriptsize\itshape open-ended incubation}
+    \textbf{\small 3. Expert Spawning Engine}\\[-2pt]
+    {\scriptsize\itshape dynamic warmup}
 };
 
 \begin{scope}[on background layer]

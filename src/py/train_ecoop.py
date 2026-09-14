@@ -1,6 +1,5 @@
 """
-E-COOP: Evolutionary Confidence-Oriented Option Pool
-Combines decentralized Critic confidence bidding with FIM-guided genetic mutation and routing hysteresis.
+E-COOP: Mixture of experts with value-bidding routing, expert spawning, and switching hysteresis.
 """
 
 import collections
@@ -782,7 +781,7 @@ def train(
                     best_val = mean_v
                     best_expert = k
 
-            # Option A: Cull extinct experts (inactive for >= ECOOP_CULL_WINDOW_UPDATES)
+            # Option A: Prune inactive experts (>= ECOOP_CULL_WINDOW_UPDATES updates without usage)
             culled_indices = [
                 k
                 for k in range(active_experts)
@@ -796,7 +795,7 @@ def train(
                     k for k in range(active_experts) if k not in culled_indices
                 ]
                 cull_names = ", ".join(f"E{c}" for c in culled_indices)
-                cull_msg = f"[Evolution Event] Update: {update} | Culled {len(culled_indices)} extinct expert(s) ({cull_names}) inactive for >= {ECOOP_CULL_WINDOW_UPDATES} updates"
+                cull_msg = f"[Pruning] Update {update} | Pruned {len(culled_indices)} inactive expert(s) ({cull_names}) (>= {ECOOP_CULL_WINDOW_UPDATES} updates without usage)"
                 console_logger.info(cull_msg)
                 if file_logger:
                     file_logger.info(cull_msg)
@@ -834,9 +833,9 @@ def train(
                     i: survivor_mean_vals[i] for i in range(active_experts)
                 }
 
-            # ... rest of crossover block only runs if do_crossover is still True
+            # ... rest of spawn block only runs if do_crossover is still True
             if do_crossover:
-                # Dynamic Pool Growth: Spawn fresh mutant into newly appended slot
+                # Dynamic Pool Growth: Spawn new expert into newly appended slot
                 parent_pool_size = active_experts
                 new_expert = agent.add_expert()
                 optimizer.add_param_group(
@@ -853,11 +852,11 @@ def train(
                     "replaced_expert": None,
                     "active_experts": active_experts,
                     "total_spawns": total_spawns,
-                    "crossover_type": "all_pool_fisher_recombination",
+                    "crossover_type": "all_pool_recombination",
                 }
                 spawn_history.append(event_record)
 
-                msg = f"[Evolution Event] Update: {update} | Spawned E{new_expert} via All-Pool Fisher Recombination (top E{best_expert}, val={best_val:.3f}) | Active Pool: {active_experts} experts | Total Spawns: {total_spawns}"
+                msg = f"[Spawn] Update {update} | Spawned E{new_expert} from E{best_expert} (val={best_val:.3f}) | Active pool: {active_experts} experts | Total spawns: {total_spawns}"
                 console_logger.info(msg)
                 if file_logger:
                     file_logger.info(msg)
@@ -869,7 +868,7 @@ def train(
                 )
                 fitness_weights = torch.softmax(val_tensor, dim=0).numpy()
 
-                # 2. Clone Championship Critic and Perform All-Pool Fisher-Weighted Recombination on Actor
+                # 2. Copy best critic and recombine actor parameters
                 agent.experts[new_expert].critic.load_state_dict(
                     agent.experts[best_expert].critic.state_dict()
                 )
@@ -904,14 +903,14 @@ def train(
                         # Recombined parameter
                         recombined = weighted_param_sum / (weight_denom + 1e-8)
 
-                        # Geometry-Aware Mutation strictly on Actor Offspring
+                        # Parameter perturbation
                         scale = torch.clamp(
                             1.0 / (torch.sqrt(f_combined) + 1e-8), max=10.0
                         )
                         noise = torch.randn_like(param) * scale * ECOOP_MUTATION_NOISE
                         param.copy_(recombined + noise)
 
-                # Adam Cold-Start: clear stale momentum for the new mutant
+                # Initialize optimizer state for new expert
                 for p in agent.experts[new_expert].parameters():
                     if p in optimizer.state:
                         del optimizer.state[p]

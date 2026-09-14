@@ -1,8 +1,6 @@
 """
-THIEF: Targeted Hysteresis-routed Incubated Evolution via Fisher-geometry.
-CleanRL-style implementation of decentralized value-bidding multi-agent RL with
-dynamic environment sharding, win-rate plateau-triggered spawning, all-pool Fisher
-information geometry recombination, FIFO incubation queue, and post-grace cooldown.
+THIEF: Value-bidding multi-agent RL with dynamic expert spawning,
+parameter recombination, warmup queue, and switching hysteresis.
 """
 
 import collections
@@ -162,10 +160,10 @@ class ThiefNetwork(nn.Module):
     ):
         """
         Executes routing and policy forward passes across the expert pool conditioned on mission targets.
-        Implements Dynamic Environment Sharding & Dormancy Freezing:
-        - When grace_experts is empty: 100% of environments run competitive bidding across active, non-dormant experts.
-        - When M mutants incubate: each occupies 2 dedicated sandbox envs (max 8 envs),
-          leaving all remaining (16 - 2M) envs for general competitive bidding.
+        Environment routing:
+        - When grace_experts is empty: all environments run competitive bidding across active, non-dormant experts.
+        - When new experts are warming up: each occupies dedicated warmup envs,
+          leaving remaining envs for general competitive bidding.
         - Dormant experts are excluded from candidate bidding without altering expert tensor indices.
         """
         batch_size = obs.shape[0]
@@ -261,7 +259,7 @@ class ThiefNetwork(nn.Module):
             else:
                 chosen_expert = best_idx
 
-            # Dynamic Sandbox Incubation Routing across 16 environments
+            # Warmup routing across environments
             if grace_list:
                 env_ids = torch.arange(batch_size, device=obs.device) % num_envs
                 num_active_mutants = min(THIEF_MAX_SANDBOX_EXPERTS, len(grace_list))
@@ -313,8 +311,8 @@ class ThiefNetwork(nn.Module):
 
 def update_optimizer_params(old_optimizer, agent, lr=LR):
     """
-    Preserves Adam's 1st moment (exp_avg) and 2nd moment (exp_avg_sq) for all surviving
-    expert parameters across evolutionary events, and cleanly zero-initializes new mutant parameters.
+    Preserves Adam moments for existing expert parameters across spawn events,
+    and initializes optimizer state for new expert parameters.
     """
     new_optimizer = torch.optim.Adam(agent.parameters(), lr=lr, eps=1e-5)
     if old_optimizer is not None:
@@ -406,19 +404,15 @@ def spawn_targeted_specialist(
     ablation="none",
 ):
     """
-    Spawn a child that:
-    1. Recombined across the pool (Fisher-weighted blend of all parents)
-    2. Targeted push toward failure transitions (deficit gradient)
-    3. Geometry-aware exploration noise (inverse Fisher)
-    Cold-start critic.
+    Spawn a new expert:
+    1. Recombine parameters across parent experts (weighted by value estimates and Fisher diagonal)
+    2. Gradient step toward failure transitions (deficit gradient)
+    3. Scaled exploration noise
+    New critic initialized from scratch.
 
     Ablation variants:
-    - 'uniform_recomb': replace Fisher-weighted recombination with a uniform
-      parameter average over parents (weights w_k = 1/K, identity geometry,
-      isotropic mutation noise). Isolates the contribution of Fisher curvature.
-    - 'clone_best': child actor = best parent's actor + isotropic noise (no
-      recombination, no deficit push). Isolates recombination per se from
-      E-COOP-style best-parent cloning.
+    - 'uniform_recomb': uniform parameter average over parents (weights w_k = 1/K, isotropic noise).
+    - 'clone_best': child actor = best parent actor + noise.
     """
     dormant_set = set(dormant_experts) if dormant_experts is not None else set()
     parent_candidates = [
@@ -531,7 +525,7 @@ def spawn_targeted_specialist(
     # --- Initialize child actor ---
     if ablation == "clone_best":
         # Ablation: child = best parent + isotropic noise (no recombination,
-        # no deficit push). Mirrors E-COOP-style best-parent cloning.
+        # no deficit push).
         with torch.no_grad():
             for name, param in agent.experts[c_idx].actor.named_parameters():
                 parent_param = dict(agent.experts[best_parent].actor.named_parameters())[name].data
@@ -541,8 +535,8 @@ def spawn_targeted_specialist(
     with torch.no_grad():
         for name, param in agent.experts[c_idx].actor.named_parameters():
             if ablation == "uniform_recomb":
-                # Ablation: uniform parameter average over parents (equal weights,
-                # identity geometry) + targeted deficit push + isotropic noise.
+                # Ablation: uniform parameter average over parents (equal weights)
+                # + targeted deficit push + isotropic noise.
                 param_sum = torch.zeros_like(param)
                 for rel_idx, k in enumerate(parent_candidates):
                     param_k = dict(agent.experts[k].actor.named_parameters())[name].data
@@ -564,7 +558,7 @@ def spawn_targeted_specialist(
                 param.copy_(targeted + noise)
                 continue
 
-            # 1. All-pool Fisher-weighted recombination
+            # 1. Parameter recombination across parents
             weighted_sum = torch.zeros_like(param)
             weight_denom = torch.zeros_like(param)
             f_combined = torch.zeros_like(param)
@@ -596,7 +590,7 @@ def spawn_targeted_specialist(
             )
             targeted = recombined - (THIEF_TARGETED_LR * deficit_p)
 
-            # 3. Geometry-aware exploration noise
+            # 3. Exploration noise
             scale = torch.clamp(1.0 / (torch.sqrt(f_combined) + 1e-8), max=10.0)
             noise = torch.randn_like(param) * scale * THIEF_MUTATION_NOISE
             param.copy_(targeted + noise)
@@ -668,9 +662,8 @@ def train(
     engine_tag = "Native Rust Rayon" if use_rust else "Python Multiprocessing"
     ablation_tag = f" | Ablation: {ablation}" if ablation != "none" else ""
     msg = (
-        f"Training {algo_name} Stage {stage_idx} (Seed {seed}) on {device} ("
-        f"16 Envs | {engine_tag} | Dynamic Sharding | Pool Doubling | FIFO Queue | 30-Update Post-Grace Cooldown"
-        f"{ablation_tag})..."
+        f"Training {algo_name} Stage {stage_idx} (Seed {seed}) on {device} "
+        f"({num_envs} envs, {engine_tag}{ablation_tag})..."
     )
     console_logger.info(msg)
     if file_logger:
@@ -737,7 +730,7 @@ def train(
             active_bidding = active_experts - len(dormant_experts)
             msg = (
                 f"Loaded checkpoint from {load_ckpt_path} "
-                f"(Active bidding specialists: {active_bidding}/{active_experts}, total spawns: {total_spawns})"
+                f"(Active experts: {active_bidding}/{active_experts}, total spawns: {total_spawns})"
             )
             console_logger.info(msg)
             if file_logger:
@@ -1168,7 +1161,7 @@ def train(
                 last_grad_norm = nn.utils.clip_grad_norm_(agent.parameters(), 0.5).item()
                 optimizer.step()
 
-        # Lifecycle Step A: Sandbox Incubation Progression & Queue Processing
+        # Step A: Warmup progression & queue processing
         isolation_window = (
             min(THIEF_ISOLATION_UPDATES, max(5, int(0.15 * num_updates)))
             if num_updates
@@ -1184,14 +1177,14 @@ def train(
         if graduated_this_update:
             grad_names = ", ".join(f"E{i}" for i in graduated_this_update)
             msg = (
-                f"[Incubation Event] Update: {update} | Mutant(s) ({grad_names}) "
-                f"completed {THIEF_ISOLATION_UPDATES} sandbox updates. Calibrated Critics promoted to general bidding pool!"
+                f"[Promotion] Update {update} | Expert(s) ({grad_names}) "
+                f"completed warmup ({THIEF_ISOLATION_UPDATES} updates) -> added to bidding pool"
             )
             console_logger.info(msg)
             if file_logger:
                 file_logger.info(msg)
 
-        # Pull from incubation queue into newly opened sandbox slots
+        # Pull from warmup queue into newly opened slots
         while (
             len(active_sandbox_mutants) < THIEF_MAX_SANDBOX_EXPERTS
             and len(incubation_queue) > 0
@@ -1199,14 +1192,14 @@ def train(
             next_m = incubation_queue.pop(0)
             active_sandbox_mutants[next_m] = 0
             msg = (
-                f"[Queue Event] Update: {update} | Mutant E{next_m} entered sandbox incubator "
+                f"[Warmup Queue] Update {update} | Expert E{next_m} entered warmup "
                 f"({len(active_sandbox_mutants)} active, {len(incubation_queue)} waiting in queue)"
             )
             console_logger.info(msg)
             if file_logger:
                 file_logger.info(msg)
 
-        # Mark last_grace_end_update timestamp when entire cohort has graduated
+        # Mark last_grace_end_update timestamp when entire cohort has finished warmup
         if (
             graduated_this_update
             and len(active_sandbox_mutants) == 0
@@ -1214,28 +1207,28 @@ def train(
         ):
             last_grace_end_update = update
             msg = (
-                f"[Incubation Complete] Update: {update} | All mutants graduated! "
-                f"Enforcing {THIEF_POST_GRACE_COOLDOWN_UPDATES}-update cooldown before next deficit trigger."
+                f"[Warmup Complete] Update {update} | All experts active. "
+                f"Enforcing {THIEF_POST_GRACE_COOLDOWN_UPDATES}-update cooldown before next trigger."
             )
             console_logger.info(msg)
             if file_logger:
                 file_logger.info(msg)
 
-        # Dynamic Dormancy Check:
+        # Inactive expert check:
         for k in range(active_experts):
             if k in dormant_experts:
                 continue
             if expert_consecutive_zero_usage[k] >= dynamic_cull_window:
                 dormant_experts.add(k)
                 msg = (
-                    f"[Dormancy Event] Update: {update} | Expert E{k} entered Dormant State "
-                    f"(0% usage for >= {dynamic_cull_window} updates). Preserved in memory, excluded from bidding."
+                    f"[Pruning] Update {update} | Deactivating expert E{k} "
+                    f"(0% usage for >= {dynamic_cull_window} updates)"
                 )
                 console_logger.info(msg)
                 if file_logger:
                     file_logger.info(msg)
 
-        # Lifecycle Step B: Win-Rate Plateau Spawning Check
+        # Step B: Win-rate plateau spawning check
         if not active_sandbox_mutants and not incubation_queue:
             if ablation == "fixed_schedule":
                 # Ablation: bypass plateau detection; spawn on a fixed cadence instead.
@@ -1279,10 +1272,8 @@ def train(
                 optimizer = update_optimizer_params(optimizer, agent, lr=LR)
 
                 if ablation == "no_incubation":
-                    # Ablation: child skips sandbox incubation entirely and joins the
+                    # Ablation: child skips warmup entirely and joins the
                     # global bidding pool with its cold-start critic immediately.
-                    # The post-spawn cooldown is still enforced so spawning frequency
-                    # is comparable to the incubated baseline.
                     last_grace_end_update = update
                 elif len(active_sandbox_mutants) < THIEF_MAX_SANDBOX_EXPERTS:
                     active_sandbox_mutants[c_idx] = 0
@@ -1304,12 +1295,12 @@ def train(
                 )
 
                 trigger_name = (
-                    "Fixed-Schedule Event" if ablation == "fixed_schedule" else "Win-Rate Plateau Event"
+                    "Fixed-Schedule Event" if ablation == "fixed_schedule" else "Plateau Event"
                 )
                 msg = (
-                    f"[{trigger_name}] Update: {update} | "
-                    f"Spawned targeted specialist E{c_idx} from parent E{best_parent} (Pool: {old_count} -> {active_experts} experts) | "
-                    f"Active Sandbox Mutants: {list(active_sandbox_mutants.keys())}, Queue: {incubation_queue}"
+                    f"[{trigger_name}] Update {update} | "
+                    f"Spawned expert E{c_idx} from parent E{best_parent} (Pool: {old_count} -> {active_experts} experts) | "
+                    f"In warmup: {list(active_sandbox_mutants.keys())}, Queue: {incubation_queue}"
                 )
                 console_logger.info(msg)
                 if file_logger:

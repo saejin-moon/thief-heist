@@ -22,12 +22,12 @@ To isolate the contribution of each core mechanism, we re-train THIEF standalone
 
 The ablated variants are:
 \begin{itemize}[leftmargin=*,nosep]
-    \item \textbf{w/o incubation} ($\tau_{\text{iso}}=0$): spawned children skip sandbox sharding and join the global bidding pool immediately with cold-start critics.
-    \item \textbf{w/o Fisher geometry}: parent recombination uses uniform parameter averaging with identity geometry and isotropic mutation noise, removing curvature weighting and the inverse-Fisher exploration scaling.
-    \item \textbf{clone-best-parent}: the child actor is a perturbed copy of the single best parent (no pool recombination, no deficit push), isolating recombination per se from E-COOP-style cloning.
-    \item \textbf{w/o load balancing} ($\alpha_{\text{bal}}=0$): the anti-monopoly regularizer of Section~\ref{sec:thief} is removed, testing the entropy bound of Proposition~\ref{prop:entropy}.
-    \item \textbf{w/o hysteresis} ($\epsilon=0$): the routing barrier is disabled, removing temporal coherence enforcement.
-    \item \textbf{fixed-schedule spawning}: the win-rate plateau trigger is bypassed in favor of spawning on a fixed cadence, holding pool size dynamics comparable.
+    \item \textbf{w/o warmup} ($\tau_{\text{iso}}=0$): spawned children skip isolated warmup environments and join the global bidding pool immediately with uncalibrated critics.
+    \item \textbf{w/o Fisher geometry}: parent recombination uses uniform parameter averaging with isotropic noise, removing curvature weighting and inverse-Fisher exploration scaling.
+    \item \textbf{clone-best-parent}: the child actor is a perturbed copy of the best parent (no pool recombination, no deficit gradient push), isolating recombination from single-parent cloning.
+    \item \textbf{w/o load balancing} ($\alpha_{\text{bal}}=0$): the load-balancing regularizer of Section~\ref{sec:thief} is removed.
+    \item \textbf{w/o hysteresis} ($\epsilon=0$): the routing barrier is disabled.
+    \item \textbf{fixed-schedule spawning}: the win-rate plateau trigger is bypassed in favor of spawning on a fixed cadence.
 \end{itemize}
 
 \InputIfFileExists{tables/ablation}{}{}

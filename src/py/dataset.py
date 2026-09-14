@@ -937,5 +937,5 @@ def generate_master_summary_report(
     with open(primary_json, "w") as f:
         json.dump(master_dict, f, indent=2)
 
-    print(f"\n[Master Report] Auto-generated LLM-digestible benchmark summary in:\n  -> {primary_md}\n  -> {paper_md}\n  -> {primary_json}\n")
+    print(f"\n[Master Report] Auto-generated benchmark summary in:\n  -> {primary_md}\n  -> {paper_md}\n  -> {primary_json}\n")
     return master_dict
