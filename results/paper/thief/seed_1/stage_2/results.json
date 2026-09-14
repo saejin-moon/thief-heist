@@ -1,0 +1,88 @@
+{
+    "algo": "thief",
+    "stage": 2,
+    "win_rate": 0.86,
+    "lifetime_win_rate": 0.7632231404958678,
+    "mean_reward": 16.95997333796462,
+    "avg_episode_steps": 175.85,
+    "max_stage_steps": 900,
+    "avg_alarm": 37.141002645492556,
+    "stage_alarm_max": 125.0,
+    "scout_interact_rate": 1.0,
+    "scout_avg_pois_tagged": 5.5,
+    "hacker_hack_rate": 0.98,
+    "muscle_neutralize_rate": 0.98,
+    "muscle_avg_guards_neutralized": 1.93,
+    "total_stage_guards": 2,
+    "extractor_loot_rate": 0.95,
+    "avg_agents_at_extract": 3.73,
+    "active_experts": 7,
+    "dormant_experts": [],
+    "total_spawns": 6,
+    "expert_switch_rate": 1.3269904857285928,
+    "expert_usage_pct": {
+        "0": 27.5,
+        "1": 29.6,
+        "2": 0.7,
+        "3": 11.0,
+        "4": 13.2,
+        "5": 16.6,
+        "6": 1.5
+    },
+    "spawn_history": [
+        {
+            "update": 25,
+            "parent_expert": 0,
+            "child_expert": 1,
+            "parent_value": 2.396235227584839,
+            "active_experts": 2,
+            "total_spawns": 1,
+            "trigger": "win_rate_plateau"
+        },
+        {
+            "update": 27,
+            "parent_expert": 0,
+            "child_expert": 2,
+            "parent_value": 3.7839341163635254,
+            "active_experts": 3,
+            "total_spawns": 2,
+            "trigger": "win_rate_plateau"
+        },
+        {
+            "update": 62,
+            "parent_expert": 0,
+            "child_expert": 3,
+            "parent_value": 3.990062713623047,
+            "active_experts": 4,
+            "total_spawns": 3,
+            "trigger": "win_rate_plateau"
+        },
+        {
+            "update": 102,
+            "parent_expert": 0,
+            "child_expert": 4,
+            "parent_value": 4.792761325836182,
+            "active_experts": 5,
+            "total_spawns": 4,
+            "trigger": "win_rate_plateau"
+        },
+        {
+            "update": 137,
+            "parent_expert": 0,
+            "child_expert": 5,
+            "parent_value": 5.367815971374512,
+            "active_experts": 6,
+            "total_spawns": 5,
+            "trigger": "win_rate_plateau"
+        },
+        {
+            "update": 172,
+            "parent_expert": 0,
+            "child_expert": 6,
+            "parent_value": 4.746406555175781,
+            "active_experts": 7,
+            "total_spawns": 6,
+            "trigger": "win_rate_plateau"
+        }
+    ]
+}

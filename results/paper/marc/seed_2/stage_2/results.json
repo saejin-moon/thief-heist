@@ -1,0 +1,19 @@
+{
+    "algo": "marc",
+    "stage": 2,
+    "win_rate": 0.77,
+    "lifetime_win_rate": 0.7382663847780127,
+    "mean_reward": 15.134308363271412,
+    "avg_episode_steps": 204.41,
+    "max_stage_steps": 900,
+    "avg_alarm": 40.613581066131594,
+    "stage_alarm_max": 125.0,
+    "scout_interact_rate": 1.0,
+    "scout_avg_pois_tagged": 5.52,
+    "hacker_hack_rate": 0.96,
+    "muscle_neutralize_rate": 0.99,
+    "muscle_avg_guards_neutralized": 1.94,
+    "total_stage_guards": 2,
+    "extractor_loot_rate": 0.87,
+    "avg_agents_at_extract": 3.61
+}

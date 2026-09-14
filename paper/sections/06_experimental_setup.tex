@@ -1,0 +1,30 @@
+\section{Experimental Setup}
+\label{sec:setup}
+
+\subsection{Curriculum Design \& Scaling Dimensions}
+The HEIST benchmark evaluates policy transfer and architectural adaptation across a progressive five-stage curriculum (Table~\ref{tab:stage_specs}). Spatial dimensions expand from compact $11 \times 11$ grids with zero security elements (Stage 0) to complex $50 \times 50$ facility floorplans featuring 4 patrolling guards, 3 sweeping cameras, 4 locked doors, and maximum horizon $T_{\max} = 5,\!000$ (Stage 4). Network checkpoints from each preceding stage serve as parameter initializations for subsequent stages, testing the algorithm's capability to incorporate new operational constraints without succumbing to catastrophic policy degradation. Training budgets scale across the curriculum ($2 \times 10^5$ to $1.6 \times 10^6$ environment steps per stage for Stages 0--4; $3.4 \times 10^6$ in total per seed), and per-stage update counts for all algorithms are listed in Table~\ref{tab:hyperparameters}.
+
+\input{tables/stage_specs}
+
+\subsection{Evaluated Methods: Iterative Lineage and External Baselines}
+Our empirical benchmark evaluates seven algorithms partitioned into two distinct categories:
+
+\paragraph{Iterative Method Lineage (Ours):}
+\begin{enumerate}[leftmargin=*,nosep]
+    \item \textbf{MARC (Iteration 1: Credit Assignment):} Monolithic PPO augmented with affordance-aware potential-based reward shaping for heterogeneous subtasks.
+    \item \textbf{COOP (Iteration 2: Static MoE):} Introduces multi-expert capacity with $K=2$ fixed experts and unconstrained scalar value bidding, devoid of evolutionary or incubation mechanisms.
+    \item \textbf{E-COOP (Iteration 3: Macro Ablation):} Evolutionary PPO employing periodic Fisher-weighted crossover with \emph{critic cloning} (the child inherits the champion's value network) targeting a single elite champion ($K=1$).
+    \item \textbf{THIEF (Ours, Final Framework):} Open-ended evolutionary MoE with plateau triggering, failure deficit mutation, all-pool Fisher recombination, isolated sandbox incubation, and load-balancing regularization.
+\end{enumerate}
+
+\paragraph{External MARL Baselines:}
+\begin{enumerate}[leftmargin=*,nosep]
+    \item \textbf{MAPPO}~\cite{yu2022surprising}: Centralized Training with Decentralized Execution PPO utilizing a shared centralized value function with Generalized Advantage Estimation (GAE).
+    \item \textbf{H-MAPPO / MAHIRO}~\cite{vezhnevets2017feudal}: Two-level hierarchical architecture where a high-level Manager policy generates 2D directional sub-goals every $\Delta t = 5$ steps for low-level execution policies.
+    \item \textbf{COMA}~\cite{foerster2018counterfactual}: Counterfactual Multi-Agent Policy Gradients using a centralized state-action critic $Q(s, \mathbf{u})$ to marginalize individual agent actions.
+\end{enumerate}
+
+\subsection{Implementation \& Hardware Throughput}
+All models share identical architectural backbones: 2-layer MLPs with 64 hidden units and Tanh activations (Table~\ref{tab:hyperparameters}). The HEIST environment engine is written in native multi-threaded Rust using Rayon for parallel pathfinding and line-of-sight raytracing, bridged to PyTorch CUDA tensors via PyO3 with zero-copy contiguous buffer transfers. The raw simulation engine sustains approximately $11,\!200$--$12,\!100$ environment steps per second across the five curriculum stages for single-network policies (measured over $N=1,\!000$-episode evaluation batches across 16 parallel shards on an NVIDIA RTX GPU); algorithm-specific forward-pass overhead (e.g., multi-expert bidding in THIEF) reduces end-to-end throughput proportionally.
+
+All methods use checkpoint transfer between consecutive curriculum stages, and evaluation is performed over $1,\!000$ held-out episodes per training seed across 3 seeds ($3,\!000$ evaluation episodes per algorithm--stage pair), reporting per-seed means and standard deviations across seeds. Expert routing during evaluation is greedy (argmax over value bids with hysteresis), and actions are sampled from the masked policy categorical distributions.

@@ -1,0 +1,38 @@
+% Auto-generated against src/py/constants.py and trainer implementations. Do not edit manually.
+\begin{table}[t]
+\centering
+\caption{Universal training and architectural hyperparameters across all evaluated MARL algorithms (verified against the reference implementation). Environment- and algorithm-specific values are noted where they differ.}
+\label{tab:hyperparameters}
+\vspace{0.06in}
+\footnotesize
+\begin{tabular}{ll}
+\toprule
+\textbf{Hyperparameter} & \textbf{Value} \\
+\midrule
+Actor Network Architecture & 2-layer MLP ($[49+4+2] \rightarrow 64 \rightarrow 64 \rightarrow 6$), Tanh \\
+Critic Network Architecture & 2-layer MLP ($[2,\!550+4+2] \rightarrow 64 \rightarrow 64 \rightarrow 1$), Tanh \\
+Optimizer & Adam ($\text{lr} = 2.5 \times 10^{-4}$, $\epsilon = 10^{-5}$) \\
+PPO Clip Ratio ($\epsilon_{\text{clip}}$) & 0.20 \\
+Discount Factor ($\gamma$) & 0.99 \\
+GAE Parameter ($\lambda_{\text{gae}}$) & 0.95 \\
+PPO Epochs per Update & 4 \\
+Mini-batches per Update & 4 (batch size / 4) \\
+Entropy / Value Coefficients & 0.01 / 0.5 \\
+Rollout Horizon ($T$) & 125 steps (all stages) \\
+Vectorized Environments & 16 (THIEF, E-COOP); 8 (all other methods) \\
+Updates per Stage & 100/100/250/450/800 (THIEF, 16 envs); $2\times$ more for 8-env baselines \\\
+Training Budget per Stage & $2/2/5/9/16 \times 10^5$ env.\ steps (Stages 0--4) \\
+\midrule
+\multicolumn{2}{l}{\emph{THIEF-specific}} \\
+Hysteresis Barrier ($\epsilon$) & 0.05 \\
+Plateau Trigger ($\Delta_{\text{win}}$) & $< 0.03$ over the last 100 episodes ($\ge$ 200 recorded) \\
+Spawning Ceiling & suppressed when recent win rate $\ge 0.90$ \\
+Incubation Duration ($\tau_{\text{iso}}$) & 10 updates (4 of 16 environments, 25\%) \\
+Fisher Decay ($\beta$) & 0.99 \\
+Mutation Noise Scale & 0.03 \\
+Targeted Deficit Learning Rate ($\eta_{\text{def}}$) & 0.08 \\
+Load-Balancing Coefficient ($\alpha_{\text{bal}}$) & 0.01 \\
+Dormancy Cull Window ($\tau_{\text{cull}}$) & $\max(60,\, 0.4\,T_{\text{upd}})$ zero-usage updates \\
+\bottomrule
+\end{tabular}
+\end{table}

@@ -1,0 +1,22 @@
+{
+    "algo": "hmappo",
+    "stage": 3,
+    "win_rate": 0.14,
+    "lifetime_win_rate": 0.1238390092879257,
+    "mean_reward": -1.1478392316249666,
+    "avg_episode_steps": 1229.94,
+    "max_stage_steps": 2000,
+    "avg_alarm": 96.85383331298829,
+    "stage_alarm_max": 150.0,
+    "scout_interact_rate": 0.99,
+    "scout_avg_pois_tagged": 4.54,
+    "hacker_hack_rate": 0.45,
+    "muscle_neutralize_rate": 0.93,
+    "muscle_avg_guards_neutralized": 2.31,
+    "total_stage_guards": 3,
+    "extractor_loot_rate": 0.31,
+    "avg_agents_at_extract": 0.9,
+    "avg_goal_distance": 19.445673372389756,
+    "worker_loss": 0.08763371407985687,
+    "manager_loss": 0.1458534151315689
+}

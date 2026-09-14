@@ -1,16 +1,43 @@
+[build-system]
+requires = ["maturin>=1.5,<2.0"]
+build-backend = "maturin"
+
 [project]
-name = "ecoop-heist"
+name = "thief-heist"
 version = "0.1.0"
-description = "MARL environment and algorithm"
+description = "THIEF: Targeted Hysteresis-routed Incubated Evolution via Fisher-geometry in the HEIST Multi-Agent RL Benchmark"
 readme = "README.md"
-requires-python = ">=3.14"
-dependencies = [
-   # ...
-   "gymnasium>=1.3.0",
-   "numba>=0.67.0",
-   "numpy>=2.5.2",
-   "pettingzoo>=1.27.0",
-   "pytest>=9.1.1",
-   "ruff>=0.16.3",
-   "torch>=2.13.0",
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+    { name = "Saejin Moon" }
 ]
+keywords = [
+    "reinforcement-learning",
+    "multi-agent-reinforcement-learning",
+    "marl",
+    "mixture-of-experts",
+    "evolutionary-computation",
+    "rust",
+    "pyo3",
+    "pytorch",
+    "cuda",
+]
+dependencies = [
+    "gymnasium>=1.0.0",
+    "numpy>=1.24.0",
+    "torch>=2.0.0",
+    "polars>=1.0.0",
+    "pyarrow>=15.0.0",
+    "matplotlib>=3.8.0",
+    "pettingzoo>=1.24.0",
+    "pytest>=8.0.0",
+]
+
+[tool.maturin]
+manifest-path = "src/rs/Cargo.toml"
+module-name = "heist_core_rs"
+
+[tool.pytest.ini_options]
+pythonpath = ["src/py"]
+testpaths = ["tests"]

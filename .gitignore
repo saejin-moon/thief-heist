@@ -1,33 +1,43 @@
-# Python-generated files
+# Python-generated files & byte-code
 __pycache__/
 *.py[oc]
 build/
 dist/
 wheels/
-*.egg-info
+*.egg-info/
 *.so
 *.dylib
 *.dll
+.pytest_cache/
+.coverage
 
 # Virtual environments
-.venv
+.venv/
 
 # Rust build artifacts
 target/
 **/target/
-rust/target/
+src/rs/target/
 
-# repomix
-*.xml
-
-# Checkpoints and logs
+# Benchmark outputs & large binary assets
 checkpoints/
 *.log
+*.lock
+*.parquet
 results/**/*.log
 results/**/*.pt
+results/**/*.parquet
 results/**/model.pt
 
-# Track results JSON files
-results/*
-!results/**/
+# Large PDF artifacts
+*.pdf
+paper/*.pdf
+
+# Keep JSON summaries and Markdown tables tracked
 !results/**/*.json
+!results/**/*.md
+!paper/**/*.md
+!paper/tables/*.tex
+
+# Local container publishing guide
+CONTAINER.md

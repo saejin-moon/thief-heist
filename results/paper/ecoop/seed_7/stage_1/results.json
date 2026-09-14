@@ -1,0 +1,26 @@
+{
+    "algo": "ecoop",
+    "stage": 1,
+    "win_rate": 1.0,
+    "lifetime_win_rate": 0.995601552393273,
+    "mean_reward": 18.79785009900108,
+    "avg_episode_steps": 21.81,
+    "max_stage_steps": 400,
+    "avg_alarm": 16.41,
+    "stage_alarm_max": 100.0,
+    "scout_interact_rate": 1.0,
+    "scout_avg_pois_tagged": 3.18,
+    "hacker_hack_rate": 1.0,
+    "muscle_neutralize_rate": 1.0,
+    "muscle_avg_guards_neutralized": 1.0,
+    "total_stage_guards": 1,
+    "extractor_loot_rate": 1.0,
+    "avg_agents_at_extract": 4.0,
+    "active_experts": 1,
+    "total_spawns": 0,
+    "expert_switch_rate": 0.0,
+    "expert_usage_pct": {
+        "0": 100.0
+    },
+    "spawn_history": []
+}

@@ -1,0 +1,92 @@
+{
+  "metadata": {
+    "run_id": "test_run",
+    "results_root": "results",
+    "generated_at": "2026-09-14 18:54:52 UTC"
+  },
+  "benchmark_matrix": {
+    "thief": {
+      "0": {
+        "win_rate_mean": 0.0,
+        "win_rate_std": 0.0,
+        "win_rate_iqm": 0.0,
+        "win_rate_ci_95": [
+          0.0,
+          0.0
+        ],
+        "mean_return_mean": 0.0,
+        "mean_return_std": 0.0,
+        "stealth_index": 1.0,
+        "lifetime_win_pct": 0.0,
+        "num_seeds": 2
+      }
+    },
+    "ecoop": {
+      "0": {
+        "win_rate_mean": 0.0,
+        "win_rate_std": 0.0,
+        "win_rate_iqm": 0.0,
+        "win_rate_ci_95": [
+          0.0,
+          0.0
+        ],
+        "mean_return_mean": 0.0,
+        "mean_return_std": 0.0,
+        "stealth_index": 1.0,
+        "lifetime_win_pct": 0.0,
+        "num_seeds": 1
+      }
+    }
+  },
+  "tactical_matrix": {
+    "thief": {
+      "0": {
+        "scout_tag_rate": 0.0,
+        "hacker_hack_rate": 0.0,
+        "muscle_neut_rate": 0.0,
+        "extractor_loot_rate": 0.0,
+        "full_squad_extract_rate": 0.0,
+        "ghost_run_rate": 0.0,
+        "alarm_velocity": 0.0,
+        "primary_failure_cause": "general_attrition"
+      }
+    },
+    "ecoop": {
+      "0": {
+        "scout_tag_rate": 0.0,
+        "hacker_hack_rate": 0.0,
+        "muscle_neut_rate": 0.0,
+        "extractor_loot_rate": 0.0,
+        "full_squad_extract_rate": 0.0,
+        "ghost_run_rate": 0.0,
+        "alarm_velocity": 0.0,
+        "primary_failure_cause": "general_attrition"
+      }
+    }
+  },
+  "scalability_matrix": {
+    "thief": {
+      "0": {
+        "throughput_fps": 98.2,
+        "wall_clock_sec": 1.0,
+        "vram_peak_mb": 0.7,
+        "active_experts": 1.0,
+        "effective_experts": 1.0,
+        "routing_entropy": 0.0,
+        "role_expert_mi": 0.0
+      }
+    },
+    "ecoop": {
+      "0": {
+        "throughput_fps": 94.5,
+        "wall_clock_sec": 1.1,
+        "vram_peak_mb": 0.7,
+        "active_experts": 1.0,
+        "effective_experts": 1.0,
+        "routing_entropy": 0.0,
+        "role_expert_mi": 0.0
+      }
+    }
+  },
+  "ablation_matrix": {}
+}

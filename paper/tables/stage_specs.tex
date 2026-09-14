@@ -1,0 +1,19 @@
+% Auto-generated specification table for HEIST Curriculum
+\begin{table}[t]
+\centering
+\caption{HEIST benchmark curriculum stage specifications. Each stage progressively scales spatial grid dimensions, adversarial guard counts ($N_g$), perimeter cameras ($N_c$), locked security doors ($N_d$), horizon steps ($T_{\max}$), and catastrophic alarm tolerance ($\alpha_{\max}$).}
+\label{tab:stage_specs}
+\vspace{0.06in}
+\footnotesize
+\begin{tabular}{cccccccc}
+\toprule
+\textbf{Stage} & \textbf{Grid Size} & $N_g$ & $N_c$ & $N_d$ & $T_{\max}$ & $\alpha_{\max}$ & \textbf{Tactical Focus} \\
+\midrule
+0 & $11\times11$ & 0 & 0 & 0 & 300 & 100 & Basic Navigation \& Subtask Ordering \\
+1 & $17\times17$ & 1 & 0 & 1 & 400 & 100 & Single-Guard Avoidance \& Lock Bypass \\
+2 & $25\times25$ & 2 & 1 & 2 & 900 & 125 & Multi-Guard Patrol \& Camera Stealth \\
+3 & $35\times35$ & 3 & 2 & 3 & 2,000 & 150 & Labyrinthine Topology \& Alarm Convergence \\
+4 & $50\times50$ & 4 & 3 & 4 & 5,000 & 175 & Large-Scale Spatial Multi-Agent Escape \\
+\bottomrule
+\end{tabular}
+\end{table}

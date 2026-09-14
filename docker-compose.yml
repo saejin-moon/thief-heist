@@ -1,0 +1,21 @@
+version: "3.8"
+
+services:
+  benchmark:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: thief-heist:latest
+    container_name: thief-heist-benchmark
+    volumes:
+      - ./results:/app/results
+      - ./paper/tables:/app/paper/tables
+    environment:
+      - PYTHONUNBUFFERED=1
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

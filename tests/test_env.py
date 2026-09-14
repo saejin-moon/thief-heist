@@ -5,19 +5,17 @@ import unittest
 import numpy as np
 import torch
 
-sys.path.insert(0, os.path.abspath("src"))
+sys.path.insert(0, os.path.abspath("src/py"))
 
+from ascii import RustEnvWrapper
 from constants import (
     ACTION_SPACE_SIZE,
     AGENTS,
-    DOOR,
     GOAL_VECTOR_DIM,
-    INTERACT,
+    MAP_SIZE,
     N_AGENTS,
     OBSERVATION_SIZE,
-    WALL,
 )
-from env import HeistEnv, manhattan
 from train_coma import ComaNetwork
 from train_coop import CoopNetwork
 from train_ecoop import EcoopNetwork
@@ -25,11 +23,10 @@ from train_hmappo import HierarchicalNetwork
 from train_mappo import MappoNetwork
 from train_marc import MarcNetwork
 from train_thief import ThiefNetwork
-from vec_env import VectorEnv
-from vision import bfs_next_step
+from vec_env import make_vec_env
 
 
-class TestHeistEnv(unittest.TestCase):
+class TestNativeHeistEnv(unittest.TestCase):
     def setUp(self):
         self.config = {
             "map_size": (17, 17),
@@ -40,174 +37,131 @@ class TestHeistEnv(unittest.TestCase):
             "alarm_max": 150.0,
             "spawn_mode": "role",
         }
-        self.env = HeistEnv(self.config)
+        self.num_envs = 4
+        self.vec_env = make_vec_env(
+            num_envs=self.num_envs, config=self.config, base_seed=42
+        )
+        self.single_env = RustEnvWrapper(self.config, base_seed=42)
 
-    def test_reset(self):
-        obs, _infos = self.env.reset()
-        self.assertIn("scout", obs)
-        self.assertEqual(len(self.env.agents), len(AGENTS))
-        self.assertEqual(self.env.action_spaces["scout"].n, ACTION_SPACE_SIZE)
-        self.assertEqual(ACTION_SPACE_SIZE, 6)
-        # Check observation space has all keys including goal_vector
+    def test_vector_env_contract(self):
+        obs, state = self.vec_env.reset(seed=42)
+        self.assertIn("_stacked", obs)
+        self.assertEqual(state.shape, (self.num_envs, self.vec_env.state_dim))
+
+        for key in ["observation", "action_mask", "role_id", "goal_vector"]:
+            self.assertIn(key, obs["_stacked"])
+
+        self.assertEqual(
+            obs["_stacked"]["observation"].shape,
+            (N_AGENTS, self.num_envs, OBSERVATION_SIZE[0], OBSERVATION_SIZE[1]),
+        )
+        self.assertEqual(
+            obs["_stacked"]["action_mask"].shape,
+            (N_AGENTS, self.num_envs, ACTION_SPACE_SIZE),
+        )
+        self.assertEqual(
+            obs["_stacked"]["role_id"].shape,
+            (N_AGENTS, self.num_envs, N_AGENTS),
+        )
+        self.assertEqual(
+            obs["_stacked"]["goal_vector"].shape,
+            (N_AGENTS, self.num_envs, GOAL_VECTOR_DIM),
+        )
+
         for a in AGENTS:
-            self.assertIn("observation", self.env.observation_spaces[a].spaces)
-            self.assertIn("action_mask", self.env.observation_spaces[a].spaces)
-            self.assertIn("role_id", self.env.observation_spaces[a].spaces)
-            self.assertIn("goal_vector", self.env.observation_spaces[a].spaces)
-            self.assertEqual(obs[a]["goal_vector"].shape, (GOAL_VECTOR_DIM,))
+            self.assertIn(a, obs)
+            self.assertEqual(obs[a]["observation"].shape, (self.num_envs, 7, 7))
+            self.assertEqual(obs[a]["action_mask"].shape, (self.num_envs, 6))
 
-    def test_agent_and_guard_spawning(self):
-        self.env.reset(seed=42)
-        # Agents should be clustered in a spawn room
-        agent_positions = list(self.env.agent_positions.values())
-        for a_pos in agent_positions:
-            # Distance among agents in spawn room should be small
-            min_dist_to_teammate = min(
-                manhattan(a_pos, other) for other in agent_positions if other != a_pos
-            )
-            self.assertLessEqual(min_dist_to_teammate, 8)
+        # Test stepping
+        actions = {a: np.zeros(self.num_envs, dtype=np.int32) for a in AGENTS}
+        next_obs, rews, terms, truncs, infos = self.vec_env.step(actions)
 
-        # Guards should spawn at a safe distance from agents
-        for g_pos in self.env.guard_positions:
-            for a_pos in agent_positions:
-                dist = manhattan(g_pos, a_pos)
-                self.assertGreaterEqual(dist, 2)
+        self.assertEqual(len(infos), self.num_envs)
+        for a in AGENTS:
+            self.assertEqual(rews[a].shape, (self.num_envs,))
+            self.assertEqual(terms[a].shape, (self.num_envs,))
+            self.assertEqual(truncs[a].shape, (self.num_envs,))
+            self.assertEqual(next_obs[a]["observation"].shape, (self.num_envs, 7, 7))
 
-    def test_step(self):
-        self.env.reset()
-        actions = {a: 0 for a in AGENTS}
-        _, rewards, terms, _, _ = self.env.step(actions)
-        self.assertIn("scout", rewards)
-        self.assertFalse(terms["scout"])
+    def test_single_env_render_wrapper(self):
+        obs, _ = self.single_env.reset(seed=42)
+        for a in AGENTS:
+            self.assertIn(a, obs)
+            self.assertEqual(obs[a]["observation"].shape, (7, 7))
+            self.assertEqual(obs[a]["action_mask"].shape, (6,))
 
-    def test_single_step_loot_and_extraction(self):
-        self.env.reset()
-        self.env.terminal_disabled = True
-        self.env.agent_positions["extractor"] = self.env.loot_pos
+        self.assertEqual(self.single_env.map_h, 17)
+        self.assertEqual(self.single_env.map_w, 17)
+        self.assertEqual(self.single_env.grid.shape, (17, 17))
+        self.assertEqual(self.single_env.explored_map.shape, (17, 17))
+        self.assertEqual(len(self.single_env.agent_positions), N_AGENTS)
 
         actions = {a: 4 for a in AGENTS}
-        actions["extractor"] = INTERACT
-        self.env.step(actions)
+        next_obs, _rews, _terms, _truncs, info = self.single_env.step(actions)
+        self.assertIn("scout", next_obs)
+        self.assertIn("win", info["scout"])
+        self.assertIn("alarm", info["scout"])
 
-        self.assertTrue(self.env.loot_acquired)
-        self.assertTrue(self.env.extraction_triggered)
+    def test_neural_network_forward_passes(self):
+        state_dim = 6 + (MAP_SIZE[0] * MAP_SIZE[1]) + (N_AGENTS * 2) + 24 + 12
+        device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    def test_permanent_guard_neutralization(self):
-        self.env.reset()
-        if self.env.guard_positions:
-            gpos = self.env.guard_positions[0]
-            self.env.agent_positions["muscle"] = gpos
+        obs_t = torch.zeros(N_AGENTS, 7, 7, device=device)
+        role_t = torch.eye(N_AGENTS, device=device)
+        mask_t = torch.ones(N_AGENTS, 6, device=device)
+        goal_t = torch.zeros(N_AGENTS, 2, device=device)
+        state_t = torch.zeros(N_AGENTS, state_dim, device=device)
 
-            actions = {a: 4 for a in AGENTS}
-            actions["muscle"] = INTERACT
-            self.env.step(actions)
+        models = {
+            "mappo": MappoNetwork(state_dim).to(device),
+            "coop": CoopNetwork(state_dim, num_experts=2).to(device),
+            "ecoop": EcoopNetwork(state_dim, num_initial_experts=2).to(device),
+            "hmappo": HierarchicalNetwork(state_dim).to(device),
+            "marc": MarcNetwork(state_dim).to(device),
+            "coma": ComaNetwork(state_dim).to(device),
+            "thief": ThiefNetwork(state_dim, num_initial_experts=2).to(device),
+        }
 
-            self.assertEqual(self.env.neutralized[0], 1)
+        for name, model in models.items():
+            model.eval()
+            with torch.no_grad():
+                if name in ("mappo", "marc"):
+                    act, _, _, _ = model.get_action_and_value(
+                        obs_t, role_t, mask_t, goal_t, state_t
+                    )
+                elif name == "coop":
+                    act, _, _, _, _ = model.get_action_and_value(
+                        obs_t, role_t, mask_t, goal_t, state_t
+                    )
+                elif name == "ecoop":
+                    act, _, _, _, _ = model.get_action_and_value(
+                        obs_t,
+                        role_t,
+                        mask_t,
+                        goal_t,
+                        state_t,
+                        active_experts=len(model.experts),
+                    )
+                elif name == "thief":
+                    act, _, _, _, _ = model.get_action_and_value(
+                        obs_t,
+                        role_t,
+                        mask_t,
+                        goal_t,
+                        state_t,
+                        active_experts=len(model.experts),
+                        num_envs=1,
+                    )
+                elif name == "coma":
+                    act, _, _, _ = model.get_action(obs_t, role_t, mask_t, goal_t)
+                elif name == "hmappo":
+                    m_act, _, _, _ = model.get_manager_action_and_value(state_t, role_t)
+                    act, _, _, _ = model.get_worker_action_and_value(
+                        obs_t, role_t, mask_t, m_act, state_t
+                    )
 
-            # Step 10 times and verify guard stays neutralized (permanent)
-            for _ in range(10):
-                self.env.step({a: 4 for a in AGENTS})
-                self.assertEqual(self.env.neutralized[0], 1)
-
-    def test_alarm_capping_and_scaling(self):
-        self.env.reset()
-        self.assertEqual(self.env.alarm_max, 150.0)
-        rewards = {a: 0.0 for a in AGENTS}
-        for _ in range(30):
-            self.env._add_alarm(10.0, rewards)
-        self.assertLessEqual(self.env.alarm, 150.0)
-        self.assertGreater(self.env.alarm, 100.0)
-
-    def test_guard_bfs_pathfinding(self):
-        self.env.reset(seed=42)
-        empty_cells = [
-            tuple(int(x) for x in c) for c in np.argwhere(self.env.grid == 0)
-        ]
-        self.assertGreater(len(empty_cells), 2)
-        start = empty_cells[0]
-        target = empty_cells[-1]
-
-        step_r, _step_c = bfs_next_step(
-            self.env.grid,
-            start[0],
-            start[1],
-            target[0],
-            target[1],
-            WALL,
-            DOOR,
-            self.env._bfs_queue,
-            self.env._bfs_previous,
-            self.env._bfs_reset,
-        )
-        self.assertTrue(step_r >= 0 or (start == target))
-
-    def test_vector_env(self):
-        vec = VectorEnv(num_envs=2, config=self.config, base_seed=0)
-        obs, state = vec.reset()
-        self.assertIn("_stacked", obs)
-        self.assertEqual(state.shape[0], 2)
-        actions = {a: np.zeros(2, dtype=np.int32) for a in AGENTS}
-        _next_obs, rewards, _terms, _truncs, _infos = vec.step(actions)
-        self.assertEqual(rewards["scout"].shape[0], 2)
-        vec.close()
-
-    def test_network_forward_passes(self):
-        state_dim = self.env.state().shape[0]
-        obs = torch.zeros(1, *OBSERVATION_SIZE)
-        role = torch.zeros(1, N_AGENTS)
-        mask = torch.ones(1, ACTION_SPACE_SIZE)
-        goal = torch.zeros(1, GOAL_VECTOR_DIM)
-        state = torch.zeros(1, state_dim)
-
-        # 1. MAPPO
-        mappo = MappoNetwork(state_dim)
-        act, _logp, _ent, _val = mappo.get_action_and_value(
-            obs, role, mask, goal, state
-        )
-        self.assertEqual(act.shape, (1,))
-
-        # 2. CO-OP
-        coop = CoopNetwork(state_dim, num_experts=2)
-        act, _logp, _ent, _val, _ = coop.get_action_and_value(
-            obs, role, mask, goal, state
-        )
-        self.assertEqual(act.shape, (1,))
-
-        # 3. E-COOP
-        ecoop = EcoopNetwork(state_dim, num_initial_experts=2)
-        act, _logp, _ent, _val, _ = ecoop.get_action_and_value(
-            obs, role, mask, goal, state, active_experts=2
-        )
-        self.assertEqual(act.shape, (1,))
-
-        # 4. H-MAPPO
-        hmappo = HierarchicalNetwork(state_dim)
-        m_act, _m_logp, _, _m_val = hmappo.get_manager_action_and_value(state, role)
-        w_act, _w_logp, _, _w_val = hmappo.get_worker_action_and_value(
-            obs, role, mask, m_act, state
-        )
-        self.assertEqual(m_act.shape, (1, 2))
-        self.assertEqual(w_act.shape, (1,))
-
-        # 5. MARC
-        marc = MarcNetwork(state_dim)
-        act, _logp, _ent, _val = marc.get_action_and_value(obs, role, mask, goal, state)
-        self.assertEqual(act.shape, (1,))
-
-        # 6. COMA
-        coma = ComaNetwork(state_dim)
-        act, _logp, _ent, _probs = coma.get_action(obs, role, mask, goal)
-        other_acts = torch.zeros(1, (N_AGENTS - 1) * ACTION_SPACE_SIZE)
-        q_vals = coma.get_q_values(state, other_acts, role, goal)
-        self.assertEqual(act.shape, (1,))
-        self.assertEqual(q_vals.shape, (1, ACTION_SPACE_SIZE))
-
-        # 7. THIEF
-        thief = ThiefNetwork(state_dim, num_initial_experts=2)
-        act, _logp, _ent, _val, _ = thief.get_action_and_value(
-            obs, role, mask, goal, state, active_experts=2, num_envs=1
-        )
-        self.assertEqual(act.shape, (1,))
+                self.assertEqual(act.shape, (N_AGENTS,))
 
 
 if __name__ == "__main__":

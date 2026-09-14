@@ -1,0 +1,12 @@
+.git
+.venv
+target/
+brain/
+__pycache__/
+*.pyc
+*.parquet
+results/
+.pytest_cache/
+.coverage
+dist/
+*.egg-info/

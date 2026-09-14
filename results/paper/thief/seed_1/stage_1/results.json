@@ -1,0 +1,38 @@
+{
+    "algo": "thief",
+    "stage": 1,
+    "win_rate": 0.99,
+    "lifetime_win_rate": 0.9918325676365493,
+    "mean_reward": 18.735150130880065,
+    "avg_episode_steps": 29.16,
+    "max_stage_steps": 400,
+    "avg_alarm": 15.85,
+    "stage_alarm_max": 100.0,
+    "scout_interact_rate": 1.0,
+    "scout_avg_pois_tagged": 3.23,
+    "hacker_hack_rate": 1.0,
+    "muscle_neutralize_rate": 1.0,
+    "muscle_avg_guards_neutralized": 1.0,
+    "total_stage_guards": 1,
+    "extractor_loot_rate": 1.0,
+    "avg_agents_at_extract": 3.98,
+    "active_experts": 2,
+    "dormant_experts": [],
+    "total_spawns": 1,
+    "expert_switch_rate": 0.47853078116916714,
+    "expert_usage_pct": {
+        "0": 76.8,
+        "1": 23.2
+    },
+    "spawn_history": [
+        {
+            "update": 25,
+            "parent_expert": 0,
+            "child_expert": 1,
+            "parent_value": 2.396235227584839,
+            "active_experts": 2,
+            "total_spawns": 1,
+            "trigger": "win_rate_plateau"
+        }
+    ]
+}

@@ -1,0 +1,24 @@
+{
+    "algo": "coop",
+    "stage": 2,
+    "num_experts": 2,
+    "win_rate": 0.77,
+    "lifetime_win_rate": 0.7638024076380241,
+    "mean_reward": 14.907180313083808,
+    "avg_episode_steps": 202.99,
+    "max_stage_steps": 900,
+    "avg_alarm": 41.62437472343445,
+    "stage_alarm_max": 125.0,
+    "scout_interact_rate": 1.0,
+    "scout_avg_pois_tagged": 5.49,
+    "hacker_hack_rate": 0.93,
+    "muscle_neutralize_rate": 0.97,
+    "muscle_avg_guards_neutralized": 1.91,
+    "total_stage_guards": 2,
+    "extractor_loot_rate": 0.87,
+    "avg_agents_at_extract": 3.58,
+    "expert_usage_pct": {
+        "0": 12.5,
+        "1": 87.5
+    }
+}

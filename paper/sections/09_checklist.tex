@@ -1,0 +1,92 @@
+\section*{NeurIPS Paper Checklist}
+
+The checklist is designed to encourage best practices for responsible, reproducible research and is intended to be answered while writing the paper. For each question: \answerYes{}, \answerNo{}, or \answerNA{} (not applicable), with a short justification or citation in the paper where appropriate.
+
+\begin{enumerate}
+
+\item {\bf Claims}
+    \item[] Question: Do the main claims made in the abstract and introduction accurately reflect the paper's contributions and scope?
+    \item[] Answer: \answerYes{}
+    \item[] Justification: The abstract and Section~\ref{sec:introduction} state the three contributions (the HEIST benchmark, the THIEF algorithm, and the four-iteration method lineage evaluated against external baselines), which are substantiated in Sections~\ref{sec:env}--\ref{sec:results}.
+
+\item {\bf Limitations}
+    \item[] Question: Have the authors discussed the limitations of the work performed, including that of the approach, dataset, or model?
+    \item[] Answer: \answerYes{}
+    \item[] Justification: Section~\ref{sec:discussion} discusses the finite egocentric receptive field on ultra-large grids, seed-level statistical power, and future directions (graph-structured communication, spatial goal abstraction).
+
+\item {\bf Theory assumptions and proofs}
+    \item[] Question: For each theoretical result, does the paper provide the full set of assumptions and a complete (and correct) proof?
+    \item[] Answer: \answerYes{}
+    \item[] Justification: Section~\ref{sec:theory} states all assumptions explicitly (positive-definite Fisher matrices, normalized mixture weights, calibrated routing) and provides complete proofs for Propositions~\ref{prop:recombination} and~\ref{prop:entropy}.
+
+\item {\bf Experimental result reproducibility}
+    \item[] Question: Does the paper fully disclose all the information needed to reproduce the main experimental results of the paper to the extent that it affects the main claims and/or conclusions of the paper (regardless of whether the code and data are provided or not)?
+    \item[] Answer: \answerYes{}
+    \item[] Justification: Sections~\ref{sec:env} and~\ref{sec:setup}, Table~\ref{tab:stage_specs}, Table~\ref{tab:hyperparameters}, and Appendices~\ref{sec:app_env}--\ref{sec:app_compute} fully specify the environment mechanics, reward structure, curriculum, architectures, and training hyperparameters; the complete Rust/Python codebase is open-sourced.
+
+\item {\bf Open access to data and code}
+    \item[] Question: Does the paper provide open access to the data and code, with sufficient instructions to faithfully reproduce the main experimental results (described in the paper)?
+    \item[] Answer: \answerYes{}
+    \item[] Justification: The entire repository---the native Rust simulation engine, all seven training pipelines, the curriculum runner, the parallel evaluation suite, and the multi-seed evaluation logs and checkpoints---is released with build and run instructions.
+
+\item {\bf Experimental setting/details}
+    \item[] Question: Does the paper specify all the training and test details (e.g., data splits, hyperparameters, how they were chosen, type of optimizer, etc.) necessary to understand the results?
+    \item[] Answer: \answerYes{}
+    \item[] Justification: All training details are documented in Section~\ref{sec:setup}, Table~\ref{tab:hyperparameters}, and Appendix~\ref{sec:app_compute}.
+
+\item {\bf Experiment statistical significance}
+    \item[] Question: Does the paper report error bars suitably and correctly defined or other information about the statistical significance of the experiments?
+    \item[] Answer: \answerYes{}
+    \item[] Justification: All tables and figures report mean $\pm$ standard deviation over 3 independent training seeds, each evaluated over $1,\\!000$ held-out episodes ($3,\\!000$ episodes per condition). Section~\ref{sec:results} additionally reports two-sided Welch's $t$-tests over per-seed win rates, including explicit caveats where $n=3$ seeds limit statistical power.
+
+\item {\bf Experiments compute resources}
+    \item[] Question: For each experiment, does the paper provide sufficient information on the computer setup (type of compute machine, the compute resource budget) that the reader needs to reproduce the experiments?
+    \item[] Answer: \answerYes{}
+    \item[] Justification: Section~\ref{sec:setup} and Appendix~\ref{sec:app_compute} document the hardware (NVIDIA RTX GPU, AMD Ryzen 8-core CPU), environment counts, per-stage training budgets, and measured throughput.
+
+\item {\bf Code of ethics}
+    \item[] Question: Does the research conducted in the paper conform, in every respect, with the NeurIPS Code of Ethics \url{https://neurips.cc/public/EthicsGuidelines}?
+    \item[] Answer: \answerYes{}
+    \item[] Justification: The work studies synthetic cooperative multi-agent RL in simulated gridworlds; it involves no human subjects, no sensitive data, and no deployment in physical or safety-critical settings.
+
+\item {\bf Broader impact}
+    \item[] Question: Does the paper have a positive and negative societal impact of the work performed? If the paper has a negative societal impact, in what way could the impact be minimized?
+    \item[] Answer: \answerNA{}
+    \item[] Justification: The paper is a foundational methodological and benchmark contribution in simulated MARL; no direct societal deployment is implied.
+
+\item {\bf Safeguards}
+    \item[] Question: Does the paper describe safeguards that have been established for release of assets with a high potential for misuse or dual-use?
+    \item[] Answer: \answerYes{}
+    \item[] Justification: The released assets are simulation code and synthetic gridworld environments with no real-world adversarial capability; the repository is released under an open license with usage documentation.
+
+\item {\bf Licenses for existing assets}
+    \item[] Question: Are the creators or original owners of assets (e.g., code, data, models) used in the paper properly credited and are the license and terms of use explicitly mentioned and properly respected?
+    \item[] Answer: \answerYes{}
+    \item[] Justification: All referenced external methods (MAPPO, H-MAPPO, COMA, etc.) are cited, and the environment is an original implementation; third-party dependencies (PyTorch, PyO3, Rayon) are used under their existing open-source licenses.
+
+\item {\bf New assets}
+    \item[] Question: Are new assets introduced in the paper well documented and is the documentation provided with the full submission?
+    \item[] Answer: \answerYes{}
+    \item[] Justification: The HEIST benchmark and all trainers are documented in the repository README (installation, compilation of the Rust core, training, and evaluation commands) and in the paper itself.
+
+\item {\bf Crowdsourcing and research with human subjects}
+    \item[] Question: For crowdsourcing experiments and research with human subjects, does the paper include the full text of instructions given to participants and screenshots, if applicable, as well as details about compensation?
+    \item[] Answer: \answerNA{}
+    \item[] Justification: The paper does not involve crowdsourcing or human subjects.
+
+\item {\bf Research with human subjects}
+    \item[] Question: Does the paper describe potential risks endured by research with human subjects, and how were they mitigated?
+    \item[] Answer: \answerNA{}
+    \item[] Justification: No human-subject research was performed.
+
+\item {\bf Inclusion of diverse demographic groups}
+    \item[] Question: Does the paper consider representative and diverse populations, and does it include safeguards for working with such populations?
+    \item[] Answer: \answerNA{}
+    \item[] Justification: The research does not involve human populations.
+
+\item {\bf LLM usage}
+    \item[] Question: Was any LLM used in the preparation of the paper? (This section refers solely to using LLMs as writing assistants or coding assistants in preparing the manuscript and its content; it does not refer to using LLMs in the research described in the paper.)
+    \item[] Answer: \answerYes{}
+    \item[] Justification: LLM writing assistants were used for code documentation and manuscript editing; all experimental results were produced by the authors' own training and evaluation pipeline, and all content was verified by the author.
+
+\end{enumerate}

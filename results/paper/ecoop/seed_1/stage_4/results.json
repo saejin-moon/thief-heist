@@ -1,0 +1,49 @@
+{
+    "algo": "ecoop",
+    "stage": 4,
+    "win_rate": 0.09,
+    "lifetime_win_rate": 0.09484193011647254,
+    "mean_reward": -1.0071938986098394,
+    "avg_episode_steps": 2629.15,
+    "max_stage_steps": 5000,
+    "avg_alarm": 121.71635183811188,
+    "stage_alarm_max": 175.0,
+    "scout_interact_rate": 0.96,
+    "scout_avg_pois_tagged": 5.68,
+    "hacker_hack_rate": 0.65,
+    "muscle_neutralize_rate": 0.88,
+    "muscle_avg_guards_neutralized": 2.95,
+    "total_stage_guards": 4,
+    "extractor_loot_rate": 0.37,
+    "avg_agents_at_extract": 1.44,
+    "active_experts": 3,
+    "total_spawns": 2,
+    "expert_switch_rate": 0.0012550200803212851,
+    "expert_usage_pct": {
+        "0": 10.3,
+        "1": 0.0,
+        "2": 89.7
+    },
+    "spawn_history": [
+        {
+            "update": 125,
+            "parent_expert": 0,
+            "child_expert": 1,
+            "parent_value": 0.8514339327812195,
+            "replaced_expert": null,
+            "active_experts": 2,
+            "total_spawns": 1,
+            "crossover_type": "all_pool_fisher_recombination"
+        },
+        {
+            "update": 125,
+            "parent_expert": 0,
+            "child_expert": 2,
+            "parent_value": 0.8551872968673706,
+            "replaced_expert": null,
+            "active_experts": 3,
+            "total_spawns": 2,
+            "crossover_type": "all_pool_fisher_recombination"
+        }
+    ]
+}

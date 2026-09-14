@@ -1,0 +1,188 @@
+{
+    "algo": "thief",
+    "stage": 4,
+    "win_rate": 0.15,
+    "lifetime_win_rate": 0.15205479452054796,
+    "mean_reward": -0.5105236421432346,
+    "avg_episode_steps": 2003.76,
+    "max_stage_steps": 5000,
+    "avg_alarm": 140.33798668146133,
+    "stage_alarm_max": 175.0,
+    "scout_interact_rate": 0.95,
+    "scout_avg_pois_tagged": 5.42,
+    "hacker_hack_rate": 0.68,
+    "muscle_neutralize_rate": 0.91,
+    "muscle_avg_guards_neutralized": 2.76,
+    "total_stage_guards": 4,
+    "extractor_loot_rate": 0.46,
+    "avg_agents_at_extract": 1.42,
+    "active_experts": 17,
+    "dormant_experts": [],
+    "total_spawns": 16,
+    "expert_switch_rate": 0.4941205904428321,
+    "expert_usage_pct": {
+        "0": 0.6,
+        "1": 57.8,
+        "2": 0.0,
+        "3": 0.0,
+        "4": 0.0,
+        "5": 5.9,
+        "6": 0.0,
+        "7": 0.0,
+        "8": 0.0,
+        "9": 2.0,
+        "10": 0.0,
+        "11": 0.3,
+        "12": 27.1,
+        "13": 0.0,
+        "14": 0.0,
+        "15": 0.0,
+        "16": 6.3
+    },
+    "spawn_history": [
+        {
+            "update": 25,
+            "parent_expert": 0,
+            "child_expert": 1,
+            "parent_value": 2.1319072246551514,
+            "active_experts": 2,
+            "total_spawns": 1,
+            "trigger": "win_rate_plateau"
+        },
+        {
+            "update": 60,
+            "parent_expert": 0,
+            "child_expert": 2,
+            "parent_value": 3.1767425537109375,
+            "active_experts": 3,
+            "total_spawns": 2,
+            "trigger": "win_rate_plateau"
+        },
+        {
+            "update": 100,
+            "parent_expert": 0,
+            "child_expert": 3,
+            "parent_value": 3.115898609161377,
+            "active_experts": 4,
+            "total_spawns": 3,
+            "trigger": "win_rate_plateau"
+        },
+        {
+            "update": 139,
+            "parent_expert": 0,
+            "child_expert": 4,
+            "parent_value": 3.775296211242676,
+            "active_experts": 5,
+            "total_spawns": 4,
+            "trigger": "win_rate_plateau"
+        },
+        {
+            "update": 174,
+            "parent_expert": 0,
+            "child_expert": 5,
+            "parent_value": 8.615386962890625,
+            "active_experts": 6,
+            "total_spawns": 5,
+            "trigger": "win_rate_plateau"
+        },
+        {
+            "update": 45,
+            "parent_expert": 0,
+            "child_expert": 6,
+            "parent_value": 4.190483570098877,
+            "active_experts": 7,
+            "total_spawns": 6,
+            "trigger": "win_rate_plateau"
+        },
+        {
+            "update": 81,
+            "parent_expert": 0,
+            "child_expert": 7,
+            "parent_value": 2.0037150382995605,
+            "active_experts": 8,
+            "total_spawns": 7,
+            "trigger": "win_rate_plateau"
+        },
+        {
+            "update": 116,
+            "parent_expert": 0,
+            "child_expert": 8,
+            "parent_value": 2.4253787994384766,
+            "active_experts": 9,
+            "total_spawns": 8,
+            "trigger": "win_rate_plateau"
+        },
+        {
+            "update": 151,
+            "parent_expert": 0,
+            "child_expert": 9,
+            "parent_value": 2.0323410034179688,
+            "active_experts": 10,
+            "total_spawns": 9,
+            "trigger": "win_rate_plateau"
+        },
+        {
+            "update": 110,
+            "parent_expert": 0,
+            "child_expert": 10,
+            "parent_value": 1.56269109249115,
+            "active_experts": 11,
+            "total_spawns": 10,
+            "trigger": "win_rate_plateau"
+        },
+        {
+            "update": 146,
+            "parent_expert": 2,
+            "child_expert": 11,
+            "parent_value": 1.7506320476531982,
+            "active_experts": 12,
+            "total_spawns": 11,
+            "trigger": "win_rate_plateau"
+        },
+        {
+            "update": 181,
+            "parent_expert": 0,
+            "child_expert": 12,
+            "parent_value": 1.8993053436279297,
+            "active_experts": 13,
+            "total_spawns": 12,
+            "trigger": "win_rate_plateau"
+        },
+        {
+            "update": 220,
+            "parent_expert": 11,
+            "child_expert": 13,
+            "parent_value": 1.6605710983276367,
+            "active_experts": 14,
+            "total_spawns": 13,
+            "trigger": "win_rate_plateau"
+        },
+        {
+            "update": 256,
+            "parent_expert": 0,
+            "child_expert": 14,
+            "parent_value": 2.0815799236297607,
+            "active_experts": 15,
+            "total_spawns": 14,
+            "trigger": "win_rate_plateau"
+        },
+        {
+            "update": 295,
+            "parent_expert": 13,
+            "child_expert": 15,
+            "parent_value": 1.3513785600662231,
+            "active_experts": 16,
+            "total_spawns": 15,
+            "trigger": "win_rate_plateau"
+        },
+        {
+            "update": 330,
+            "parent_expert": 2,
+            "child_expert": 16,
+            "parent_value": 1.2599375247955322,
+            "active_experts": 17,
+            "total_spawns": 16,
+            "trigger": "win_rate_plateau"
+        }
+    ]
+}

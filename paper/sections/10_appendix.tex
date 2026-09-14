@@ -1,0 +1,52 @@
+\appendix
+\section*{Appendix}
+\label{sec:appendix}
+
+\section{Detailed Role Subtask Telemetry on Stage 3}
+\label{sec:app_subtasks}
+
+Figure~\ref{fig:subtasks} and Table~\ref{tab:subtasks_stage3} present comprehensive diagnostic evaluations of role-specific subtask success rates, terminal hacking frequencies, security alert accumulation, and extraction survival on Stage 3 ($35 \times 35$, 3 guards, 2 cameras, 3 locked doors) across all evaluated methods.
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=\linewidth]{figures/stage3_subtasks.pdf}
+\caption{\textbf{Role Subtask Success Rates on Stage 3.} Grouped bar breakdown of role-specific subtask completion for the method lineage (MARC, COOP, E-COOP, THIEF) against the leading external baseline (MAPPO), evaluated over $3,\!000$ episodes per method.}
+\label{fig:subtasks}
+\end{figure}
+
+\input{tables/subtask_metrics}
+
+\section{Component Micro-Ablations of THIEF}
+\label{sec:app_ablation}
+To isolate the contribution of each core mechanism, we re-train THIEF standalone (fresh initialization, no curriculum checkpoint transfer, identical per-stage budgets and hyperparameters) on the two diagnostic stages---Stage 2 ($25 \times 25$), where expert spawning is active (4 spawning events per seed in the full method), and Stage 4 ($50 \times 50$), the long-horizon regime in which the final claims are made---once per ablation variant and seed, and evaluate the resulting checkpoints over $1,\!000$ held-out episodes per seed.
+
+The ablated variants are:
+\begin{itemize}[leftmargin=*,nosep]
+    \item \textbf{w/o incubation} ($\tau_{\text{iso}}=0$): spawned children skip sandbox sharding and join the global bidding pool immediately with cold-start critics.
+    \item \textbf{w/o Fisher geometry}: parent recombination uses uniform parameter averaging with identity geometry and isotropic mutation noise, removing curvature weighting and the inverse-Fisher exploration scaling.
+    \item \textbf{clone-best-parent}: the child actor is a perturbed copy of the single best parent (no pool recombination, no deficit push), isolating recombination per se from E-COOP-style cloning.
+    \item \textbf{w/o load balancing} ($\alpha_{\text{bal}}=0$): the anti-monopoly regularizer of Section~\ref{sec:thief} is removed, testing the entropy bound of Proposition~\ref{prop:entropy}.
+    \item \textbf{w/o hysteresis} ($\epsilon=0$): the routing barrier is disabled, removing temporal coherence enforcement.
+    \item \textbf{fixed-schedule spawning}: the win-rate plateau trigger is bypassed in favor of spawning on a fixed cadence, holding pool size dynamics comparable.
+\end{itemize}
+
+\InputIfFileExists{tables/ablation}{}{}
+
+\section{Environment Implementation \& Engineering Details}
+\label{sec:app_env}
+The HEIST simulation engine is developed in native Rust to eliminate Python GIL bottlenecks during multi-agent pathfinding and raytraced field-of-view perception. Key components include:
+\begin{itemize}[leftmargin=*,nosep]
+    \item \textbf{Raytraced Line of Sight:} For each agent coordinate, ray traversal is computed along 8 cardinal and diagonal directions. Rays terminate upon encountering perimeter or room walls, populating visible tiles into egocentric observation arrays with value $-1$ for occluded fog-of-war tiles.
+    \item \textbf{Adversarial Guard Pathfinding:} Guard pathfinding uses a breadth-first search (BFS) queue executed over cached grid obstacle bitmasks. Guard investigation states pathfind toward the last-known coordinate of spotted agents.
+    \item \textbf{Zero-Copy PyTorch Sharding:} Simulation steps execute across parallel environments using Rayon worker threads. Observations, rewards, done flags, and action masks are copied directly into pre-allocated contiguous CUDA/CPU tensors.
+\end{itemize}
+
+\section{Full Hyperparameter Specifications}
+\label{sec:app_hyperparameters}
+Table~\ref{tab:hyperparameters} provides the universal hyperparameters shared across all algorithms.
+
+\input{tables/hyperparameters}
+
+\section{Compute Environment \& Hardware Throughput}
+\label{sec:app_compute}
+All benchmark training and evaluation runs were conducted on a single Linux workstation equipped with an NVIDIA RTX GPU (12 GB VRAM) and an AMD Ryzen 8-core CPU (16 threads). The raw Rust simulation engine sustains approximately $11,\!200$--$12,\!100$ environment steps per second across the curriculum stages (measured over $N=1,\!000$-episode evaluation batches for single-network policies such as MAPPO, MARC, and COMA); end-to-end throughput for multi-expert methods is lower due to per-expert forward passes (e.g., approximately $2,\!000$--$3,\!400$ steps/s for THIEF). Each curriculum stage trains for a fixed budget of $2/2/5/9/16 \times 10^{5}$ environment steps (Stages 0--4, $3.4 \times 10^6$ per seed in total), corresponding to 100/100/250/450/800 PPO updates for THIEF and E-COOP (16 parallel environments) and twice as many updates for the 8-environment baselines.

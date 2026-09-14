@@ -1,0 +1,33 @@
+\section{Empirical Results}
+\label{sec:results}
+
+We evaluate all algorithms across 1,000 independent test episodes per seed across 3 random seeds ($3,\!000$ episodes per algorithm per stage).
+
+\input{tables/main_results}
+
+\subsection{Multi-Stage Win Rate and Return Progression}
+Table~\ref{tab:main_results} and Figure~\ref{fig:curriculum} summarize benchmark performance across the five curriculum stages.
+The results illustrate the clear performance trajectory across our development lineage alongside external baselines:
+
+\paragraph{Stages 0 and 1 (Basic Coordination):}
+All four iterations of our lineage (MARC, COOP, E-COOP, THIEF) along with baseline MAPPO rapidly master basic cooperative navigation and door unlocking, converging to $98.0\%$--$100.0\%$ win rates ($17.7$--$18.7$ mean returns; MARC trails slightly at $98.0\% \pm 2.0\%$ on Stage 0). In contrast, external baselines H-MAPPO ($63.0\%$) and COMA ($4.7\%$ and $40.8\%$ with extreme seed variance) exhibit high training variance and catastrophic delay due to sub-goal mismatch and counterfactual marginalization variance in combinatorial joint action spaces ($6^4 = 1,\!296$).
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/curriculum_combined.pdf}
+\caption{\textbf{Curriculum Scaling Performance.} Empirical win rate (\%) and mean episodic return across the five HEIST curriculum stages, evaluated over $N=1,\!000$ episodes per seed across 3 seeds ($3,\!000$ episodes per point). Lineage iterations (MARC $\to$ COOP $\to$ E-COOP $\to$ THIEF) are shown in blue shades with the final method (THIEF) in crimson. Error bars denote $\pm$ one standard deviation across training seeds. H-MAPPO and COMA are omitted for readability---both collapse to near-zero win rates on Stages 2--4, compressing the competitive regime; their complete numbers are reported in Table~\ref{tab:main_results}.}
+\label{fig:curriculum}
+\end{figure}
+
+\paragraph{Stage 2 (Dynamic Security Emergence):}
+When dynamic security guards and camera sweeps are introduced ($25 \times 25$ grid), monolithic methods begin to degrade: MARC ($72.2\% \pm 3.0\%$) and MAPPO ($74.3\% \pm 1.0\%$) suffer alarm escalations. Introducing static MoE capacity in COOP increases win rate to $75.4\% \pm 0.9\%$. Incorporating Fisher evolutionary adaptation in E-COOP ($80.8\% \pm 1.2\%$) and THIEF ($81.2\% \pm 1.4\%$) yields a statistically significant advantage over MAPPO (two-sided Welch's $t$-test over per-seed win rates: THIEF $t \approx 7.0$, $p = 0.007$; E-COOP $p = 0.005$), confirming that Fisher-manifold parameter blending preserves tactical combat skills across environment transitions.
+
+\paragraph{Stages 3 and 4 (Long-Horizon Spatial Scaling):}
+On Stages 3 ($35 \times 35$) and 4 ($50 \times 50$), spatial coordination horizons expand up to $5,\!000$ steps with 4 patrolling guards. In this regime, external baselines collapse: H-MAPPO drops to $0.1\%$ and COMA fails completely ($0.0\%$), while MAPPO achieves only $8.5\% \pm 2.6\%$ on Stage 4. Within our lineage, E-COOP and THIEF dominate Stage 4 with win rates of $13.8\% \pm 2.3\%$ and $12.9\% \pm 1.7\%$---relative gains of $62\%$ and $52\%$ over MAPPO---demonstrating the value of evolutionary specialist generation in high-dimensional heterogeneous Dec-POMDPs. We note that with only three training seeds, Stage 3--4 differences between THIEF/E-COOP and MAPPO do not reach significance at $\alpha = 0.05$ (e.g., E-COOP vs.\ MAPPO on Stage 3: $p = 0.10$); the consistent ordering across both stages and the Stage 2 significance nevertheless support the trend.
+
+\subsection{Role Subtask Diagnostics and Telemetry}
+All evaluated methods readily master Scout POI tagging ($>98\%$) and Muscle guard neutralization ($>92\%$) among the methods that solve earlier stages. The definitive bottleneck lies in sequential terminal override and four-agent extraction under adversarial pressure (detailed in Appendix Figure~\ref{fig:subtasks} and Table~\ref{tab:subtasks_stage3}):
+\begin{itemize}[leftmargin=*,nosep]
+    \item While E-COOP records higher terminal hacking completion ($80.8\%$ vs.\ $66.5\%$) and loot extraction ($62.2\%$ vs.\ $48.9\%$), it does so through an aggressive monolithic policy that monopolizes all actions under Expert 0 (Section~\ref{sec:discussion}).
+    \item THIEF distributes tactical responsibilities across its specialized pool while keeping alarm accumulation well below the Stage 3 lockdown threshold ($88.3$ vs.\ $\alpha_{\max} = 150$), enabling $2.05$ agents on average to reach extraction. COMA registers the lowest alarm ($74.3$) only because its episodes terminate early on catch or timeout rather than through stealth.
+\end{itemize}
