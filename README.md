@@ -379,7 +379,6 @@ uv run pytest
 @article{moon2026thief,
   title={THIEF in HEIST: Dynamic Mixture-of-Experts for Heterogeneous Multi-Agent Cooperation},
   author={Sae-Jin Moon},
-  journal={arXiv preprint},
   year={2026}
 }
 ```
