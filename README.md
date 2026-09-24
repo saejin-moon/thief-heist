@@ -227,22 +227,83 @@ PYTHONPATH=src/py uv run python src/py/ablation.py --seeds 0-2 --episodes 1000 -
 
 ## Docker Containerization
 
-A multi-stage `Dockerfile` with CUDA GPU acceleration and CPU fallback is included.
+The repository includes a multi-stage `Dockerfile` and `docker-compose.yml` for isolated and reproducible execution across GPU and CPU environments.
 
-### Build and Run
+### Multi-Stage Architecture
+
+1. **Stage 1 (`builder`)**: Uses `python:3.11-slim-bookworm` with `maturin` and Rust 1.75+ to compile the high-throughput simulation engine (`heist_core_rs`) into a standalone Python wheel.
+2. **Stage 2 (`runtime`)**: Uses `pytorch/pytorch:2.3.0-cuda12.1-cudnn8-runtime` to provide pre-baked CUDA 12.1 PyTorch support. Installs runtime scientific dependencies (`polars`, `pyarrow`, `matplotlib`, `gymnasium`, `pettingzoo`, `lbforaging`, `pillow`, `scipy`, `pytest`), headless monospace fonts for visualizer GIF rendering (`fonts-dejavu-core`, `fonts-liberation`), and the compiled Rust wheel without touching the pre-installed CUDA libraries.
+
+### Host Prerequisites
+
+For GPU acceleration inside Docker, ensure the NVIDIA Container Toolkit is installed on the host system:
 
 ```bash
-# Build Docker image
-docker build -t thief-heist:latest .
+# Configure the NVIDIA runtime for Docker
+sudo nvidia-ctk runtime configure --runtime=docker
+sudo systemctl restart docker
+```
 
-# Run benchmark container with GPU passthrough
-docker run --gpus all \
+### Build Image
+
+```bash
+docker build -t thief-heist:latest .
+```
+
+### Run Workloads
+
+#### 1. Full Benchmark Curriculum (GPU Accelerated)
+Mount host directories to persist training checkpoints, evaluation summaries, and figures:
+
+```bash
+docker run --gpus all --rm \
     -v $(pwd)/results:/app/results \
     -v $(pwd)/paper/tables:/app/paper/tables \
+    -v $(pwd)/docs/assets:/app/docs/assets \
     thief-heist:latest
+```
 
-# Or using docker-compose
-docker compose up
+#### 2. Run Test Suite
+```bash
+docker run --rm thief-heist:latest pytest
+```
+
+#### 3. Single Algorithm Training
+```bash
+docker run --gpus all --rm \
+    -v $(pwd)/results:/app/results \
+    thief-heist:latest \
+    python src/py/train_thief.py --stage 2 --timesteps 500000 --rust
+```
+
+#### 4. Headless Visualizer GIF Export
+Generate animated ASCII playback GIFs directly inside a headless container:
+
+```bash
+docker run --gpus all --rm \
+    -v $(pwd)/results:/app/results \
+    -v $(pwd)/docs/assets:/app/docs/assets \
+    thief-heist:latest \
+    python src/py/ascii.py --stage 2 --algo thief --checkpoint results/final/thief/seed_0/stage_2/model.pt --gif docs/assets/container_demo.gif
+```
+
+#### 5. Interactive Shell
+```bash
+docker run --gpus all -it --rm \
+    -v $(pwd)/results:/app/results \
+    thief-heist:latest bash
+```
+
+### Docker Compose Service Execution
+
+Pre-configured services are provided in `docker-compose.yml`:
+
+```bash
+# Run benchmark with all available GPUs
+docker compose up benchmark
+
+# Run benchmark on CPU (for hosts without NVIDIA GPUs)
+docker compose up cpu-benchmark
 ```
 
 ---
