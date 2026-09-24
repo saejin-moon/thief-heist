@@ -1,16 +1,11 @@
 #!/usr/bin/env python3
-"""
-generate_architecture_fig.py
-Generates a publication-quality, elegant architecture diagram for THIEF.
-Uses an academic palette (deep slate, navy, neutral gray) with ample whitespace
-and precisely routed arrows.
-"""
+"""Generate architecture diagram for THIEF."""
 
+import os
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.patches import FancyBboxPatch, FancyArrowPatch, Rectangle
-import os
 
 def create_architecture_diagram(out_path="paper/figures/architecture.pdf"):
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
@@ -21,7 +16,7 @@ def create_architecture_diagram(out_path="paper/figures/architecture.pdf"):
     ax.set_ylim(0, 52)
     ax.axis("off")
 
-    # Colors: Academic Slate & Navy palette
+    # Colors: slate and navy palette
     c_env_bg = "#F4F6F8"
     c_env_border = "#455A64"
     c_env_txt = "#1A252C"
@@ -37,9 +32,7 @@ def create_architecture_diagram(out_path="paper/figures/architecture.pdf"):
     c_box_bg = "#FFFFFF"
     c_arrow = "#37474F"
 
-    # =========================================================================
-    # 1. LEFT CONTAINER: HEIST Dec-POMDP & Heterogeneous Team
-    # =========================================================================
+    # 1. Left container: HEIST Dec-POMDP and heterogeneous team
     rect_left = FancyBboxPatch((2, 3), 28, 46, boxstyle="round,pad=1.0,rounding_size=2.0",
                                facecolor=c_env_bg, edgecolor=c_env_border, linewidth=1.2, linestyle="-")
     ax.add_patch(rect_left)
@@ -60,9 +53,7 @@ def create_architecture_diagram(out_path="paper/figures/architecture.pdf"):
         ax.text(6, ry + 4.2, role, fontsize=7.5, weight="bold", color="#263238")
         ax.text(6, ry + 1.8, desc, fontsize=6.2, color="#546E7A")
 
-    # =========================================================================
-    # 2. CENTER CONTAINER: Dynamic MoE Router & Active Specialist Pool
-    # =========================================================================
+    # 2. Center container: dynamic MoE router and active specialist pool
     rect_center = FancyBboxPatch((34, 3), 32, 46, boxstyle="round,pad=1.0,rounding_size=2.0",
                                  facecolor=c_exec_bg, edgecolor=c_exec_border, linewidth=1.2)
     ax.add_patch(rect_center)
@@ -92,9 +83,7 @@ def create_architecture_diagram(out_path="paper/figures/architecture.pdf"):
         ax.add_patch(ebox)
         ax.text(50, ey + 2.0, el, ha="center", va="center", fontsize=6.8, color="#1565C0")
 
-    # =========================================================================
-    # 3. RIGHT CONTAINER: Evolutionary Specialist Lifecycle (THIEF Core)
-    # =========================================================================
+    # 3. Right container: evolutionary specialist lifecycle (THIEF core)
     rect_right = FancyBboxPatch((70, 3), 28, 46, boxstyle="round,pad=1.0,rounding_size=2.0",
                                 facecolor=c_evo_bg, edgecolor=c_evo_border, linewidth=1.2)
     ax.add_patch(rect_right)
@@ -115,9 +104,7 @@ def create_architecture_diagram(out_path="paper/figures/architecture.pdf"):
         ax.text(74, ey + 4.2, title, fontsize=7.2, weight="bold", color="#880E4F")
         ax.text(74, ey + 1.8, math_txt, fontsize=6.0, color="#4A148C")
 
-    # =========================================================================
-    # 4. CONNECTING SIGNAL ARROWS (Clean, Orthogonal, Non-overlapping)
-    # =========================================================================
+    # 4. Connecting signal arrows
     # 1. Observation flow from Left to Center Router
     arr1 = FancyArrowPatch((28, 35.5), (36.5, 35.5), arrowstyle="-|>", mutation_scale=10,
                            color=c_arrow, linewidth=1.3)

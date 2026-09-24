@@ -26,8 +26,8 @@ Outputs
   results/lbf/<env>/<algo>/seed_<s>/results.json        aggregate metrics per run
   results/lbf/<env>/<algo>/seed_<s>/train_curves.json   evaluation curve
   results/lbf/lbf_benchmark_summary.json                compiled across envs/algos/seeds
-  results/lbf/lbf_benchmark_summary.md                  LLM-ready Markdown report
-  paper/tables/lbf_benchmark.tex                        auto-generated LaTeX table
+  results/lbf/lbf_benchmark_summary.md                  summary report
+  paper/tables/lbf_benchmark.tex                        LaTeX benchmark table
   paper/tables/lbf_ablation.tex                         THIEF-on-LBF ablation table
 """
 
@@ -48,9 +48,7 @@ from torch import nn
 from torch.distributions.categorical import Categorical
 from torch.nn import functional as F
 
-# --------------------------------------------------------------------------------------
 # Benchmark configuration
-# --------------------------------------------------------------------------------------
 
 LBF_ENV_CONFIGS = [
     {
@@ -161,9 +159,7 @@ def build_mlp(in_dim, hidden, out_dim, out_std=0.01):
     )
 
 
-# --------------------------------------------------------------------------------------
 # Environment helpers
-# --------------------------------------------------------------------------------------
 
 
 def get_masks(u) -> np.ndarray:
@@ -218,9 +214,7 @@ def shaping_potential(u, food_pos=None) -> float:
     ) / (u.field_size[0] + u.field_size[1])
 
 
-# --------------------------------------------------------------------------------------
 # Algorithm networks (faithful paradigm adaptations to LBF)
-# --------------------------------------------------------------------------------------
 
 
 class ThiefAgent(nn.Module):
@@ -495,9 +489,7 @@ AGENT_FACTORIES = {
 }
 
 
-# --------------------------------------------------------------------------------------
 # Returns / GAE
-# --------------------------------------------------------------------------------------
 
 
 def compute_gae(rewards, values, dones, last_value, gamma, lam):
@@ -547,9 +539,7 @@ def discounted_returns(rewards, dones, gamma):
     return out
 
 
-# --------------------------------------------------------------------------------------
 # Rollout
-# --------------------------------------------------------------------------------------
 
 
 def rollout(
@@ -677,9 +667,7 @@ def rollout(
     return storage, obs_batch, step_counter
 
 
-# --------------------------------------------------------------------------------------
-# PPO / COMA update
-# --------------------------------------------------------------------------------------
+# PPO and COMA update
 
 
 def joint_obs_from_feats(feats, T, K, n, obs_dim, device):
@@ -714,7 +702,7 @@ def update_agent(agent, algo, storage, device, ablation, optimizer, obs_dim, K, 
     stats = {"pg_loss": 0.0, "v_loss": 0.0, "entropy": 0.0, "aux": 0.0}
 
     if algo == "coma":
-        # ---- COMA: counterfactual advantages + MC critic regression ----
+        # COMA: counterfactual advantages and Monte Carlo critic regression
         with torch.no_grad():
             q_taken = agent.q_taken(joint, ja)  # (T*K, n)
             cf_base = agent.counterfactual_baseline(joint, ja)  # (T*K, n)
@@ -755,7 +743,7 @@ def update_agent(agent, algo, storage, device, ablation, optimizer, obs_dim, K, 
             )
         return stats
 
-    # ---- PPO family (thief, roma, rode, hmappo, mappo) ----
+    # PPO family algorithms (thief, roma, rode, hmappo, mappo)
     adv = np.zeros_like(values_raw)  # (T, K, n)
     for k in range(K):
         adv[:, k, :] = compute_gae(
@@ -852,9 +840,7 @@ def update_agent(agent, algo, storage, device, ablation, optimizer, obs_dim, K, 
     return stats
 
 
-# --------------------------------------------------------------------------------------
 # Evaluation
-# --------------------------------------------------------------------------------------
 
 
 def evaluate_policy(env, u, agent, algo, device, num_episodes, base_seed, greedy=False):
@@ -910,9 +896,7 @@ def evaluate_policy(env, u, agent, algo, device, num_episodes, base_seed, greedy
     }
 
 
-# --------------------------------------------------------------------------------------
-# Single (env, algo, seed[, ablation]) training run
-# --------------------------------------------------------------------------------------
+# Single training run
 
 
 def train_one(config: dict) -> dict:
@@ -1080,9 +1064,7 @@ def train_one(config: dict) -> dict:
     return result
 
 
-# --------------------------------------------------------------------------------------
-# Aggregation & report generation
-# --------------------------------------------------------------------------------------
+# Aggregation and report generation
 
 
 def aggregate(out_root: str = "results/lbf", paper_tables: str = "paper/tables"):
@@ -1141,7 +1123,7 @@ def aggregate(out_root: str = "results/lbf", paper_tables: str = "paper/tables")
     with open(os.path.join(out_root, "lbf_benchmark_summary.json"), "w") as f:
         json.dump(summary, f, indent=2)
 
-    # ---- Markdown report ----
+    # Markdown report
     md = [
         "# Level-Based Foraging (LBF) Heterogeneous MARL Benchmark",
         "",
@@ -1188,12 +1170,12 @@ def aggregate(out_root: str = "results/lbf", paper_tables: str = "paper/tables")
     with open(os.path.join(out_root, "lbf_benchmark_summary.md"), "w") as f:
         f.write("\n".join(md) + "\n")
 
-    # ---- LaTeX main table ----
+    # LaTeX main table
     os.makedirs(paper_tables, exist_ok=True)
     n_seeds = max((s["n_seeds"] for s in summary.values()), default=1)
     e1, e2 = LBF_ENV_CONFIGS[0]["id"], LBF_ENV_CONFIGS[1]["id"]
     lines = [
-        "% Auto-generated by src/py/train_lbf.py (aggregate). Do not edit manually.",
+        "% Benchmark results on canonical Level-Based Foraging (LBF).",
         "\\begin{table}[t]",
         "\\centering",
         "\\caption{Benchmark results on the canonical Level-Based Foraging (LBF) "
@@ -1239,7 +1221,7 @@ def aggregate(out_root: str = "results/lbf", paper_tables: str = "paper/tables")
     with open(os.path.join(paper_tables, "lbf_benchmark.tex"), "w") as f:
         f.write("\n".join(lines) + "\n")
 
-    # ---- LaTeX THIEF-on-LBF ablation table ----
+    # LaTeX THIEF-on-LBF ablation table
     abl_present = [
         v
         for v in ["full", "fixed_experts", "no_fisher", "uniform_routing"]
@@ -1247,7 +1229,7 @@ def aggregate(out_root: str = "results/lbf", paper_tables: str = "paper/tables")
     ]
     if abl_present:
         lines = [
-            "% Auto-generated by src/py/train_lbf.py (aggregate). Do not edit manually.",
+            "% THIEF component ablations on Level-Based Foraging (LBF).",
             "\\begin{table}[t]",
             "\\centering",
             "\\caption{THIEF component ablations on LBF. Each variant disables one "
@@ -1305,9 +1287,7 @@ def aggregate(out_root: str = "results/lbf", paper_tables: str = "paper/tables")
     return summary
 
 
-# --------------------------------------------------------------------------------------
-# CLI
-# --------------------------------------------------------------------------------------
+# CLI entrypoint
 
 
 def parse_seeds(s):

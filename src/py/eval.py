@@ -20,9 +20,7 @@ from torch.distributions.categorical import Categorical
 from vec_env import make_vec_env
 
 
-# ----------------------------------------------------------------------
-# Universal Model Loaders
-# ----------------------------------------------------------------------
+# Model loaders
 def load_thief_model(ckpt_path, state_dim, device):
     from train_thief import ThiefNetwork
 
@@ -515,9 +513,7 @@ MODEL_LOADERS = {
 }
 
 
-# ----------------------------------------------------------------------
-# Parallel Vectorized Evaluation Engine
-# ----------------------------------------------------------------------
+# Parallel evaluation engine
 def evaluate_checkpoint(
     algo_name,
     stage_idx,
@@ -776,9 +772,7 @@ def parse_eval_seeds(seed_str):
     return sorted(set(seeds)) if seeds else [0]
 
 
-# ----------------------------------------------------------------------
-# CLI Runner & Multi-Model Multi-Stage Batch Evaluation
-# ----------------------------------------------------------------------
+# CLI and multi-model batch evaluation
 def parse_eval_args():
     parser = argparse.ArgumentParser(description="High-Throughput Parallel Evaluator")
     parser.add_argument(

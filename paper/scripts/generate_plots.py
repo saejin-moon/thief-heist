@@ -1,16 +1,5 @@
 #!/usr/bin/env python3
-"""
-generate_plots.py
-Publication-grade vector PDF plots for NeurIPS 2026.
-
-Design system
--------------
-* Restrained, colorblind-safe palette: crimson accent for the final method (THIEF),
-  purple for ROMA, blues for the ablation lineage, amber for RODE, neutral grays for baselines.
-* Legends ALWAYS outside the plotting axes (below), never overlapping data.
-* Figure physical size matches the NeurIPS \\textwidth (5.5 in) exactly, so
-  fonts render 1:1 at their nominal point sizes in the compiled paper.
-"""
+"""Generate vector PDF plots for experimental evaluation."""
 
 import json
 import os

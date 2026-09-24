@@ -7,7 +7,7 @@ Features:
   as any active algorithm finishes.
 - Evaluation suite trigger (--eval) with optimal sample-efficient evaluation (--eval-episodes 1000).
 - Pure Python THIEF micro-ablation suite trigger (--ablations).
-- Automatic LLM-ready master benchmark report generation (Markdown & JSON).
+- Automatic master benchmark report generation (Markdown & JSON).
 """
 
 import argparse
@@ -594,10 +594,10 @@ def execute_ablations(
     subprocess.run(cmd, check=True, env=env)
 
 
-def emit_llm_master_report(run_id: str | None = None):
-    """Generates the comprehensive Markdown and JSON master benchmark reports for LLM digestion."""
+def emit_benchmark_master_report(run_id: str | None = None):
+    """Generate comprehensive Markdown and JSON master benchmark reports."""
     print(f"\n{'=' * 85}")
-    print(f"GENERATING LLM-OPTIMIZED BENCHMARK MASTER REPORT")
+    print("GENERATING BENCHMARK MASTER REPORT")
     print(f"{'=' * 85}\n")
 
     effective_run_id = get_effective_run_id(run_id)
@@ -607,6 +607,10 @@ def emit_llm_master_report(run_id: str | None = None):
         out_md="results/benchmark_master_summary.md",
         out_json="results/benchmark_master_summary.json",
     )
+
+
+emit_llm_master_report = emit_benchmark_master_report
+
 
 
 def parse_args():
@@ -773,7 +777,8 @@ def main():
         )
 
     # 4. Generate Master Benchmark Report (Markdown & JSON)
-    emit_llm_master_report(run_id=effective_run_id)
+    emit_benchmark_master_report(run_id=effective_run_id)
+
 
 
 if __name__ == "__main__":

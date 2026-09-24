@@ -689,7 +689,7 @@ def generate_master_summary_report(
     out_md: str | None = None,
     out_json: str | None = None,
 ) -> dict[str, Any]:
-    """Generates a comprehensive master results document in Markdown and JSON for LLMs and researchers.
+    """Generate a comprehensive master results document in Markdown and JSON.
 
     Compiles:
       1. Executive Benchmark Matrix (Win Rate, IQM, 95% Bootstrap CI, Return, Stealth across Stages 0-4).
@@ -947,5 +947,5 @@ def generate_master_summary_report(
     with open(primary_json, "w") as f:
         json.dump(master_dict, f, indent=2)
 
-    print(f"\n[Master Report] Auto-generated benchmark summary in:\n  -> {primary_md}\n  -> {paper_md}\n  -> {primary_json}\n")
+    print(f"\n[Master Report] Generated benchmark summary in:\n  -> {primary_md}\n  -> {paper_md}\n  -> {primary_json}\n")
     return master_dict

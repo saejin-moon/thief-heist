@@ -3,10 +3,7 @@
 \usepackage{times}
 \usetikzlibrary{shapes.geometric, arrows.meta, positioning, fit, backgrounds, calc}
 
-% ---------------------------------------------------------------------------
-% Design system: light neutral panels, single deep-blue accent for the
-% THIEF-specific dataflow, dark gray for environment-level I/O.
-% ---------------------------------------------------------------------------
+% Light neutral panels with deep-blue accent for THIEF dataflow.
 \definecolor{panelbg}{RGB}{247, 248, 250}
 \definecolor{panelborder}{RGB}{60, 64, 67}
 \definecolor{cardbg}{RGB}{255, 255, 255}
@@ -68,9 +65,7 @@
     }
 ]
 
-% =========================================================================
-% COLUMN 1: HEIST Benchmark & Roles
-% =========================================================================
+% Column 1: HEIST benchmark and roles
 \node[rolebox] (scout) {
     \textbf{\footnotesize Scout ($S$)}\\[-1pt]
     \tiny Vision $r=8$; stand-off POI tag
@@ -98,9 +93,7 @@
           inner sep=6pt, fit=(col1_title)(scout)(extractor)] (panel_env) {};
 \end{scope}
 
-% =========================================================================
-% COLUMN 2: Decentralized Router & Specialist Pool
-% =========================================================================
+% Column 2: Decentralized router and specialist pool
 \node[card, right=2.15cm of scout, yshift=0.55cm, text width=3.45cm] (router) {
     \textbf{\footnotesize Dynamic Value Router}\\[-1pt]
     \scriptsize $k^* = \arg\max_k V_k(s)$\\[-1pt]
@@ -137,9 +130,7 @@
           inner sep=6pt, fit=(col2_title)(router)(pool_box)] (panel_router) {};
 \end{scope}
 
-% =========================================================================
-% COLUMN 3: Evolutionary Engine (THIEF Core)
-% =========================================================================
+% Column 3: Evolutionary engine (THIEF core)
 \node[evobox, right=2.15cm of router] (plateau) {
     \textbf{\footnotesize Plateau Detection}\\[-1pt]
     \tiny stagnation: $\Delta W_{100} < 0.03$
@@ -167,9 +158,7 @@
           inner sep=6pt, fit=(col3_title)(plateau)(incubate)] (panel_evo) {};
 \end{scope}
 
-% =========================================================================
-% INTER-PANEL FLOWS (labels sit in the inter-panel gaps, on white knockouts)
-% =========================================================================
+% Inter-panel flows
 % 1. Environment -> Router: observations
 \draw[->, line width=1.0pt, draw=textdark]
     (panel_env.east |- router.center) -- (panel_router.west |- router.center)

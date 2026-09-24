@@ -1400,7 +1400,7 @@ def train(
                 last_grad_norm = nn.utils.clip_grad_norm_(agent.parameters(), 0.5).item()
                 optimizer.step()
 
-        # Step A: Warmup progression & queue processing
+        # Warmup progression and queue processing
         isolation_window = (
             min(THIEF_ISOLATION_UPDATES, max(5, int(0.15 * num_updates)))
             if num_updates
@@ -1467,7 +1467,7 @@ def train(
                 if file_logger:
                     file_logger.info(msg)
 
-        # Step B: Dynamic Gradient Interference Spawning Check
+        # Dynamic gradient interference spawning check
         if not active_sandbox_mutants and not incubation_queue:
             if ablation == "fixed_schedule":
                 # Ablation: bypass gradient-conflict detection; spawn on a fixed cadence instead.
@@ -1667,7 +1667,7 @@ def train(
             )
             console_logger.info(console_str)
 
-            # Comprehensive file log
+            # File log
             if file_logger:
                 file_str = (
                     f"Update: {update}/{num_updates} | "

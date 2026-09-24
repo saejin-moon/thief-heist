@@ -1,16 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# =============================================================================
-# Full MARL Benchmark Suite Pipeline:
-# - All 9 algorithms in priority order (thief, ecoop, mappo, hmappo, coop, marc, coma, roma, rode)
-# - Dynamic concurrency: 2 algorithms simultaneously with automatic queue popping
-# - 10 seeds (0-9 inclusive) across 5 curriculum stages
-# - Native Rust environment acceleration
-# - Full parallel evaluation suite (1,000 episodes per seed/stage)
-# - THIEF component micro-ablation suite (7 variants)
-# - LLM-ready master benchmark summary report (Markdown & JSON)
-# =============================================================================
+# Benchmark pipeline runner for HEIST algorithms across seeds and curriculum stages.
 
 PYTHONPATH=src/py uv run python src/py/curriculum.py \
     --algos roma,rode \
@@ -19,4 +10,3 @@ PYTHONPATH=src/py uv run python src/py/curriculum.py \
     --rust \
     --eval \
     --eval-episodes 1000
-    # --ablations "$@"
