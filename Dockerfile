@@ -20,7 +20,7 @@ ENV PATH="/root/.cargo/bin:${PATH}"
 # Install uv package manager
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /bin/uv
 
-# Copy project specification files
+# Copy project specification files and source code needed for compilation
 COPY Cargo.toml pyproject.toml README.md ./
 COPY src/rs/ ./src/rs/
 COPY src/py/ ./src/py/
@@ -43,22 +43,33 @@ ENV PYTHONPATH="/app/src/py"
 # Install uv in runtime container
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /bin/uv
 
-# Install the built wheel and scientific dependencies
+# Install system fonts and rendering libraries for ASCII visualizer and GIF export
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    fonts-dejavu-core \
+    fonts-liberation \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install runtime dependencies (preserving pre-baked CUDA PyTorch)
 COPY --from=builder /build/dist/*.whl /tmp/
 RUN uv pip install --system --no-cache \
-    /tmp/*.whl \
     polars \
     pyarrow \
     matplotlib \
     gymnasium \
-    pytest
+    pettingzoo \
+    lbforaging \
+    pillow \
+    scipy \
+    pytest \
+    && uv pip install --system --no-deps --no-cache /tmp/*.whl \
+    && rm -rf /tmp/*.whl
 
-# Copy application source and scripts
+# Copy application source, scripts, and configuration
 COPY . /app
 
-# Ensure entry script is executable
-RUN chmod +x /app/script.sh
+# Ensure runner scripts are executable
+RUN chmod +x /app/script.sh /app/script_lbf.sh /app/paper/scripts/build.sh
 
-# Default entrypoint runs the full curriculum runner
-ENTRYPOINT ["python", "src/py/curriculum.py"]
-CMD ["--algos", "all", "--concurrent-algos", "2", "--seeds", "0-9", "--rust", "--eval", "--ablations"]
+# Default command runs full curriculum benchmark; can be easily overridden
+CMD ["python", "src/py/curriculum.py", "--algos", "all", "--concurrent-algos", "2", "--seeds", "0-9", "--rust", "--eval", "--ablations"]

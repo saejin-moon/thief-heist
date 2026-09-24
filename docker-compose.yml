@@ -1,5 +1,3 @@
-version: "3.8"
-
 services:
   benchmark:
     build:
@@ -10,6 +8,7 @@ services:
     volumes:
       - ./results:/app/results
       - ./paper/tables:/app/paper/tables
+      - ./docs/assets:/app/docs/assets
     environment:
       - PYTHONUNBUFFERED=1
     deploy:
@@ -19,3 +18,17 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
+
+  cpu-benchmark:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: thief-heist:latest
+    container_name: thief-heist-cpu
+    volumes:
+      - ./results:/app/results
+      - ./paper/tables:/app/paper/tables
+      - ./docs/assets:/app/docs/assets
+    environment:
+      - PYTHONUNBUFFERED=1
+    command: ["python", "src/py/curriculum.py", "--algos", "all", "--device", "cpu", "--seeds", "0-2", "--rust"]
