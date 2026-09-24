@@ -482,7 +482,15 @@ def run_playback(
     state_dim = 6 + (MAP_SIZE[0] * MAP_SIZE[1]) + (N_AGENTS * 2) + 24 + 12
 
     if checkpoint is None:
-        checkpoint = os.path.join("results", algo, f"stage_{stage}", "model.pt")
+        final_ckpt = os.path.join("results", "final", algo, f"seed_{use_seed}", f"stage_{stage}", "model.pt")
+        final_seed0 = os.path.join("results", "final", algo, "seed_0", f"stage_{stage}", "model.pt")
+        legacy_ckpt = os.path.join("results", algo, f"stage_{stage}", "model.pt")
+        if os.path.exists(final_ckpt):
+            checkpoint = final_ckpt
+        elif os.path.exists(final_seed0):
+            checkpoint = final_seed0
+        else:
+            checkpoint = legacy_ckpt
 
     agent_model = load_model(algo, state_dim, checkpoint, device=device)
 
@@ -701,7 +709,11 @@ def main():
             algo=args.algo,
             stage=args.stage,
             seed=args.seed if args.seed is not None else 3,
-            checkpoint=args.checkpoint or os.path.join("results", args.algo, f"stage_{args.stage}", "model.pt"),
+            checkpoint=args.checkpoint or (
+                os.path.join("results", "final", args.algo, f"seed_{args.seed if args.seed is not None else 0}", f"stage_{args.stage}", "model.pt")
+                if os.path.exists(os.path.join("results", "final", args.algo, f"seed_{args.seed if args.seed is not None else 0}", f"stage_{args.stage}", "model.pt"))
+                else os.path.join("results", args.algo, f"stage_{args.stage}", "model.pt")
+            ),
             output_path=args.gif,
             device=args.device,
             fps=args.fps,

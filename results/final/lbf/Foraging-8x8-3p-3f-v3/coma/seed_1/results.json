@@ -1,0 +1,27 @@
+{
+  "env_id": "Foraging-8x8-3p-3f-v3",
+  "algo": "coma",
+  "ablation": "full",
+  "run_name": "coma",
+  "seed": 1,
+  "total_timesteps": 400000,
+  "rollout_len": 125,
+  "num_envs": 8,
+  "update_epochs": 4,
+  "lr": 0.00025,
+  "gamma": 0.99,
+  "reward_shaping": "potential-based (Ng et al. 1999), identical across algos",
+  "training_time_sec": 218.44117903709412,
+  "n_training_episodes": 8000,
+  "final_eval": {
+    "mean_return": 0.0,
+    "std_return": 0.0,
+    "mean_food": 0.0,
+    "std_food": 0.0,
+    "mean_steps": 50.0,
+    "episodes": 100
+  },
+  "final_train_win_rate": 0.0,
+  "active_experts_final": 1,
+  "total_spawns": 0
+}

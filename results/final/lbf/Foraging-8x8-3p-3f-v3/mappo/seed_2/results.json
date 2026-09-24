@@ -1,0 +1,27 @@
+{
+  "env_id": "Foraging-8x8-3p-3f-v3",
+  "algo": "mappo",
+  "ablation": "full",
+  "run_name": "mappo",
+  "seed": 2,
+  "total_timesteps": 400000,
+  "rollout_len": 125,
+  "num_envs": 8,
+  "update_epochs": 4,
+  "lr": 0.00025,
+  "gamma": 0.99,
+  "reward_shaping": "potential-based (Ng et al. 1999), identical across algos",
+  "training_time_sec": 275.9836082458496,
+  "n_training_episodes": 8097,
+  "final_eval": {
+    "mean_return": 0.18848665223665226,
+    "std_return": 0.21046817013187122,
+    "mean_food": 0.79,
+    "std_food": 0.7112664760833313,
+    "mean_steps": 49.15,
+    "episodes": 100
+  },
+  "final_train_win_rate": 0.0,
+  "active_experts_final": 1,
+  "total_spawns": 0
+}

@@ -1,0 +1,650 @@
+{
+  "Foraging-8x8-2p-3f-v3::coma": {
+    "env_id": "Foraging-8x8-2p-3f-v3",
+    "run_name": "coma",
+    "algo": "coma",
+    "ablation": "full",
+    "seeds": [
+      0,
+      1,
+      2,
+      3,
+      4
+    ],
+    "n_seeds": 5,
+    "return_mean": 0.04187142857142857,
+    "return_std": 0.03325512580854569,
+    "food_pct_mean": 5.4,
+    "food_pct_std": 4.291593850514955,
+    "food_count_mean": 0.16199999999999998,
+    "steps_mean": 50.0,
+    "mean_spawns": 0.0,
+    "mean_active_experts": 1.0,
+    "per_seed": [
+      {
+        "seed": 0,
+        "return": 0.09986111111111111,
+        "food": 0.39,
+        "steps": 50.0
+      },
+      {
+        "seed": 1,
+        "return": 0.0,
+        "food": 0.0,
+        "steps": 50.0
+      },
+      {
+        "seed": 2,
+        "return": 0.03948809523809524,
+        "food": 0.14,
+        "steps": 50.0
+      },
+      {
+        "seed": 3,
+        "return": 0.047523809523809524,
+        "food": 0.18,
+        "steps": 50.0
+      },
+      {
+        "seed": 4,
+        "return": 0.022484126984126985,
+        "food": 0.1,
+        "steps": 50.0
+      }
+    ]
+  },
+  "Foraging-8x8-2p-3f-v3::hmappo": {
+    "env_id": "Foraging-8x8-2p-3f-v3",
+    "run_name": "hmappo",
+    "algo": "hmappo",
+    "ablation": "full",
+    "seeds": [
+      0,
+      1,
+      2,
+      3,
+      4
+    ],
+    "n_seeds": 5,
+    "return_mean": 0.20180584415584413,
+    "return_std": 0.05703667002436641,
+    "food_pct_mean": 24.533333333333335,
+    "food_pct_std": 6.227537412350263,
+    "food_count_mean": 0.7360000000000001,
+    "steps_mean": 49.672,
+    "mean_spawns": 0.0,
+    "mean_active_experts": 1.0,
+    "per_seed": [
+      {
+        "seed": 0,
+        "return": 0.307267316017316,
+        "food": 1.08,
+        "steps": 50.0
+      },
+      {
+        "seed": 1,
+        "return": 0.18278571428571427,
+        "food": 0.68,
+        "steps": 50.0
+      },
+      {
+        "seed": 2,
+        "return": 0.13417857142857142,
+        "food": 0.51,
+        "steps": 50.0
+      },
+      {
+        "seed": 3,
+        "return": 0.1884246031746032,
+        "food": 0.7,
+        "steps": 48.76
+      },
+      {
+        "seed": 4,
+        "return": 0.19637301587301587,
+        "food": 0.71,
+        "steps": 49.6
+      }
+    ]
+  },
+  "Foraging-8x8-2p-3f-v3::mappo": {
+    "env_id": "Foraging-8x8-2p-3f-v3",
+    "run_name": "mappo",
+    "algo": "mappo",
+    "ablation": "full",
+    "seeds": [
+      0,
+      1,
+      2,
+      3,
+      4
+    ],
+    "n_seeds": 5,
+    "return_mean": 0.1440611111111111,
+    "return_std": 0.07199786067165492,
+    "food_pct_mean": 17.799999999999997,
+    "food_pct_std": 8.7371492935498,
+    "food_count_mean": 0.534,
+    "steps_mean": 49.602,
+    "mean_spawns": 0.0,
+    "mean_active_experts": 1.0,
+    "per_seed": [
+      {
+        "seed": 0,
+        "return": 0.003666666666666667,
+        "food": 0.02,
+        "steps": 50.0
+      },
+      {
+        "seed": 1,
+        "return": 0.16810714285714284,
+        "food": 0.64,
+        "steps": 49.57
+      },
+      {
+        "seed": 2,
+        "return": 0.15579365079365076,
+        "food": 0.58,
+        "steps": 50.0
+      },
+      {
+        "seed": 3,
+        "return": 0.19951190476190475,
+        "food": 0.73,
+        "steps": 48.44
+      },
+      {
+        "seed": 4,
+        "return": 0.19322619047619047,
+        "food": 0.7,
+        "steps": 50.0
+      }
+    ]
+  },
+  "Foraging-8x8-2p-3f-v3::rode": {
+    "env_id": "Foraging-8x8-2p-3f-v3",
+    "run_name": "rode",
+    "algo": "rode",
+    "ablation": "full",
+    "seeds": [
+      0,
+      1,
+      2,
+      3,
+      4
+    ],
+    "n_seeds": 5,
+    "return_mean": 0.03635714285714286,
+    "return_std": 0.008719449419885467,
+    "food_pct_mean": 4.733333333333333,
+    "food_pct_std": 1.18133634311129,
+    "food_count_mean": 0.142,
+    "steps_mean": 50.0,
+    "mean_spawns": 0.0,
+    "mean_active_experts": 1.0,
+    "per_seed": [
+      {
+        "seed": 0,
+        "return": 0.05057142857142857,
+        "food": 0.19,
+        "steps": 50.0
+      },
+      {
+        "seed": 1,
+        "return": 0.04192857142857142,
+        "food": 0.18,
+        "steps": 50.0
+      },
+      {
+        "seed": 2,
+        "return": 0.032357142857142855,
+        "food": 0.12,
+        "steps": 50.0
+      },
+      {
+        "seed": 3,
+        "return": 0.02666666666666667,
+        "food": 0.11,
+        "steps": 50.0
+      },
+      {
+        "seed": 4,
+        "return": 0.03026190476190476,
+        "food": 0.11,
+        "steps": 50.0
+      }
+    ]
+  },
+  "Foraging-8x8-2p-3f-v3::roma": {
+    "env_id": "Foraging-8x8-2p-3f-v3",
+    "run_name": "roma",
+    "algo": "roma",
+    "ablation": "full",
+    "seeds": [
+      0,
+      1,
+      2,
+      3,
+      4
+    ],
+    "n_seeds": 5,
+    "return_mean": 0.15533333333333332,
+    "return_std": 0.023089959168688248,
+    "food_pct_mean": 19.266666666666666,
+    "food_pct_std": 2.7438820836342233,
+    "food_count_mean": 0.5780000000000001,
+    "steps_mean": 49.51199999999999,
+    "mean_spawns": 0.0,
+    "mean_active_experts": 1.0,
+    "per_seed": [
+      {
+        "seed": 0,
+        "return": 0.1251944444444444,
+        "food": 0.45,
+        "steps": 50.0
+      },
+      {
+        "seed": 1,
+        "return": 0.13664285714285715,
+        "food": 0.53,
+        "steps": 49.6
+      },
+      {
+        "seed": 2,
+        "return": 0.15146825396825397,
+        "food": 0.58,
+        "steps": 49.17
+      },
+      {
+        "seed": 3,
+        "return": 0.1832222222222222,
+        "food": 0.66,
+        "steps": 49.2
+      },
+      {
+        "seed": 4,
+        "return": 0.18013888888888885,
+        "food": 0.67,
+        "steps": 49.59
+      }
+    ]
+  },
+  "Foraging-8x8-2p-3f-v3::thief": {
+    "env_id": "Foraging-8x8-2p-3f-v3",
+    "run_name": "thief",
+    "algo": "thief",
+    "ablation": "full",
+    "seeds": [
+      0,
+      1,
+      2,
+      3,
+      4
+    ],
+    "n_seeds": 5,
+    "return_mean": 0.210715873015873,
+    "return_std": 0.0364530301920003,
+    "food_pct_mean": 26.266666666666662,
+    "food_pct_std": 4.682829154356251,
+    "food_count_mean": 0.788,
+    "steps_mean": 49.523999999999994,
+    "mean_spawns": 2.0,
+    "mean_active_experts": 4.0,
+    "per_seed": [
+      {
+        "seed": 0,
+        "return": 0.22667460317460317,
+        "food": 0.82,
+        "steps": 49.11
+      },
+      {
+        "seed": 1,
+        "return": 0.22096428571428575,
+        "food": 0.82,
+        "steps": 49.57
+      },
+      {
+        "seed": 2,
+        "return": 0.1438095238095238,
+        "food": 0.53,
+        "steps": 49.73
+      },
+      {
+        "seed": 3,
+        "return": 0.25319841269841264,
+        "food": 0.96,
+        "steps": 49.61
+      },
+      {
+        "seed": 4,
+        "return": 0.20893253968253966,
+        "food": 0.81,
+        "steps": 49.6
+      }
+    ]
+  },
+  "Foraging-8x8-3p-3f-v3::coma": {
+    "env_id": "Foraging-8x8-3p-3f-v3",
+    "run_name": "coma",
+    "algo": "coma",
+    "ablation": "full",
+    "seeds": [
+      0,
+      1,
+      2,
+      3,
+      4
+    ],
+    "n_seeds": 5,
+    "return_mean": 0.006637445887445889,
+    "return_std": 0.00805685857805239,
+    "food_pct_mean": 1.0666666666666667,
+    "food_pct_std": 1.2892719737209144,
+    "food_count_mean": 0.03200000000000001,
+    "steps_mean": 50.0,
+    "mean_spawns": 0.0,
+    "mean_active_experts": 1.0,
+    "per_seed": [
+      {
+        "seed": 0,
+        "return": 0.02116341991341992,
+        "food": 0.1,
+        "steps": 50.0
+      },
+      {
+        "seed": 1,
+        "return": 0.0,
+        "food": 0.0,
+        "steps": 50.0
+      },
+      {
+        "seed": 2,
+        "return": 0.0,
+        "food": 0.0,
+        "steps": 50.0
+      },
+      {
+        "seed": 3,
+        "return": 0.009523809523809523,
+        "food": 0.05,
+        "steps": 50.0
+      },
+      {
+        "seed": 4,
+        "return": 0.0025,
+        "food": 0.01,
+        "steps": 50.0
+      }
+    ]
+  },
+  "Foraging-8x8-3p-3f-v3::hmappo": {
+    "env_id": "Foraging-8x8-3p-3f-v3",
+    "run_name": "hmappo",
+    "algo": "hmappo",
+    "ablation": "full",
+    "seeds": [
+      0,
+      1,
+      2,
+      3,
+      4
+    ],
+    "n_seeds": 5,
+    "return_mean": 0.3285484508955097,
+    "return_std": 0.3082557659979559,
+    "food_pct_mean": 37.86666666666667,
+    "food_pct_std": 30.159280863810768,
+    "food_count_mean": 1.136,
+    "steps_mean": 45.15,
+    "mean_spawns": 0.0,
+    "mean_active_experts": 1.0,
+    "per_seed": [
+      {
+        "seed": 0,
+        "return": 0.880691027926322,
+        "food": 2.69,
+        "steps": 29.35
+      },
+      {
+        "seed": 1,
+        "return": 0.45284851259851266,
+        "food": 1.63,
+        "steps": 47.24
+      },
+      {
+        "seed": 2,
+        "return": 0.12581107781107778,
+        "food": 0.55,
+        "steps": 49.16
+      },
+      {
+        "seed": 3,
+        "return": 0.0643519536019536,
+        "food": 0.3,
+        "steps": 50.0
+      },
+      {
+        "seed": 4,
+        "return": 0.11903968253968253,
+        "food": 0.51,
+        "steps": 50.0
+      }
+    ]
+  },
+  "Foraging-8x8-3p-3f-v3::mappo": {
+    "env_id": "Foraging-8x8-3p-3f-v3",
+    "run_name": "mappo",
+    "algo": "mappo",
+    "ablation": "full",
+    "seeds": [
+      0,
+      1,
+      2,
+      3,
+      4
+    ],
+    "n_seeds": 5,
+    "return_mean": 0.23036802086802086,
+    "return_std": 0.18353300817089238,
+    "food_pct_mean": 29.6,
+    "food_pct_std": 19.17452013016811,
+    "food_count_mean": 0.8879999999999999,
+    "steps_mean": 48.28,
+    "mean_spawns": 0.0,
+    "mean_active_experts": 1.0,
+    "per_seed": [
+      {
+        "seed": 0,
+        "return": 0.12266688866688864,
+        "food": 0.55,
+        "steps": 49.28
+      },
+      {
+        "seed": 1,
+        "return": 0.15480952380952379,
+        "food": 0.68,
+        "steps": 50.0
+      },
+      {
+        "seed": 2,
+        "return": 0.18848665223665226,
+        "food": 0.79,
+        "steps": 49.15
+      },
+      {
+        "seed": 3,
+        "return": 0.09392554667554666,
+        "food": 0.41,
+        "steps": 50.0
+      },
+      {
+        "seed": 4,
+        "return": 0.591951492951493,
+        "food": 2.01,
+        "steps": 42.97
+      }
+    ]
+  },
+  "Foraging-8x8-3p-3f-v3::rode": {
+    "env_id": "Foraging-8x8-3p-3f-v3",
+    "run_name": "rode",
+    "algo": "rode",
+    "ablation": "full",
+    "seeds": [
+      0,
+      1,
+      2,
+      3,
+      4
+    ],
+    "n_seeds": 5,
+    "return_mean": 0.03317886002886002,
+    "return_std": 0.00449209225697446,
+    "food_pct_mean": 4.866666666666666,
+    "food_pct_std": 1.127435635019184,
+    "food_count_mean": 0.14600000000000002,
+    "steps_mean": 50.0,
+    "mean_spawns": 0.0,
+    "mean_active_experts": 1.0,
+    "per_seed": [
+      {
+        "seed": 0,
+        "return": 0.03801298701298701,
+        "food": 0.16,
+        "steps": 50.0
+      },
+      {
+        "seed": 1,
+        "return": 0.03179365079365079,
+        "food": 0.13,
+        "steps": 50.0
+      },
+      {
+        "seed": 2,
+        "return": 0.03386507936507936,
+        "food": 0.16,
+        "steps": 50.0
+      },
+      {
+        "seed": 3,
+        "return": 0.03688131313131313,
+        "food": 0.19,
+        "steps": 50.0
+      },
+      {
+        "seed": 4,
+        "return": 0.02534126984126984,
+        "food": 0.09,
+        "steps": 50.0
+      }
+    ]
+  },
+  "Foraging-8x8-3p-3f-v3::roma": {
+    "env_id": "Foraging-8x8-3p-3f-v3",
+    "run_name": "roma",
+    "algo": "roma",
+    "ablation": "full",
+    "seeds": [
+      0,
+      1,
+      2,
+      3,
+      4
+    ],
+    "n_seeds": 5,
+    "return_mean": 0.27589283494283495,
+    "return_std": 0.2818506865692354,
+    "food_pct_mean": 32.13333333333333,
+    "food_pct_std": 27.584697851445743,
+    "food_count_mean": 0.9640000000000001,
+    "steps_mean": 45.958000000000006,
+    "mean_spawns": 0.0,
+    "mean_active_experts": 1.0,
+    "per_seed": [
+      {
+        "seed": 0,
+        "return": 0.1005717893217893,
+        "food": 0.42,
+        "steps": 49.94
+      },
+      {
+        "seed": 1,
+        "return": 0.12951190476190477,
+        "food": 0.56,
+        "steps": 50.0
+      },
+      {
+        "seed": 2,
+        "return": 0.04769047619047619,
+        "food": 0.22,
+        "steps": 49.86
+      },
+      {
+        "seed": 3,
+        "return": 0.8170784493284493,
+        "food": 2.51,
+        "steps": 31.12
+      },
+      {
+        "seed": 4,
+        "return": 0.2846115551115551,
+        "food": 1.11,
+        "steps": 48.87
+      }
+    ]
+  },
+  "Foraging-8x8-3p-3f-v3::thief": {
+    "env_id": "Foraging-8x8-3p-3f-v3",
+    "run_name": "thief",
+    "algo": "thief",
+    "ablation": "full",
+    "seeds": [
+      0,
+      1,
+      2,
+      3,
+      4
+    ],
+    "n_seeds": 5,
+    "return_mean": 0.14452567987567988,
+    "return_std": 0.03461888657719005,
+    "food_pct_mean": 21.266666666666666,
+    "food_pct_std": 4.0409019895177964,
+    "food_count_mean": 0.6380000000000001,
+    "steps_mean": 49.769999999999996,
+    "mean_spawns": 2.0,
+    "mean_active_experts": 4.0,
+    "per_seed": [
+      {
+        "seed": 0,
+        "return": 0.1756619769119769,
+        "food": 0.73,
+        "steps": 50.0
+      },
+      {
+        "seed": 1,
+        "return": 0.11866305916305915,
+        "food": 0.54,
+        "steps": 50.0
+      },
+      {
+        "seed": 2,
+        "return": 0.1652937617937618,
+        "food": 0.71,
+        "steps": 49.14
+      },
+      {
+        "seed": 3,
+        "return": 0.08917518592518592,
+        "food": 0.45,
+        "steps": 49.89
+      },
+      {
+        "seed": 4,
+        "return": 0.17383441558441556,
+        "food": 0.76,
+        "steps": 49.82
+      }
+    ]
+  }
+}

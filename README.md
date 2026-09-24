@@ -157,10 +157,10 @@ Run the interactive terminal debugger on any curriculum stage with live status H
 
 ```bash
 # Interactive terminal playback
-uv run python src/py/ascii.py --stage 2 --algo thief --checkpoint results/G20x/thief/seed_0/stage_2/model.pt
+uv run python src/py/ascii.py --stage 2 --algo thief --checkpoint results/final/thief/seed_0/stage_2/model.pt
 
 # Record episode directly to animated GIF
-uv run python src/py/ascii.py --stage 2 --algo thief --checkpoint results/G20x/thief/seed_0/stage_2/model.pt --gif docs/assets/heist_stage2_thief.gif
+uv run python src/py/ascii.py --stage 2 --algo thief --checkpoint results/final/thief/seed_0/stage_2/model.pt --gif docs/assets/heist_stage2_thief.gif
 ```
 
 Or invoke the standalone recording CLI:

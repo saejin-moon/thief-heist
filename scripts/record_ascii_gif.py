@@ -262,7 +262,7 @@ def record_gif(
     algo: str = "thief",
     stage: int = 2,
     seed: int = 3,
-    checkpoint: str = "results/G20x/thief/seed_0/stage_2/model.pt",
+    checkpoint: str = "results/final/thief/seed_0/stage_2/model.pt",
     output_path: str = "docs/assets/heist_stage2_thief.gif",
     device: str = "cuda" if torch.cuda.is_available() else "cpu",
     fps: int = 6,
@@ -445,7 +445,7 @@ def main():
     parser.add_argument(
         "--checkpoint",
         type=str,
-        default="results/G20x/thief/seed_0/stage_2/model.pt",
+        default="results/final/thief/seed_0/stage_2/model.pt",
     )
     parser.add_argument(
         "--output",
