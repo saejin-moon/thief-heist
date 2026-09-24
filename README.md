@@ -6,9 +6,9 @@
 [![Docker](https://img.shields.io/badge/Docker-Ready-2496ED.svg)](Dockerfile)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
-![HEIST Stage 3 THIEF Gameplay](docs/assets/heist_stage3_thief.gif)
+![HEIST Stage 4 THIEF Gameplay](docs/assets/heist_stage4_thief.gif)
 
-*Figure: Terminal ASCII playback of a fully trained THIEF policy on HEIST Stage 3 ($35 \times 35$ grid, 3 patrolling guards, 2 security cameras, 3 locked doors, alarm capacity 150.0). Four heterogeneous agents (Scout, Hacker, Muscle, Extractor) coordinate to identify security assets, neutralize patrolling guards, hack the central terminal, secure the vault loot, and execute a synchronized exfiltration.*
+*Figure: Terminal ASCII playback of a fully trained THIEF policy on HEIST Stage 4 ($50 \times 50$ grid, 4 patrolling guards, 3 security cameras, 4 locked doors, alarm capacity 175.0). Four heterogeneous agents (Scout, Hacker, Muscle, Extractor) coordinate to identify security assets, neutralize patrolling guards, hack the central terminal, secure the vault loot, and execute a synchronized exfiltration.*
 
 ---
 

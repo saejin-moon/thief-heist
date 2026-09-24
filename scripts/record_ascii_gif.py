@@ -507,8 +507,9 @@ def record_gif(
             font_path = cand
             break
 
+    font_size = 13 if stage >= 4 else 15
     if font_path:
-        font = ImageFont.truetype(font_path, 15)
+        font = ImageFont.truetype(font_path, font_size)
     else:
         font = ImageFont.load_default()
 
@@ -517,6 +518,11 @@ def record_gif(
     w = config.get("map_w", 35)
     box_w = max(78, w * 2 + 8)
 
+    cell_w = 8 if stage >= 4 else 9
+    cell_h = 16 if stage >= 4 else 20
+    pad_x = 20 if stage >= 4 else 24
+    pad_y = 16 if stage >= 4 else 20
+
     current_seed = seed
     attempts = 0
     chosen_frames = None
@@ -524,6 +530,8 @@ def record_gif(
 
     while attempts < max_attempts:
         attempts += 1
+        torch.manual_seed(current_seed)
+        np.random.seed(current_seed)
         print(f"[{attempts}/{max_attempts}] Simulating Stage {stage} ({algo}) with seed {current_seed}...")
         env = RustEnvWrapper(config, base_seed=current_seed)
         env.reset(seed=current_seed)
@@ -538,6 +546,10 @@ def record_gif(
             max_steps=max_steps,
             font=font,
             box_w=box_w,
+            cell_w=cell_w,
+            cell_h=cell_h,
+            pad_x=pad_x,
+            pad_y=pad_y,
         )
 
         print(f" -> Result: won={won}, steps={steps}, return={ret:+.2f}")
