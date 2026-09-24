@@ -6,9 +6,9 @@
 [![Docker](https://img.shields.io/badge/Docker-Ready-2496ED.svg)](Dockerfile)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-![HEIST Stage 2 THIEF Gameplay](docs/assets/heist_stage2_thief.gif)
+![HEIST Stage 3 THIEF Gameplay](docs/assets/heist_stage3_thief.gif)
 
-*Figure: Terminal ASCII playback (`src/py/ascii.py`) of a fully trained THIEF policy on HEIST Stage 2 ($25 \times 25$ grid, 2 patrolling guards, 1 security camera, 2 locked doors, alarm capacity 125.0). Four heterogeneous agents (Scout, Hacker, Muscle, Extractor) coordinate to identify security assets, neutralize threats, hack the central terminal, secure the vault loot, and execute a timed exfiltration.*
+*Figure: Terminal ASCII playback of a fully trained THIEF policy on HEIST Stage 3 ($35 \times 35$ grid, 3 patrolling guards, 2 security cameras, 3 locked doors, alarm capacity 150.0). Four heterogeneous agents (Scout, Hacker, Muscle, Extractor) coordinate to identify security assets, neutralize patrolling guards, hack the central terminal, secure the vault loot, and execute a synchronized exfiltration.*
 
 ---
 
@@ -319,7 +319,7 @@ thief-heist/
 ├── script.sh                  # Master benchmark reproduction script
 ├── script_lbf.sh              # LBF transfer benchmark reproduction script
 ├── docs/
-│   └── assets/                # Documentation media assets (heist_stage2_thief.gif)
+│   └── assets/                # Documentation media assets (heist_stage3_thief.gif)
 ├── paper/                     # Publication LaTeX source and compilation tools
 │   ├── main.tex               # LaTeX master document
 │   ├── references.bib         # Academic bibliography
