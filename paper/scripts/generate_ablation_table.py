@@ -18,13 +18,13 @@ from collections import defaultdict
 import numpy as np
 
 VARIANT_META = {
-    "none":           ("Full THIEF", "nothing ablated"),
-    "no_incubation":  ("w/o incubation", r"$\tau_{\mathrm{iso}}=0$ (child skips sandbox)"),
-    "uniform_recomb": ("w/o Fisher geometry", "uniform recombination"),
-    "clone_best":     ("clone-best-parent", r"child $=$ best parent $+$ noise"),
-    "no_balance":     (r"w/o load balancing", r"$\alpha_{\mathrm{bal}}=0$"),
-    "no_hysteresis":  ("w/o hysteresis", r"$\epsilon=0$"),
-    "fixed_schedule": ("fixed-schedule spawning", "plateau trigger bypassed"),
+    "none":           ("Full THIEF", "standard framework"),
+    "no_incubation":  ("w/o incubation", r"$\tau_{\mathrm{iso}}=0$ (skip sandbox)"),
+    "uniform_recomb": ("w/o Fisher", "uniform recombination"),
+    "clone_best":     ("clone-best", r"best parent $+$ noise"),
+    "no_balance":     (r"w/o balance", r"$\alpha_{\mathrm{bal}}=0$"),
+    "no_hysteresis":  ("w/o hysteresis", r"$\epsilon=0$ (no barrier)"),
+    "fixed_schedule": ("fixed-cadence", "periodic updates"),
 }
 
 VARIANT_ORDER = [
@@ -37,7 +37,7 @@ VARIANT_ORDER = [
     "fixed_schedule",
 ]
 
-STAGE_LABELS = {2: r"Stage 2 ($25^2$)", 4: r"Stage 4 ($50^2$)"}
+STAGE_LABELS = {2: r"St.~2 ($25^2$)", 4: r"St.~4 ($50^2$)"}
 
 
 def load_eval(variant, episodes):
@@ -147,15 +147,18 @@ def main():
         "\\centering",
         "\\caption{Component micro-ablations of THIEF, trained standalone (fresh initialization, no curriculum transfer) on the diagnostic stages with identical per-stage budgets, then evaluated over $N=1,\\!000$ held-out episodes per seed. $H(f)$ is the empirical dispatch routing entropy (nats) over non-dormant experts, aggregated only over runs in which $\\geq 2$ experts were spawned: with a single active expert there is no routing decision and $H(f)$ is trivially $0$, which is not a routing collapse. The fraction of runs reaching $\\geq 2$ experts is reported as K$\\geq$2 (\\%). Mechanism telemetry is averaged across seeds and stages. Bold denotes the best held-out win rate per stage.}",
         "\\label{tab:ablations}",
-        "\\vspace{0.05in}",
-        "\\resizebox{\\textwidth}{!}{%",
+        "\\vspace{0.04in}",
+        "\\footnotesize",
+        "\\setlength{\\tabcolsep}{2.5pt}",
+        "\\renewcommand{\\arraystretch}{1.06}",
         "\\begin{tabular}{l l cc cccc}",
         "\\toprule",
         " & & \\multicolumn{2}{c}{\\textbf{Held-out win rate (\\%)}} & \\multicolumn{4}{c}{\\textbf{Mechanism telemetry}} \\\\",
         "\\cmidrule(lr){3-4} \\cmidrule(lr){5-8}",
         "\\textbf{Variant} & \\textbf{Ablated component} & "
         + " & ".join(STAGE_LABELS.get(s, f"Stage {s}") for s in stages)
-        + " & Spawns & Switch (\\%) & K$\\geq$2 (\\%) & $H(f)$ (nats) \\\\",
+        + " & \\textbf{Spawns} & \\textbf{Switch} & \\textbf{K$\\geq$2} & \\textbf{$H(f)$} \\\\",
+        " & & & & & (\\%) & (\\%) & (nats) \\\\",
         "\\midrule",
     ]
 
@@ -173,7 +176,7 @@ def main():
 
         lines.append(f"{name} & {desc} & " + " & ".join(cells) + f" & {sp} & {sw} & {me} & {en} \\\\")
 
-    lines.extend(["\\bottomrule", "\\end{tabular}", "}", "\\end{table*}"])
+    lines.extend(["\\bottomrule", "\\end{tabular}", "\\end{table*}"])
 
     os.makedirs("paper/tables", exist_ok=True)
     with open("paper/tables/ablation.tex", "w") as f:

@@ -1,20 +1,23 @@
+\FloatBarrier
 \section{Empirical Results}
 \label{sec:results}
 
 We evaluate all nine algorithms across 1,000 independent evaluation episodes per checkpoint across 10 random seeds ($10,\!000$ episodes per algorithm per stage, $450,\!000$ total evaluation episodes).
 
-\input{tables/main_results}
-
 \subsection{Curriculum Scaling \& Benchmark Performance}
+\label{sec:benchmark_scaling}
+
 Table~\ref{tab:main_results} and Figure~\ref{fig:curriculum} report the empirical performance across the five curriculum stages. The benchmark demonstrates a clear progression across our iterative method lineage alongside external baselines:
+
+\input{tables/main_results}
 
 \paragraph{Stages 0 and 1 (Basic Coordination \& Adversarial Introduction):}
 On Stage 0 ($11 \times 11$, 0 guards, 0 cameras), decentralized PPO methods (THIEF, ECOOP, COOP, MARC, MAPPO) rapidly master the sequential subtask dependency, converging to near-perfect win rates ($99.2\%$--$100.0\%$) and high episodic returns ($17.3$--$17.7$). ROMA and RODE likewise achieve $100.0\%$ win rates on Stage 0, performing comparably to other decentralized methods on this basic entry level. In contrast, H-MAPPO achieves only $61.9\% \pm 8.4\%$ due to managerial latency, while COMA reaches only $4.7\% \pm 2.2\%$ due to counterfactual baseline variance in combinatorial action spaces. On Stage 1 ($17 \times 17$, 1 guard, 0 cameras), Muscle agents learn guard distraction and neutralization ($99.6\%$ neutralization rate), allowing THIEF, ECOOP, COOP, MARC, and MAPPO to maintain $99.7\%$--$99.9\%$ win rates. ROMA ($99.8\% \pm 0.1\%$) and RODE ($99.5\% \pm 0.3\%$) remain competitive with the strong decentralized PPO methods at this stage.
 
-\begin{figure}[t]
+\begin{figure}[htbp]
 \centering
 \includegraphics[width=\linewidth]{figures/curriculum_combined.pdf}
-\caption{\textbf{Curriculum Scaling Performance.} Empirical win rate (\%) and episodic return across the five HEIST curriculum stages, evaluated over $N=1,\!000$ episodes per checkpoint across 10 random seeds ($10,\!000$ episodes per point, $350,\!000$ total episodes for our iterative lineage and MAPPO/H-MAPPO/COMA, plus $100,\!000$ episodes for ROMA and RODE under the identical protocol). Method lineage (MARC $\to$ COOP $\to$ E-COOP $\to$ THIEF) is shown in blue shades with final THIEF in crimson; MAPPO is shown in dark gray. Error bands denote $\pm$ one standard deviation across seeds. H-MAPPO and COMA are omitted from curves to preserve visual resolution; their full numbers appear in Table~\ref{tab:main_results}.}
+\caption{\textbf{Curriculum Scaling \& Relative Performance Advantage.} (a) Empirical win rate (\%) across HEIST curriculum Stages 1--4 ($17\times 17$ to $50\times 50$), evaluated over $N=1,\!000$ episodes per checkpoint across 10 random seeds ($10,\!000$ episodes per point, $450,\!000$ total evaluation episodes across all nine algorithms under the identical protocol). Method lineage (MARC $\to$ COOP $\to$ E-COOP $\to$ THIEF) is shown in blue shades with final THIEF in crimson; ROMA is purple, RODE is amber, and MAPPO is dark gray. Error bars denote $\pm$ one standard deviation across seeds. (b) Win rate relative advantage over the canonical MAPPO baseline ($[\text{WR}_{\text{algo}} - \text{WR}_{\text{MAPPO}}] / \text{WR}_{\text{MAPPO}} \times 100\%$). While early stages show near parity, late-stage coordination bottlenecks cause dramatic divergence: THIEF reaches a \textbf{+101.5\% relative lead} over MAPPO on Stage 4, outperforming all baselines including ROMA (+42.4\%) and COOP (+18.2\%). H-MAPPO and COMA collapse on Stages 2--4 and are omitted from curves to preserve visual resolution; their full numbers appear in Table~\ref{tab:main_results}.}
 \label{fig:curriculum}
 \end{figure}
 
@@ -39,16 +42,26 @@ Because our benchmark comprises 10 independent training seeds, we perform two-sa
     \item THIEF vs.\ ROMA: $t = 4.514, \, df = 13.2, \, p = 5.6 \times 10^{-4}$---ROMA ($9.4\% \pm 1.2\%$) is the closest competitor and the only baseline with lower seed variance than THIEF, yet the gap remains significant at the $10^{-3}$ level.
 \end{itemize}
 
+\FloatBarrier
 \subsection{Tactical Subtask Diagnostics \& Coordination Bottlenecks}
 \label{sec:subtask_analysis}
 
-To understand the mechanistic source of THIEF's performance advantage, we evaluate role-specific subtask metrics across curriculum stages (detailed in Table~\ref{tab:subtasks_stage3} and Figure~\ref{fig:subtasks}, Appendix~\ref{sec:app_subtasks}). Across all evaluated methods, early-phase subtasks are mastered robustly on Stage 3: Scout POI tagging exceeds $96\%$ for every method ($98.7\%$ or higher for all non-hierarchical methods) and Muscle guard neutralization exceeds $92.0\%$. However, the critical operational bottleneck occurs during sequential terminal override and payload extraction:
+To understand the mechanistic source of THIEF's performance advantage, we evaluate role-specific subtask metrics across curriculum stages (detailed in Figure~\ref{fig:subtasks} and Table~\ref{tab:subtasks_stage3}, Appendix~\ref{sec:app_subtasks}). Across all evaluated methods, early-phase subtasks are mastered robustly on Stage 3: Scout POI tagging exceeds $96\%$ for every method ($98.7\%$ or higher for all non-hierarchical methods) and Muscle guard neutralization exceeds $92.0\%$. However, the critical operational bottleneck occurs during sequential terminal override and payload extraction:
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\linewidth]{figures/stage3_subtasks.pdf}
+\caption{\textbf{Role Subtask Success Rates on Stage 3.} Grouped bar breakdown of role-specific subtask completion rates for the proposed method (THIEF), key ablation (COOP), and external baselines (ROMA, MAPPO, H-MAPPO) on Stage 3 ($35\times 35$, 3 guards, 2 cameras, 3 locked doors), evaluated over $N=1,\!000$ episodes across 10 random training seeds ($10,\!000$ episodes per algorithm). While non-hierarchical methods reliably clear initial tagging and guard neutralization ($>92\%$), hierarchical H-MAPPO suffers catastrophic degradation at the terminal hacking ($40.5\%$) and payload extraction ($21.4\%$) stages, confirming that high-level goal abstraction misaligns with fine-grained spatial stealth.}
+\label{fig:subtasks}
+\end{figure}
+
 \begin{itemize}[leftmargin=*,nosep]
     \item \textbf{Terminal Hacking Fidelity:} THIEF and COOP maintain over $80.3\%$--$81.9\%$ terminal hacking completion, while H-MAPPO drops to $40.5\%$ because high-level managerial sub-goals fail to account for fine-grained guard line-of-sight cones.
     \item \textbf{Extractor Vault Looting:} Vault breaching requires synchronized timing: the Hacker must disable cameras while the Muscle prevents guard interference. THIEF achieves $65.0\%$ loot acquisition on Stage 3, and safely extracts an average of $2.37$ agents per episode.
     \item \textbf{Stage 4 Failure Modes:} Trajectory analysis on Stage 4 reveals that $70.2\%$ of THIEF's unsuccessful episodes are caused by exceeding the alarm ceiling ($\alpha \ge 175$) during prolonged extraction phases, while $29.8\%$ terminate on the step horizon ($T=5,\!000$). For H-MAPPO, $45.3\%$ of failures result from step exhaustion, indicating managerial navigation paralysis.
 \end{itemize}
 
+\FloatBarrier
 \subsection{Generalization to External Benchmarks: Level-Based Foraging}
 \label{sec:results_lbf}
 
@@ -61,3 +74,5 @@ Across both cooperative configurations, THIEF achieves strong multi-agent coordi
     \item \textbf{Two-Player Coordination (\texttt{Foraging-8x8-2p-3f-v3}):} THIEF achieves the highest food collection rate (\textbf{26.3\%}) and return ($0.211 \pm 0.036$) among all methods. MAPPO ($17.8\%$) and COMA ($5.4\%$) struggle with the sparse multi-agent coordination bottleneck. H-MAPPO reaches $24.5\%$, competitive but with higher variance. ROMA achieves $19.3\% \pm 2.3\%$ and RODE $4.7\% \pm 0.9\%$---RODE's poor performance stems from its fixed binary action decomposition (locomotion vs.\ foraging roles), which collapses when food requires simultaneous cooperative loading, as the prescribed role partition does not align with the task's coordination structure.
     \item \textbf{Three-Player Coordination (\texttt{Foraging-8x8-3p-3f-v3}):} This setting introduces a three-player cooperative challenge. H-MAPPO achieves the highest raw food collection ($37.9\%$) and ROMA second ($32.1\%$), but both exhibit extremely high variance across seeds (std $30.8\%$ and $27.6\%$ respectively), indicating brittle, seed-dependent convergence rather than robust coordination. MAPPO ($29.6\%$) similarly shows high variance ($18.4\%$ std). THIEF achieves $21.3\%$ with a markedly lower standard deviation ($4.0\%$ std), demonstrating consistent coordination across seeds. RODE collapses to $4.9\%$ for the same structural reasons as the two-player task---its fixed role partition cannot adapt to the three-agent loading topology. COMA collapses to $1.1\%$ due to the combinatorial explosion of joint action spaces in the three-player setting.
 \end{itemize}
+
+\FloatBarrier

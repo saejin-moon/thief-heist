@@ -4,7 +4,9 @@
 \caption{Universal training and architectural hyperparameters across all evaluated MARL algorithms (verified against the reference implementation). Environment- and algorithm-specific values are noted where they differ.}
 \label{tab:hyperparameters}
 \vspace{0.06in}
-\footnotesize
+\small
+\setlength{\tabcolsep}{4.0pt}
+\renewcommand{\arraystretch}{1.08}
 \begin{tabular}{ll}
 \toprule
 \textbf{Hyperparameter} & \textbf{Value} \\
@@ -20,12 +22,12 @@ Mini-batches per Update & 4 (batch size / 4) \\
 Entropy / Value Coefficients & 0.01 / 0.5 \\
 Rollout Horizon ($T$) & 125 steps (all stages) \\
 Vectorized Environments & 16 (THIEF, E-COOP); 8 (all other methods) \\
-Updates per Stage & 100/100/250/450/800 (THIEF, 16 envs); $2\times$ more for 8-env baselines \\\
+Updates per Stage & 100/100/250/450/800 (16 envs); $2\times$ for 8-env baselines \\
 Training Budget per Stage & $2/2/5/9/16 \times 10^5$ env.\ steps (Stages 0--4) \\
 \midrule
 \multicolumn{2}{l}{\emph{THIEF-specific}} \\
 Hysteresis Barrier ($\epsilon$) & 0.05 \\
-Plateau Trigger ($\Delta_{\text{win}}$) & $< 0.03$ over the last 100 episodes ($\ge$ 200 recorded) \\
+Plateau Trigger ($\Delta_{\text{win}}$) & $< 0.03$ over last 100 episodes ($\ge 200$ recorded) \\
 Spawning Ceiling & suppressed when recent win rate $\ge 0.90$ \\
 Incubation Duration ($\tau_{\text{iso}}$) & 10 updates (4 of 16 environments, 25\%) \\
 Fisher Decay ($\beta$) & 0.99 \\

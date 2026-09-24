@@ -3,22 +3,24 @@
 \centering
 \caption{Component micro-ablations of THIEF, trained standalone (fresh initialization, no curriculum transfer) on the diagnostic stages with identical per-stage budgets, then evaluated over $N=1,\!000$ held-out episodes per seed. $H(f)$ is the empirical dispatch routing entropy (nats) over non-dormant experts, aggregated only over runs in which $\geq 2$ experts were spawned: with a single active expert there is no routing decision and $H(f)$ is trivially $0$, which is not a routing collapse. The fraction of runs reaching $\geq 2$ experts is reported as K$\geq$2 (\%). Mechanism telemetry is averaged across seeds and stages. Bold denotes the best held-out win rate per stage.}
 \label{tab:ablations}
-\vspace{0.05in}
-\resizebox{\textwidth}{!}{%
+\vspace{0.04in}
+\footnotesize
+\setlength{\tabcolsep}{2.5pt}
+\renewcommand{\arraystretch}{1.06}
 \begin{tabular}{l l cc cccc}
 \toprule
  & & \multicolumn{2}{c}{\textbf{Held-out win rate (\%)}} & \multicolumn{4}{c}{\textbf{Mechanism telemetry}} \\
 \cmidrule(lr){3-4} \cmidrule(lr){5-8}
-\textbf{Variant} & \textbf{Ablated component} & Stage 2 ($25^2$) & Stage 4 ($50^2$) & Spawns & Switch (\%) & K$\geq$2 (\%) & $H(f)$ (nats) \\
+\textbf{Variant} & \textbf{Ablated component} & St.~2 ($25^2$) & St.~4 ($50^2$) & \textbf{Spawns} & \textbf{Switch} & \textbf{K$\geq$2} & \textbf{$H(f)$} \\
+ & & & & & (\%) & (\%) & (nats) \\
 \midrule
-Full THIEF & nothing ablated & 80.8\tiny$\pm$3.7\% & \textbf{13.7\tiny$\pm$4.8\%} & 0.5 & 4.7 & 35 & 0.67 \\
-w/o incubation & $\tau_{\mathrm{iso}}=0$ (child skips sandbox) & 80.3\tiny$\pm$3.5\% & 12.4\tiny$\pm$4.7\% & 0.5 & 3.9 & 25 & 0.78 \\
-w/o Fisher geometry & uniform recombination & \textbf{83.3\tiny$\pm$4.8\%} & 13.5\tiny$\pm$2.9\% & 0.3 & 2.1 & 25 & 0.66 \\
-clone-best-parent & child $=$ best parent $+$ noise & 78.7\tiny$\pm$3.0\% & 12.4\tiny$\pm$4.0\% & 0.6 & 7.5 & 35 & 0.63 \\
-w/o load balancing & $\alpha_{\mathrm{bal}}=0$ & 82.7\tiny$\pm$1.1\% & 12.6\tiny$\pm$2.3\% & 0.3 & 0.3 & 33 & 0.00 \\
-w/o hysteresis & $\epsilon=0$ & 83.2\tiny$\pm$0.9\% & 13.2\tiny$\pm$1.4\% & 0.3 & 2.8 & 17 & 0.85 \\
-fixed-schedule spawning & plateau trigger bypassed & 82.8\tiny$\pm$2.6\% & 10.3\tiny$\pm$0.9\% & 3.0 & 25.2 & 100 & 0.90 \\
+Full THIEF & standard framework & 80.8\tiny$\pm$3.7\% & \textbf{13.7\tiny$\pm$4.8\%} & 0.5 & 4.7 & 35 & 0.67 \\
+w/o incubation & $\tau_{\mathrm{iso}}=0$ (skip sandbox) & 80.3\tiny$\pm$3.5\% & 12.4\tiny$\pm$4.7\% & 0.5 & 3.9 & 25 & 0.78 \\
+w/o Fisher & uniform recombination & \textbf{83.3\tiny$\pm$4.8\%} & 13.5\tiny$\pm$2.9\% & 0.3 & 2.1 & 25 & 0.66 \\
+clone-best & best parent $+$ noise & 78.7\tiny$\pm$3.0\% & 12.4\tiny$\pm$4.0\% & 0.6 & 7.5 & 35 & 0.63 \\
+w/o balance & $\alpha_{\mathrm{bal}}=0$ & 82.7\tiny$\pm$1.1\% & 12.6\tiny$\pm$2.3\% & 0.3 & 0.3 & 33 & 0.00 \\
+w/o hysteresis & $\epsilon=0$ (no barrier) & 83.2\tiny$\pm$0.9\% & 13.2\tiny$\pm$1.4\% & 0.3 & 2.8 & 17 & 0.85 \\
+fixed-cadence & periodic updates & 82.8\tiny$\pm$2.6\% & 10.3\tiny$\pm$0.9\% & 3.0 & 25.2 & 100 & 0.90 \\
 \bottomrule
 \end{tabular}
-}
 \end{table*}

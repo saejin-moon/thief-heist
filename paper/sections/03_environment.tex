@@ -24,7 +24,7 @@ HEIST exposes two structural properties that stress-test MARL architectures:
 \end{enumerate}
 
 \subsection{Asymmetric Role Specialization}
-The four roles possess non-interchangeable functional mechanics (summarized in Table~\ref{tab:stage_specs}):
+The four roles possess non-interchangeable functional mechanics (summarized below):
 \begin{itemize}[leftmargin=*,nosep]
     \item \textbf{Scout ($S$):} Employs long-range vision ($r_{\text{vis}} = 8$). Executing \texttt{INTERACT} within standoff range ($d \le 8$) tags Points of Interest (cameras, terminals, vaults), projecting directional guidance onto teammates' compass vectors $\mathbf{g}_i$.
     \item \textbf{Hacker ($H$):} Bypasses locked electronic doors via \texttt{INTERACT} and disables the master security terminal through three consecutive interaction turns, permanently shutting down security cameras and opening vault access.
