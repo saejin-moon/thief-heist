@@ -4,7 +4,7 @@
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](src/py)
 [![PyTorch](https://img.shields.io/badge/PyTorch-CUDA%20Accelerated-red.svg)](https://pytorch.org/)
 [![Docker](https://img.shields.io/badge/Docker-Ready-2496ED.svg)](Dockerfile)
-[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
 ![HEIST Stage 3 THIEF Gameplay](docs/assets/heist_stage3_thief.gif)
 
@@ -387,4 +387,4 @@ uv run pytest
 
 ## License
 
-This project is licensed under the MIT License. See [LICENSE](LICENSE) for details.
+This project is licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) for details.
