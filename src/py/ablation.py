@@ -61,7 +61,7 @@ STAGE_LABELS = {
 STAGE_BUDGETS = {
     0: 200_000,
     1: 200_000,
-    2: 500_000,
+    2: 320_000,
     3: 900_000,
     4: 1_600_000,
 }
@@ -162,7 +162,7 @@ def evaluate_ablation_variant(
     stages: list[int],
     seeds: list[int],
     episodes: int = 1000,
-    num_envs: int = 16,
+    num_envs: int = 64,
     use_rust: bool = False,
 ):
     """Evaluates checkpoints for a given ablation variant across seeds and stages."""
@@ -335,7 +335,7 @@ def run_ablation_suite(
     force: bool = False,
     skip_train: bool = False,
     skip_eval: bool = False,
-    num_envs: int = 16,
+    num_envs: int = 64,
 ):
     """Master runner for the ablation suite."""
     if variants is None:
@@ -453,8 +453,8 @@ def parse_args():
     parser.add_argument(
         "--num-envs",
         type=int,
-        default=16,
-        help="Number of parallel environments (default: 16)",
+        default=64,
+        help="Number of parallel environments (default: 64)",
     )
     return parser.parse_args()
 

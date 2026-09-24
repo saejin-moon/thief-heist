@@ -18,7 +18,17 @@ from curriculum import (
 
 class TestCurriculumContracts(unittest.TestCase):
     def test_priority_algo_order(self):
-        expected_order = ["thief", "ecoop", "mappo", "hmappo", "coop", "marc", "coma"]
+        expected_order = [
+            "thief",
+            "ecoop",
+            "mappo",
+            "hmappo",
+            "coop",
+            "marc",
+            "coma",
+            "roma",
+            "rode",
+        ]
         self.assertEqual(PRIORITY_ALGO_ORDER, expected_order)
 
     def test_parse_algos(self):

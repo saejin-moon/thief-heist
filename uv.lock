@@ -650,6 +650,23 @@ wheels = [
 ]
 
 [[package]]
+name = "lbforaging"
+version = "2.0.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "gymnasium" },
+    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
+    { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+    { name = "pyglet" },
+    { name = "six" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/5b/c4/d0645e14638d686118db9d62df9fa17e6f97e8645acff34c9b4c67d9f62c/lbforaging-2.0.0.tar.gz", hash = "sha256:4473b7938cafcaf72d0183d266c6e0fb278338672d8722577cc5269bd4670f23", size = 24758, upload-time = "2024-07-22T20:13:39.131Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ae/b2/184a7f7a50aee5901bb3976ef1e2efc7b28f5a259bacc48db93b7c3f38e2/lbforaging-2.0.0-py3-none-any.whl", hash = "sha256:35278b618993b0dcbb6be8ff22ddeb17840a7b4fa31d9c6582f85d967e7a3ad9", size = 23332, upload-time = "2024-07-22T20:13:37.757Z" },
+]
+
+[[package]]
 name = "markupsafe"
 version = "3.0.3"
 source = { registry = "https://pypi.org/simple" }
@@ -1503,6 +1520,15 @@ wheels = [
 ]
 
 [[package]]
+name = "pyglet"
+version = "1.5.31"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/f7/c0/59130a7edbcc8f84e35870b00a712538ca05415ff02d17181277b8ef8f05/pyglet-1.5.31.zip", hash = "sha256:a5e422b4c27b0fc99e92103bf493109cca5c18143583b868b3b4631a98ae9417", size = 6900712, upload-time = "2024-12-24T07:10:58.022Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/e2/43/46aa0ab49f2f5145d201780c7595cf0c305fb4fb5d00d6639792a3d0e770/pyglet-1.5.31-py3-none-any.whl", hash = "sha256:f68413564bbec380e4815898fef0fb7a4a494dc3f8718bfbf28ce2a802634c88", size = 1143660, upload-time = "2024-12-24T07:10:50.769Z" },
+]
+
+[[package]]
 name = "pygments"
 version = "2.20.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1586,6 +1612,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "gymnasium" },
+    { name = "lbforaging" },
     { name = "matplotlib", version = "3.10.9", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "matplotlib", version = "3.11.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
@@ -1601,6 +1628,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "gymnasium", specifier = ">=1.0.0" },
+    { name = "lbforaging", specifier = ">=2.0.0" },
     { name = "matplotlib", specifier = ">=3.8.0" },
     { name = "numpy", specifier = ">=1.24.0" },
     { name = "pettingzoo", specifier = ">=1.24.0" },

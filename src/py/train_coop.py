@@ -27,6 +27,7 @@ from constants import (
     UPDATE_EPOCHS,
     VF_COEF,
 )
+from thermal_guard import check_thermal_guard
 from torch.nn import functional as F
 from torch import nn
 from torch.distributions.categorical import Categorical

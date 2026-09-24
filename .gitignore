@@ -41,3 +41,6 @@ paper/*.pdf
 
 # Local container publishing guide
 CONTAINER.md
+
+# markdown planning
+md/

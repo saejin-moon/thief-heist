@@ -676,8 +676,38 @@ def main():
         choices=["rust", "python"],
         help="Environment engine backend (default: rust)",
     )
+    parser.add_argument(
+        "--gif",
+        type=str,
+        default=None,
+        help="Path to save animated GIF playback (e.g. docs/assets/demo.gif)",
+    )
+    parser.add_argument(
+        "--fps",
+        type=int,
+        default=6,
+        help="Frames per second for saved GIF (default: 6)",
+    )
 
     args = parser.parse_args()
+
+    if args.gif:
+        repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+        if repo_root not in sys.path:
+            sys.path.insert(0, repo_root)
+        from scripts.record_ascii_gif import record_gif
+
+        record_gif(
+            algo=args.algo,
+            stage=args.stage,
+            seed=args.seed if args.seed is not None else 3,
+            checkpoint=args.checkpoint or os.path.join("results", args.algo, f"stage_{args.stage}", "model.pt"),
+            output_path=args.gif,
+            device=args.device,
+            fps=args.fps,
+            max_steps=args.max_steps or 300,
+        )
+        return
 
     try:
         run_playback(

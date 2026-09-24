@@ -3,7 +3,7 @@ set -euo pipefail
 
 # =============================================================================
 # Full MARL Benchmark Suite Pipeline:
-# - All 7 algorithms in priority order (thief, ecoop, mappo, hmappo, coop, marc, coma)
+# - All 9 algorithms in priority order (thief, ecoop, mappo, hmappo, coop, marc, coma, roma, rode)
 # - Dynamic concurrency: 2 algorithms simultaneously with automatic queue popping
 # - 10 seeds (0-9 inclusive) across 5 curriculum stages
 # - Native Rust environment acceleration
@@ -13,10 +13,10 @@ set -euo pipefail
 # =============================================================================
 
 PYTHONPATH=src/py uv run python src/py/curriculum.py \
-    --algos all \
+    --algos roma,rode \
     --concurrent-algos 2 \
     --seeds 0-9 \
     --rust \
     --eval \
-    --eval-episodes 1000 \
-    --ablations "$@"
+    --eval-episodes 1000
+    # --ablations "$@"

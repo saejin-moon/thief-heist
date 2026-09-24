@@ -214,6 +214,13 @@ THIEF_ISOLATION_UPDATES = 10
 THIEF_TARGETED_LR = 0.08
 THIEF_MUTATION_NOISE = 0.03  # Noise scale for spawned expert parameters
 THIEF_HYSTERESIS_EPSILON = 0.05
+THIEF_GRADIENT_CONFLICT_THRESHOLD = -0.20  # Spawn trigger when cos(g+, g-) < -0.20
+THIEF_DEFICIT_MIN_SAMPLES = 32  # Minimum success/failure samples for the trigger
+THIEF_MACRO_HORIZON = (
+    5  # Sub-goal duration (K steps per macro action)
+)
+THIEF_HER_AUX_COEF = 0.10  # Weight of auxiliary HER hindsight navigation policy loss
+THIEF_HER_REACH_DIST = 1.5  # Distance threshold in tiles to consider sub-goal reached
 GOAL_VECTOR_DIM = 2  # 2D unit orientation vector (ux, uy)
 THIEF_PROGRESS_COEF = (
     0.05  # Sub-goal progress reward coefficient

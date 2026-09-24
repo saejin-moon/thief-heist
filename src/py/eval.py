@@ -399,6 +399,109 @@ def load_coma_model(ckpt_path, state_dim, device):
     return policy_fn
 
 
+def load_roma_model(ckpt_path, state_dim, device):
+    from constants import GOAL_VECTOR_DIM, N_AGENTS
+    from train_roma import ROLE_DIM, RomaNetwork
+
+    ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
+    state_dict = (
+        ckpt["model_state"]
+        if isinstance(ckpt, dict) and "model_state" in ckpt
+        else ckpt
+    )
+
+    if "critic.0.weight" in state_dict:
+        state_dim = (
+            state_dict["critic.0.weight"].shape[1]
+            - N_AGENTS
+            - GOAL_VECTOR_DIM
+            - ROLE_DIM
+        )
+
+    model = RomaNetwork(state_dim).to(device)
+    model.load_state_dict(state_dict)
+    model.eval()
+
+    def policy_fn(
+        obs_all,
+        role_all,
+        mask_all,
+        goal_all,
+        state_rep,
+        prev_experts,
+    ):
+        with torch.no_grad():
+            actions, _, _, _, _ = model.get_action_and_value(
+                obs_all.flatten(0, 1),
+                role_all.flatten(0, 1),
+                mask_all.flatten(0, 1),
+                goal_all.flatten(0, 1),
+            )
+            return actions, None
+
+    return policy_fn
+
+
+def load_rode_model(ckpt_path, state_dim, device):
+    from constants import GOAL_VECTOR_DIM, N_AGENTS
+    from train_rode import MACRO_STEP, NUM_ROLES, RodeNetwork
+
+    ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
+    state_dict = (
+        ckpt["model_state"]
+        if isinstance(ckpt, dict) and "model_state" in ckpt
+        else ckpt
+    )
+
+    if "critic.0.weight" in state_dict:
+        state_dim = (
+            state_dict["critic.0.weight"].shape[1]
+            - N_AGENTS
+            - GOAL_VECTOR_DIM
+            - NUM_ROLES
+        )
+
+    model = RodeNetwork(state_dim).to(device)
+    model.load_state_dict(state_dict)
+    model.eval()
+
+    current_roles = None
+    step_count = [0]
+
+    def policy_fn(
+        obs_all,
+        role_all,
+        mask_all,
+        goal_all,
+        state_rep,
+        prev_experts,
+    ):
+        nonlocal current_roles
+        num_envs = obs_all.shape[1]
+        with torch.no_grad():
+            if step_count[0] % MACRO_STEP == 0 or current_roles is None:
+                roles_list = []
+                for i in range(N_AGENTS):
+                    sampled_role, _, _ = model.select_role(
+                        obs_all[i], role_all[i], goal_all[i]
+                    )
+                    roles_list.append(sampled_role)
+                current_roles = torch.stack(roles_list, dim=0)  # (N_AGENTS, num_envs)
+
+            step_count[0] += 1
+            flat_roles = current_roles.flatten()
+            actions, _, _, _ = model.get_action_and_value(
+                obs_all.flatten(0, 1),
+                role_all.flatten(0, 1),
+                mask_all.flatten(0, 1),
+                goal_all.flatten(0, 1),
+                flat_roles,
+            )
+            return actions, None
+
+    return policy_fn
+
+
 MODEL_LOADERS = {
     "thief": load_thief_model,
     "ecoop": load_ecoop_model,
@@ -407,6 +510,8 @@ MODEL_LOADERS = {
     "coop": load_coop_model,
     "marc": load_marc_model,
     "coma": load_coma_model,
+    "roma": load_roma_model,
+    "rode": load_rode_model,
 }
 
 
@@ -707,8 +812,8 @@ def parse_eval_args():
     parser.add_argument(
         "--num-envs",
         type=int,
-        default=16,
-        help="Number of parallel worker environments (default: 16)",
+        default=64,
+        help="Number of parallel worker environments (default: 64 for 7.4x throughput acceleration)",
     )
     parser.add_argument(
         "--ckpt",
@@ -781,7 +886,17 @@ def main():
     )
 
     if args.algo == "all":
-        algos = ["thief", "ecoop", "mappo", "hmappo", "coop", "marc", "coma"]
+        algos = [
+            "thief",
+            "ecoop",
+            "mappo",
+            "hmappo",
+            "coop",
+            "marc",
+            "coma",
+            "roma",
+            "rode",
+        ]
     elif "," in args.algo:
         algos = [x.strip().lower() for x in args.algo.split(",") if x.strip()]
     else:

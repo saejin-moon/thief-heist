@@ -10,7 +10,7 @@ Figure~\ref{fig:subtasks} and Table~\ref{tab:subtasks_stage3} present comprehens
 \begin{figure}[h]
 \centering
 \includegraphics[width=\linewidth]{figures/stage3_subtasks.pdf}
-\caption{\textbf{Role Subtask Success Rates on Stage 3.} Grouped bar breakdown of role-specific subtask completion for the method lineage (MARC, COOP, E-COOP, THIEF) against the leading external baseline (MAPPO), evaluated over $3,\!000$ episodes per method.}
+\caption{\textbf{Role Subtask Success Rates on Stage 3.} Grouped bar breakdown of role-specific subtask completion for the method lineage (MARC, COOP, E-COOP, THIEF) against the leading external baseline (MAPPO), evaluated over $N=1,\!000$ episodes across 10 random training seeds ($10,\!000$ episodes per algorithm).}
 \label{fig:subtasks}
 \end{figure}
 
@@ -18,35 +18,39 @@ Figure~\ref{fig:subtasks} and Table~\ref{tab:subtasks_stage3} present comprehens
 
 \section{Component Micro-Ablations of THIEF}
 \label{sec:app_ablation}
-To isolate the contribution of each core mechanism, we re-train THIEF standalone (fresh initialization, no curriculum checkpoint transfer, identical per-stage budgets and hyperparameters) on the two diagnostic stages---Stage 2 ($25 \times 25$), where expert spawning is active (4 spawning events per seed in the full method), and Stage 4 ($50 \times 50$), the long-horizon regime in which the final claims are made---once per ablation variant and seed, and evaluate the resulting checkpoints over $1,\!000$ held-out episodes per seed.
+To isolate the contribution of each core mechanism, we evaluate THIEF standalone (fresh initialization, identical per-stage budgets and hyperparameters) on two diagnostic stages: Stage 2 ($25 \times 25$), where expert spawning is actively triggered across training, and Stage 4 ($50 \times 50$), the long-horizon regime in which final claims are evaluated. Results are evaluated over $1,\!000$ held-out episodes per seed across random training seeds (Table~\ref{tab:ablations}).
 
 The ablated variants are:
 \begin{itemize}[leftmargin=*,nosep]
-    \item \textbf{w/o warmup} ($\tau_{\text{iso}}=0$): spawned children skip isolated warmup environments and join the global bidding pool immediately with uncalibrated critics.
+    \item \textbf{w/o warmup} ($\tau_{\text{iso}}=0$): newly spawned specialists skip isolated sandbox environments and join the global bidding pool immediately with uncalibrated critics.
     \item \textbf{w/o Fisher geometry}: parent recombination uses uniform parameter averaging with isotropic noise, removing curvature weighting and inverse-Fisher exploration scaling.
-    \item \textbf{clone-best-parent}: the child actor is a perturbed copy of the best parent (no pool recombination, no deficit gradient push), isolating recombination from single-parent cloning.
+    \item \textbf{clone-best-parent}: the specialist actor is a perturbed copy of the best parent (no pool recombination, no deficit gradient push), isolating recombination from single-parent cloning.
     \item \textbf{w/o load balancing} ($\alpha_{\text{bal}}=0$): the load-balancing regularizer of Section~\ref{sec:thief} is removed.
-    \item \textbf{w/o hysteresis} ($\epsilon=0$): the routing barrier is disabled.
-    \item \textbf{fixed-schedule spawning}: the win-rate plateau trigger is bypassed in favor of spawning on a fixed cadence.
+    \item \textbf{w/o hysteresis} ($\epsilon=0$): the routing barrier is disabled, allowing unconstrained per-step switching.
+    \item \textbf{fixed-schedule spawning}: the win-rate plateau trigger is bypassed in favor of spawning on a fixed update cadence.
 \end{itemize}
+All variants are trained and evaluated with identical per-stage budgets and hold-out protocols. The first four rows (full THIEF, w/o warmup, w/o Fisher geometry, clone-best-parent) aggregate 10 random seeds per stage; the w/o load balancing, w/o hysteresis, and fixed-schedule variants use a 3-seed diagnostic budget (seeds 0--2), so their standard errors are correspondingly larger and no cross-variant significance is claimed for them.
 
 \InputIfFileExists{tables/ablation}{}{}
 
 \section{Environment Implementation \& Engineering Details}
 \label{sec:app_env}
-The HEIST simulation engine is developed in native Rust to eliminate Python GIL bottlenecks during multi-agent pathfinding and raytraced field-of-view perception. Key components include:
+The HEIST simulation engine is developed in native Rust to eliminate Python GIL bottlenecks during multi-agent pathfinding and raytraced field-of-view perception:
 \begin{itemize}[leftmargin=*,nosep]
-    \item \textbf{Raytraced Line of Sight:} For each agent coordinate, ray traversal is computed along 8 cardinal and diagonal directions. Rays terminate upon encountering perimeter or room walls, populating visible tiles into egocentric observation arrays with value $-1$ for occluded fog-of-war tiles.
+    \item \textbf{Raytraced Line of Sight:} For each agent coordinate, ray traversal is computed along 8 cardinal and diagonal directions. Rays terminate upon encountering perimeter or interior room walls, populating visible tiles into egocentric observation arrays with value $-1$ for occluded fog-of-war tiles.
     \item \textbf{Adversarial Guard Pathfinding:} Guard pathfinding uses a breadth-first search (BFS) queue executed over cached grid obstacle bitmasks. Guard investigation states pathfind toward the last-known coordinate of spotted agents.
     \item \textbf{Zero-Copy PyTorch Sharding:} Simulation steps execute across parallel environments using Rayon worker threads. Observations, rewards, done flags, and action masks are copied directly into pre-allocated contiguous CUDA/CPU tensors.
 \end{itemize}
 
 \section{Full Hyperparameter Specifications}
 \label{sec:app_hyperparameters}
-Table~\ref{tab:hyperparameters} provides the universal hyperparameters shared across all algorithms.
+Table~\ref{tab:hyperparameters} provides the universal hyperparameters shared across all algorithms. The centralized critic input dimensionality of $2,\!550 + 4 + 2$ decomposes as: $6$ global scalars (step counter, alarm, terminal/loot/extraction flags, extraction countdown) $+\; 50 \times 50 = 2,\!500$ grid cells $+\; 8$ agent coordinates $+\; 12 \times 2 = 24$ guard coordinates (unused guard slots padded with $-1$) $+\; 12$ guard-neutralization flags $= 2,\!550$, plus the $4$-dimensional role embedding and $2$-dimensional mission compass. Because the $50 \times 50$ grid canvas and the 12 guard slots are fixed capacity across all curriculum stages (cells outside the active stage's floorplan hold the wall token), this input dimensionality is identical at every stage, which is precisely what allows critic checkpoints to transfer between curriculum stages without architectural modification.
 
 \input{tables/hyperparameters}
 
+\paragraph{Hyperparameter Grouping and Sensibility.}
+THIEF introduces interdependent hyperparameters beyond the shared PPO backbone; they fall into four mechanism families (all values in Table~\ref{tab:hyperparameters} are held fixed across every seed, stage, and algorithm comparison in this paper): (i) \emph{plateau triggering} --- window $W=100$, threshold $\Delta_{\text{win}}<0.03$, mastery ceiling $0.90$; (ii) \emph{incubation} --- $\tau_{\text{iso}}=10$ updates over a dedicated $25\%$ environment fraction; (iii) \emph{Fisher geometry} --- EMA decay $\beta=0.99$, damping $\lambda=10^{-4}$, deficit step size $\eta_{\text{def}}=0.08$, noise scale $\sigma=0.03$; and (iv) \emph{routing} --- barrier $\epsilon=0.05$, gating temperature $\tau_{\text{gate}}$, balance coefficient $\alpha_{\text{bal}}=0.01$, dormancy threshold $\tau_{\text{cull}}$. Families (ii)--(iv) are exercised in isolation by the micro-ablations of Table~\ref{tab:ablations} (w/o warmup, w/o Fisher geometry, clone-best-parent, w/o load balancing, w/o hysteresis), which probe the qualitative sensitivity of end-to-end performance to removing each mechanism outright; the full THIEF variant degrades gracefully across all of them. We did not run exhaustive per-threshold sweeps (e.g., $\epsilon \in [0.01, 0.10]$ or $\Delta_{\text{win}} \in [0.03, 0.05]$) and flag complete sensitivity analysis as future work.
+
 \section{Compute Environment \& Hardware Throughput}
 \label{sec:app_compute}
-All benchmark training and evaluation runs were conducted on a single Linux workstation equipped with an NVIDIA RTX GPU (12 GB VRAM) and an AMD Ryzen 8-core CPU (16 threads). The raw Rust simulation engine sustains approximately $11,\!200$--$12,\!100$ environment steps per second across the curriculum stages (measured over $N=1,\!000$-episode evaluation batches for single-network policies such as MAPPO, MARC, and COMA); end-to-end throughput for multi-expert methods is lower due to per-expert forward passes (e.g., approximately $2,\!000$--$3,\!400$ steps/s for THIEF). Each curriculum stage trains for a fixed budget of $2/2/5/9/16 \times 10^{5}$ environment steps (Stages 0--4, $3.4 \times 10^6$ per seed in total), corresponding to 100/100/250/450/800 PPO updates for THIEF and E-COOP (16 parallel environments) and twice as many updates for the 8-environment baselines.
+All benchmark training and evaluation runs were conducted on a single Linux workstation equipped with an NVIDIA GeForce RTX 3080 Ti GPU (12 GB VRAM) and an AMD Ryzen 9 5900X 12-core processor (24 threads). The raw Rust simulation engine sustains approximately $11,\!500$--$12,\!500$ environment steps per second across the curriculum stages (measured over $N=1,\!000$-episode evaluation batches for single-network policies such as MAPPO, MARC, and COMA); end-to-end throughput for multi-expert methods is lower due to per-expert forward passes (e.g., approximately $2,\!400$--$3,\!200$ steps/s for THIEF). Each curriculum stage trains for a fixed budget of $2/2/5/9/16 \times 10^{5}$ environment steps (Stages 0--4, $3.4 \times 10^6$ per seed in total), corresponding to 100/100/250/450/800 PPO updates across all evaluated models using 16 parallel environments uniformly ($16 \times 125 = 2,\!000$ steps per rollout).

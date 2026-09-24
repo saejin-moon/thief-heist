@@ -1,42 +1,47 @@
 \section{The HEIST Environment \& Benchmark}
 \label{sec:env}
 
-We formalize the HEIST benchmark as a Decentralized Partially Observable Markov Decision Process (Dec-POMDP) augmented with asymmetric operational roles and procedural facility generation.
+While multi-agent benchmarks such as Overcooked~\cite{carroll2019utility}, Pommerman~\cite{resnick2018pommerman}, Level-Based Foraging (LBF)~\cite{papoudakis2021benchmarking}, and Melting Pot~\cite{leibo2021scalable} evaluate cooperative coordination, they primarily test symmetric capabilities or short-horizon spatial swaps. To study heterogeneous specialization under severe temporal and spatial scaling, we introduce \textbf{HEIST}, a high-throughput, procedurally generated Dec-POMDP environment where four asymmetric agents must orchestrate a multi-phase facility infiltration under active adversarial security.
 
 \subsection{Dec-POMDP Formulation}
-A mission instance is defined by the tuple:
+A HEIST mission is formalized as a Decentralized Partially Observable Markov Decision Process:
 \begin{equation}
 \mathcal{M} = \langle \mathcal{N}, \mathcal{S}, \{\mathcal{A}_i\}, \mathcal{P}, \mathcal{R}, \{\Omega_i\}, \mathcal{O}, \gamma \rangle
 \end{equation}
 \begin{itemize}[leftmargin=*,nosep]
-    \item $\mathcal{N} = \{\text{Scout}, \text{Hacker}, \text{Muscle}, \text{Extractor}\}$ denotes the agent team with $|\mathcal{N}| = 4$.
-    \item $\mathcal{S}$ is the global environment state, encompassing the spatial tile grid $G \in \mathbb{Z}^{H \times W}$, agent coordinates $\mathbf{p}_i = (r_i, c_i)$, guard dynamic coordinates and behavioral states, camera scan cones, door states, global alarm $\alpha \in [0, \alpha_{\max}]$, and extraction countdown $\tau_{\text{ext}}$.
-    \item $\mathcal{A}_i = \{\text{UP}, \text{DOWN}, \text{LEFT}, \text{RIGHT}, \text{WAIT}, \text{INTERACT}\}$ is the discrete action space ($|\mathcal{A}_i| = 6$). Wall movements are masked out before categorical sampling.
-    \item $\Omega_i$ represents the local egocentric observation space. Each agent receives a $7 \times 7$ egocentric grid $o_i$ masked by raytraced fog-of-war, a one-hot role vector $\mathbf{r}_i \in \{0,1\}^4$, an action mask $\mathbf{m}_i \in \{0,1\}^6$, and a 2D mission-orientation compass vector $\mathbf{g}_i \in [-1, 1]^2$ that points toward the agent's current sub-task objective (e.g., the security terminal for the Hacker until terminal override, the vault for the Extractor, and the extraction zone after loot acquisition).
-    \item $\gamma = 0.99$ denotes the temporal discount factor.
+    \item $\mathcal{N} = \{\text{Scout}, \text{Hacker}, \text{Muscle}, \text{Extractor}\}$ denotes the heterogeneous team ($|\mathcal{N}| = 4$).
+    \item $\mathcal{S}$ is the global state: spatial grid $G \in \mathbb{Z}^{H \times W}$, agent coordinates $\mathbf{p}_i = (r_i, c_i)$, guard coordinates and finite-state machine modes, camera scan sectors, security door states, global alarm $\alpha \in [0, \alpha_{\max}]$, and extraction countdown timer $\tau_{\text{ext}}$.
+    \item $\mathcal{A}_i = \{\text{UP}, \text{DOWN}, \text{LEFT}, \text{RIGHT}, \text{WAIT}, \text{INTERACT}\}$ defines the discrete action space ($|\mathcal{A}_i| = 6$). Movements into solid walls or impassable barriers are masked out prior to categorical action sampling.
+    \item $\Omega_i$ represents the egocentric local observation space. Each agent receives a $7 \times 7$ local grid $o_i$ masked by raytraced line-of-sight fog-of-war, a one-hot role vector $\mathbf{r}_i \in \{0,1\}^4$, an action mask $\mathbf{m}_i \in \{0,1\}^6$, and a 2D orientation compass vector $\mathbf{g}_i \in [-1, 1]^2$ pointing toward the agent's current active sub-goal.
+    \item $\gamma = 0.99$ is the temporal discount factor.
 \end{itemize}
+
+\subsection{Structural Properties of HEIST}
+HEIST exposes two structural properties that stress-test MARL architectures:
+\begin{enumerate}[leftmargin=*,nosep]
+    \item \textbf{Temporal Reward-Density Mismatch:} Infiltration requires a sequential dependency chain: Scout tags POIs $\to$ Hacker unlocks doors and disables the security terminal $\to$ Muscle neutralizes patrolling guards $\to$ Extractor cracks the vault and secures the loot payload $\to$ all surviving agents rendezvous at the extraction zone. The Scout receives dense, frequent rewards early in the episode for exploratory tagging; in stark contrast, the Extractor receives zero task reward until the terminal is hacked, the vault is breached, and extraction commences. In monolithic CTDE models, early dense rewards dominate critic and actor updates, starving late-stage policies.
+    \item \textbf{Role-Conditioned Partial Observability:} Local perception is asymmetric. The Scout possesses an extended visual radius ($r_{\text{vis}} = 8$ vs.\ $r_{\text{vis}} = 3$ for teammates) and line-of-sight standoff tagging. The Hacker perceives terminal bypass states; the Muscle perceives guard alert states; the Extractor perceives vault tumblers. Agents must coordinate without broadcasting full observation maps.
+\end{enumerate}
 
 \subsection{Asymmetric Role Specialization}
-The four agent roles possess strictly non-interchangeable mechanics (summarized in Table~\ref{tab:stage_specs}):
+The four roles possess non-interchangeable functional mechanics (summarized in Table~\ref{tab:stage_specs}):
 \begin{itemize}[leftmargin=*,nosep]
-    \item \textbf{Scout ($S$):} Possesses an extended sensor perimeter ($r_{\text{vis}} = 8$ vs.\ $r_{\text{vis}} = 3$ for teammates). Using \texttt{INTERACT} within standoff range ($d \le 8$), the Scout tags Points of Interest (POIs: cameras, terminal, vault loot), projecting continuous directional guidance onto teammates' compass vectors $\mathbf{g}_i$.
-    \item \textbf{Hacker ($H$):} Bypasses locked security doors via \texttt{INTERACT} and hacks the security terminal through three consecutive interaction turns, permanently deactivating security cameras and unlocking vault access.
-    \item \textbf{Muscle ($M$):} Engages and neutralizes patrolling security guards within distance $d \le 2$. Neutralized guards remain incapacitated for the remainder of the episode, preventing alert escalations along escape paths.
-    \item \textbf{Extractor ($E$):} Infiltrates the unlocked vault, secures the loot payload ($\$$), and initiates the extraction countdown $\tau_{\text{ext}} = \lfloor 0.5 \times T_{\max} \rfloor$, requiring all four agents to reach the extraction zone.
+    \item \textbf{Scout ($S$):} Employs long-range vision ($r_{\text{vis}} = 8$). Executing \texttt{INTERACT} within standoff range ($d \le 8$) tags Points of Interest (cameras, terminals, vaults), projecting directional guidance onto teammates' compass vectors $\mathbf{g}_i$.
+    \item \textbf{Hacker ($H$):} Bypasses locked electronic doors via \texttt{INTERACT} and disables the master security terminal through three consecutive interaction turns, permanently shutting down security cameras and opening vault access.
+    \item \textbf{Muscle ($M$):} Engages patrolling security guards within contact range ($d \le 2$). Neutralized guards are incapacitated for the remainder of the episode, eliminating patrol lines along escape corridors.
+    \item \textbf{Extractor ($E$):} Breaches the unlocked vault, secures the loot payload, and triggers the extraction alarm timer $\tau_{\text{ext}} = \lfloor 0.5 \times T_{\max} \rfloor$, requiring the team to reach extraction before time expires.
 \end{itemize}
 
-\subsection{Security Dynamics and Alarm Mathematics}
-Security guards operate under a three-state finite-state machine: \emph{Patrol} (waypoint navigation), \emph{Investigate} (pathfinding to detected agent locations), and \emph{Search} (breadth-first search within radius $5$). If any guard closes to $\text{CATCH\_DISTANCE} = 1$, the episode terminates in immediate defeat.
-
-Global alarm $\alpha$ accumulates continuously based on security violations:
+\subsection{Adversarial Security \& Alarm Dynamics}
+Adversarial security guards follow a three-state automaton: \emph{Patrol} (waypoint traversal), \emph{Investigate} (pathfinding to audio-visual detection coordinates), and \emph{Search} (localized search). If a guard closes to contact distance ($d = 1$), the intercepted agent is captured, terminating the mission in defeat. Global alarm $\alpha$ accumulates dynamically:
 \begin{equation}
 \Delta \alpha = \mathbb{I}(\text{terminal active}) \cdot \sum_{c \in \text{Cameras}} \alpha_{\text{cam}} \cdot N_{\text{visible}}(c) + \alpha_{\text{events}}
 \end{equation}
-where event increments include guard line-of-sight exposure ($+10.0$), continuous tracking ($+1.5$/step), guard neutralizations ($+5.0$), door bypasses ($+3.0$), and extraction timeout ($+15.0$). If $\alpha \ge \alpha_{\max}$, facility lockdown is triggered, resulting in immediate failure ($R_{\text{team}} = -10.0$).
+where event penalties include guard line-of-sight exposure ($+10.0$), active tracking ($+1.5$/step), guard neutralizations ($+5.0$), door bypasses ($+3.0$), and extraction timer expiration ($+15.0$). If accumulated alarm reaches the ceiling $\alpha \ge \alpha_{\max}$, facility lockdown triggers immediate defeat ($R_{\text{team}} = -10.0$).
 
-\subsection{Phased Potential-Based Reward Shaping}
-The team objective reward provides $+15.0$ upon successful 4-agent extraction with loot and $-10.0$ on catastrophic failure, alongside step bleed $r_{\text{bleed}} = -2.0 / T_{\max}$. To mitigate credit assignment starvation across long planning horizons without altering the optimal policy~\cite{ng1999policy}, we introduce role-phased potential-based reward shaping:
+\subsection{Phased Potential Shaping \& Macro-Horizon Relabeling}
+The terminal team reward yields $+15.0$ upon full four-agent escape with loot, with step bleed $r_{\text{bleed}} = -2.0 / T_{\max}$. To mitigate credit starvation without perturbing optimal policy trajectories~\cite{ng1999policy}, we apply phased potential-based reward shaping:
 \begin{equation}
 \Phi_i(s) = -\|\mathbf{p}_i - \mathbf{p}_{\text{target}}\|_1, \quad r_{i,\text{shaping}} = \gamma \Phi_i(s') - \Phi_i(s)
 \end{equation}
-Potential functions activate sequentially per role upon respective subtask completion: Hacker after terminal override, Muscle after guard clearance, Scout upon POI tagging, and Extractor upon loot acquisition.
+Potential functions activate sequentially per role upon subtask completion. Additionally, for long-horizon macro-actions, we adapt Hindsight Experience Replay (HER)~\cite{andrychowicz2017hindsight} to relabel failed terminal and extraction trajectories with achieved terminal coordinates, accelerating early exploration.

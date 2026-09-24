@@ -703,7 +703,17 @@ def generate_master_summary_report(
     eval_path = os.path.join(results_root, "eval_episodes.parquet")
     eval_df = pl.read_parquet(eval_path) if os.path.exists(eval_path) else pl.DataFrame()
 
-    priority_algos = ["thief", "ecoop", "mappo", "hmappo", "coop", "marc", "coma"]
+    priority_algos = [
+        "thief",
+        "ecoop",
+        "mappo",
+        "hmappo",
+        "coop",
+        "marc",
+        "coma",
+        "roma",
+        "rode",
+    ]
     stages = list(range(5))
 
     master_dict: dict[str, Any] = {

@@ -1,13 +1,10 @@
 \section{The THIEF Framework}
 \label{sec:thief}
 
-THIEF maintains a dynamic pool of $K$ decentralized expert modules $\mathcal{E} = \{E_k\}_{k=1}^K$, where each expert consists of a role-conditioned policy actor and centralized critic:
-\begin{equation}
-E_k = \langle \pi_{\theta_k}(a \mid o_i, \mathbf{r}_i, \mathbf{g}_i), \, V_{\phi_k}(s, \mathbf{r}_i, \mathbf{g}_i) \rangle
-\end{equation}
+THIEF maintains an evolving pool of $K$ decentralized expert sub-networks $\mathcal{E} = \{E_k\}_{k=1}^K$. Each expert $E_k$ consists of a role-conditioned policy actor $\pi_{\theta_k}(a \mid o_i, \mathbf{r}_i, \mathbf{g}_i)$ and an associated centralized critic $V_{\phi_k}(s, \mathbf{r}_i, \mathbf{g}_i)$. To maintain clarity across the codebase and text, we summarize our terminology mapping: \emph{specialist} denotes an individual policy column, \emph{sandbox incubation} corresponds to isolated parallel shard warmup, and \emph{dormancy culling} corresponds to inactive expert pruning.
 
 \subsection{Role-Conditioned Value Bidding with Hysteresis Routing}
-During decentralized execution, active candidate experts evaluate the current state and submit scalar value bids $V_j(s, \mathbf{r}_i, \mathbf{g}_i)$. To eliminate high-frequency policy oscillation between experts across adjacent timesteps, THIEF implements a state-dependent hysteresis barrier:
+During decentralized rollout execution, candidate experts evaluate the local egocentric observation and mission compass, submitting scalar value bids $V_j(s, \mathbf{r}_i, \mathbf{g}_i)$. In naive value-bidding MoEs, small step-to-step fluctuations in state values trigger high-frequency switching between distinct policy behaviors, preventing temporally coherent subtask execution. Inspired by the concept of hysteresis in multi-agent learning~\cite{matignon2007hysteretic}---where asymmetric update barriers stabilize coordination---THIEF constructs a state-dependent switching barrier to preserve behavioral commitment:
 \begin{align}
 k^* &= \arg\max_{j \in \mathcal{C}_{\text{active}}} V_j(s, \mathbf{r}_i, \mathbf{g}_i) \\
 k_{\text{chosen}} &= 
@@ -16,37 +13,43 @@ k_{\text{prev}} & \text{if } V_{k^*}(s) \le V_{k_{\text{prev}}}(s) + \epsilon_{\
 k^* & \text{otherwise}
 \end{cases}
 \end{align}
-where the dynamic barrier is parameterized by $\epsilon_{\text{barrier}} = \max(\epsilon, \epsilon |V_{k_{\text{prev}}}(s)|)$ with baseline tolerance $\epsilon = 0.05$. During training (but not evaluation), routing additionally applies $10\%$ $\epsilon$-greedy exploration over candidate experts to preserve coverage of the expert pool.
+where $\epsilon_{\text{barrier}} = \max(\epsilon, \epsilon |V_{k_{\text{prev}}}(s)|)$ with baseline switching threshold $\epsilon = 0.05$. This barrier ensures that an alternative expert is dispatched only when its value advantage exceeds the switching threshold. During training, routing incorporates $10\%$ $\epsilon$-greedy exploration across candidate experts to ensure diverse data coverage.
 
-\subsection{Win-Rate Plateau Detection}
-Rather than adding experts at arbitrary pre-scheduled epochs, THIEF monitors empirical team success over a sliding window of $W = 100$ completed episodes (requiring a minimum of 200 recorded episode outcomes before any trigger). A spawning event triggers when rolling win-rate improvement stalls:
+\subsection{Plateau Detection \& Gradient-Conflict Triggering}
+Rather than expanding network capacity along rigid, predefined training schedules, THIEF monitors empirical team success over a sliding window of $W = 100$ completed episodes. Spawning is evaluated when rolling win-rate improvement stalls:
 \begin{equation}
 \Delta_{\text{win}} = \bar{W}_{\text{recent}}[50:100] - \bar{W}_{\text{recent}}[0:50] < 0.03
 \end{equation}
-Spawning is dynamically gated: it is suppressed if recent win rates exceed $0.90$ (indicating stage mastery), during a cooldown period following a prior spawning event, or if the remaining update budget is insufficient for warmup.
-
-\subsection{Failure-Directed Gradient Updates \& Fisher Recombination}
-When spawning a new expert $E_{\text{child}}$, THIEF isolates empirical failure transitions $\mathcal{D}_{\text{fail}} = \{(s, a, \mathbf{r}, \mathbf{g}) \mid R - V(s) < 0\}$. For each active parent expert $k$, an exponential moving average of diagonal Fisher Information is tracked:
+To ensure that spawning targets true structural bottlenecks rather than transient stochastic dips, THIEF evaluates multi-task gradient conflict. Adapting the cosine-similarity diagnostic from PCGrad~\cite{yu2020gradient} to success and failure partitions of a single task, THIEF computes gradients over successful transitions $\mathcal{D}_{\text{succ}}$ and failed transitions $\mathcal{D}_{\text{fail}}$:
 \begin{equation}
-F_k^{(t+1)} = \beta F_k^{(t)} + (1-\beta) \left[\nabla_\theta \log \pi_k(a \mid \cdot)\right]^2
+\mathcal{S}_{\text{conflict}} = \frac{\nabla_\theta \mathcal{L}_{\text{succ}} \cdot \nabla_\theta \mathcal{L}_{\text{fail}}}{\|\nabla_\theta \mathcal{L}_{\text{succ}}\| \|\nabla_\theta \mathcal{L}_{\text{fail}}\|} < 0
 \end{equation}
-with momentum decay $\beta = 0.99$. Parents are weighted by softmax-normalized empirical value estimates $w_k = \text{softmax}(\bar{V}_k / \tau)$. Parameters are recombined via Fisher-weighted interpolation:
+When negative cosine similarity reveals that updates from failed subtasks are directly degrading successful trajectories, THIEF triggers specialist spawning. Spawning is dynamically suppressed if the team win rate exceeds $0.90$ (indicating stage mastery), during an active cooldown window following a recent spawn event, or when the remaining update budget is insufficient for incubation.
+
+\subsection{Curvature-Optimal Parameter Recombination}
+When spawning a new specialist $E_{\text{child}}$, standard evolutionary RL approaches apply isotropic Gaussian noise or random crossover, which frequently destroys delicate pre-trained coordination primitives. In contrast, THIEF adapts the Fisher-weighted model merging principle of Matena and Raffel~\cite{matena2021merging} as an online recombination operator.
+
+For each active parent expert $k$, THIEF maintains an exponential moving average of its diagonal empirical Fisher Information Matrix (FIM):
+\begin{equation}
+F_k^{(t+1)} = \beta F_k^{(t)} + (1-\beta) \left[\nabla_\theta \log \pi_k(a \mid o_i, \mathbf{r}_i, \mathbf{g}_i)\right]^2
+\end{equation}
+with momentum decay $\beta = 0.99$. Parents are weighted by softmax-normalized empirical value returns $w_k = \text{softmax}(\bar{V}_k / \tau)$. Applying the closed-form curvature-optimal Riemannian projection derived in~\cite{matena2021merging}, the base parameters $\theta_{\text{recomb}}$ are synthesized via:
 \begin{equation}
 \theta_{\text{recomb}} = \frac{\sum_k w_k (F_k + \lambda) \odot \theta_k}{\sum_k w_k (F_k + \lambda)}
 \end{equation}
-where $\lambda = 10^{-4}$ serves as a numerical damping constant. The child policy is then updated via a targeted deficit gradient step with exploration noise scaled by inverse Fisher curvature:
+where $\lambda = 10^{-4}$ provides numerical damping. This parameter blend preserves weights along high-curvature parameter directions where parents exhibit high confidence. To orient the newcomer toward the unresolved task deficit, $\theta_{\text{child}}$ undergoes a normalized deficit policy-gradient update on isolated failure transitions $\mathcal{D}_{\text{fail}}$, with anisotropic perturbation scaled inversely by Fisher curvature:
 \begin{equation}
-\theta_{\text{child}} = \theta_{\text{recomb}} - \eta_{\text{def}} \nabla_\theta \mathcal{L}_{\text{deficit}} + \sigma \left(\sqrt{F_{\text{combined}}} + \lambda\right)^{-1/2} \odot \xi
+\theta_{\text{child}} = \theta_{\text{recomb}} - \eta_{\text{def}} \frac{\nabla_\theta \mathcal{L}_{\text{deficit}}}{\|\nabla_\theta \mathcal{L}_{\text{deficit}}\|_2} + \sigma \left(\sqrt{F_{\text{combined}}} + \lambda\right)^{-1} \odot \xi
 \end{equation}
-where $\xi \sim \mathcal{N}(0, I)$, $\eta_{\text{def}} = 0.08$, $\sigma = 0.03$, and $\mathcal{L}_{\text{deficit}} = -\mathbb{E}_{\mathcal{D}_{\text{fail}}} \left[\log \pi(a \mid \cdot) (R - V(s))\right]$, with the deficit gradient direction normalized to unit $\ell_2$ norm before the step.
+where $\xi \sim \mathcal{N}(0, I)$, $\eta_{\text{def}} = 0.08$, and $\sigma = 0.03$. Here $F_{\text{combined}} = \sum_k w_k F_k$ is the mixture-weighted diagonal Fisher information matrix, formed from the same per-expert EMA diagonals $F_k$ (Eq.~8) and soft value weights $w_k$ used in Eq.~9; all operations are elementwise. In practice, the perturbation term $\sigma\,(\sqrt{F_{\text{combined}}} + \lambda)^{-1} \odot \xi$ is applied per-parameter and clamped at $0.15\,\times$ the parameter's empirical standard deviation, bounding exploration noise on numerically flat directions.
 
-\subsection{Isolated Expert Warmup in Vectorized Environments}
-Newly initialized experts begin with uncalibrated critics $V_{\text{child}}$. In global value bidding, established experts would consistently outbid the newcomer, starving it of training transitions. THIEF resolves this by partitioning the vectorized simulation environment: $25\%$ of parallel execution shards (4 out of 16 environments) are dedicated to $E_{\text{child}}$ for $\tau_{\text{iso}} = 10$ warmup updates. This allows $V_{\text{child}}$ to calibrate its value estimates on transitions before competing in the global router.
+\subsection{Isolated Sandbox Warmup on Dedicated Environment Shards}
+A newly initialized specialist possesses an uncalibrated critic network $V_{\text{child}}$. In competitive global value bidding, established generalists would consistently submit higher value bids, permanently starving $E_{\text{child}}$ of rollout transitions. THIEF resolves this cold-start calibration deficit through isolated sandbox incubation: $25\%$ of the vectorized simulation shards (4 out of 16 parallel environments) are partitioned and dedicated exclusively to $E_{\text{child}}$ for $\tau_{\text{iso}} = 10$ updates. During this incubation phase, $E_{\text{child}}$ collects on-policy rollouts and updates its critic without competition from established experts, properly calibrating its value landscape before re-entering the global router.
 
-\subsection{MoE Load-Balancing Regularization \& Inactive Expert Pruning}
-To prevent routing imbalance across the heterogeneous roles, THIEF introduces a soft gating distribution and enforces load-balancing regularization~\cite{fedus2022switch}:
+\subsection{Load-Balancing Regularization \& Dormancy Culling}
+To prevent the routing distribution from collapsing into a single-expert monopoly across heterogeneous agent roles, THIEF enforces auxiliary load-balancing entropy regularization~\cite{fedus2022switch}:
 \begin{align}
 P_{i,k} &= \frac{\exp(V_k(s_i, \mathbf{r}_i, \mathbf{g}_i) / \tau_{\text{gate}})}{\sum_{j \in \mathcal{C}_{\text{active}}} \exp(V_j(s_i, \mathbf{r}_i, \mathbf{g}_i) / \tau_{\text{gate}})} \\
 \mathcal{L}_{\text{balance}} &= |\mathcal{C}_{\text{active}}| \sum_{k \in \mathcal{C}_{\text{active}}} \left(\frac{1}{B}\sum_{i=1}^B \mathbb{I}(k_{\text{chosen},i}=k)\right) \left(\frac{1}{B}\sum_{i=1}^B P_{i,k}\right)
 \end{align}
-The composite training objective minimizes $\mathcal{L}_{\text{total}} = \mathcal{L}_{\text{PPO}} + \alpha_{\text{bal}} \mathcal{L}_{\text{balance}}$ with $\alpha_{\text{bal}} = 0.01$. Experts that register zero activation over an adaptive window of $\tau_{\text{cull}} = \max(60,\, 0.4\,T_{\text{upd}})$ consecutive updates (where $T_{\text{upd}}$ denotes the total update budget) are deactivated and excluded from routing, reducing redundant computation.
+The composite optimization objective minimizes $\mathcal{L}_{\text{total}} = \mathcal{L}_{\text{PPO}} + \alpha_{\text{bal}} \mathcal{L}_{\text{balance}}$ with $\alpha_{\text{bal}} = 0.01$. To maintain bounded inference complexity, experts that register zero dispatch activations across an adaptive dormancy window of $\tau_{\text{cull}} = \max(60,\, 0.4\,T_{\text{upd}})$ updates are culled from active routing.

@@ -79,19 +79,10 @@ TEXT_DARK = "#202124"
 
 
 def load_eval_data(filepath=None):
-    parquet_path = "results/stage_results.parquet"
-    if filepath is None and os.path.exists(parquet_path):
-        try:
-            import polars as pl
-            df = pl.read_parquet(parquet_path)
-            return df.to_dicts()
-        except Exception:  # noqa: BLE001, S110
-            pass
-
     candidates = [
         filepath,
-        "results/eval/multiseed_full_eval_n1000.json",
         "results/eval/eval_summary.json",
+        "results/eval/multiseed_full_eval_n1000.json",
         "results/multiseed_summary.json",
     ]
     for p in candidates:
@@ -101,6 +92,16 @@ def load_eval_data(filepath=None):
                     return json.load(f)
             except Exception:  # noqa: BLE001, S112
                 continue
+
+    parquet_path = "results/stage_results.parquet"
+    if filepath is None and os.path.exists(parquet_path):
+        try:
+            import polars as pl
+            df = pl.read_parquet(parquet_path)
+            return df.to_dicts()
+        except Exception:  # noqa: BLE001, S110
+            pass
+
     print("Warning: No evaluation data found.")
     return None
 

@@ -1,41 +1,53 @@
 \section{Theoretical Analysis}
 \label{sec:theory}
 
-We now establish analytical bounds on the stability of Fisher parameter recombination and the anti-monopoly guarantees of the load-balancing objective.
+In this section, we analyze the theoretical guarantees governing Fisher parameter recombination and the anti-monopoly properties of the auxiliary load-balancing objective. We emphasize the scope of these results up front: Proposition~\ref{prop:recombination} is a direct transplant of the established Fisher merging result of Matena and Raffel~\cite{matena2021merging} into our multi-expert RL setting (we claim adaptation, not novelty), and Proposition~\ref{prop:entropy} is an idealized motivating bound derived under a calibration condition that discrete hysteresis routing only approximately satisfies (see the remark below). Their role is to justify the design choices of Section~\ref{sec:thief} and to explain the empirically observed anti-monopoly telemetry, not to constitute a new general theory.
 
 \paragraph{Fisher Information Geometry and Policy Preservation.}
-Let $\mathcal{P} = \{\pi_\theta : \theta \in \Theta\}$ denote the statistical manifold of stochastic policies equipped with the Fisher Information metric tensor $g_{ij}(\theta) = \mathbb{E}_{\pi_\theta} \left[\frac{\partial \log \pi_\theta}{\partial \theta_i} \frac{\partial \log \pi_\theta}{\partial \theta_j}\right]$. Under second-order Taylor expansion around parameter vector $\theta_k$, the Kullback-Leibler divergence between parent policy $\pi_{\theta_k}$ and recombined policy $\pi_\theta$ satisfies:
+Let $\mathcal{P} = \{\pi_\theta : \theta \in \Theta\}$ denote the statistical manifold of stochastic policies parameterized by $\theta \in \mathbb{R}^D$, equipped with the Fisher Information metric tensor:
+\begin{equation}
+g_{ij}(\theta) = \mathbb{E}_{\pi_\theta} \left[\frac{\partial \log \pi_\theta(a \mid s)}{\partial \theta_i} \frac{\partial \log \pi_\theta(a \mid s)}{\partial \theta_j}\right]
+\end{equation}
+Under a second-order Taylor approximation around parameter vector $\theta_k$, the Kullback-Leibler (KL) divergence between parent policy $\pi_{\theta_k}$ and recombined policy $\pi_\theta$ is quadratic in parameter displacement:
 \begin{equation}
 D_{\text{KL}}(\pi_{\theta_k} \parallel \pi_\theta) = \frac{1}{2} (\theta - \theta_k)^\top F_k (\theta - \theta_k) + \mathcal{O}(\|\theta - \theta_k\|^3)
 \end{equation}
 
-\begin{prop}[Curvature-Optimal Recombination]
+\begin{prop}[Curvature-Optimal Recombination~\cite{matena2021merging}]
 \label{prop:recombination}
-Let $\{\theta_k\}_{k=1}^K$ be parameter vectors of parent policies with positive definite Fisher matrices $\{F_k\}_{k=1}^K$ and non-negative mixture weights $w_k$ satisfying $\sum_k w_k = 1$. To second order in $\|\theta - \theta_k\|$, the recombined parameter vector $\theta_{\text{recomb}} = \left(\sum_k w_k F_k\right)^{-1} \left(\sum_k w_k F_k \theta_k\right)$ minimizes the weighted sum of Riemannian distances on the statistical manifold:
+Let $\{\theta_k\}_{k=1}^K$ denote the parameter vectors of parent policies with positive definite Fisher Information matrices $\{F_k\}_{k=1}^K$ and non-negative mixture weights $w_k$ satisfying $\sum_k w_k = 1$. As established by Matena and Raffel~\cite{matena2021merging}, the recombined parameter vector:
+\begin{equation}
+\theta_{\text{recomb}} = \left(\sum_{k=1}^K w_k F_k\right)^{-1} \left(\sum_{k=1}^K w_k F_k \theta_k\right)
+\end{equation}
+is the unique minimizer of the weighted sum of Riemannian divergences on the policy manifold to second order:
 \begin{equation}
 \theta_{\text{recomb}} = \arg\min_\theta \sum_{k=1}^K w_k D_{\text{KL}}(\pi_{\theta_k} \parallel \pi_\theta) + \mathcal{O}\!\left(\|\theta-\theta_k\|^3\right)
 \end{equation}
 \end{prop}
 \begin{proof}
-Differentiating the quadratic approximation $\mathcal{J}(\theta) = \frac{1}{2} \sum_k w_k (\theta - \theta_k)^\top F_k (\theta - \theta_k)$ with respect to $\theta$ yields $\nabla_\theta \mathcal{J}(\theta) = \sum_k w_k F_k (\theta - \theta_k) = 0$. Inverting the positive-definite sum $\sum_k w_k F_k$ yields the closed-form minimizer $\theta_{\text{recomb}}$.
+Differentiating the weighted quadratic objective $\mathcal{J}(\theta) = \frac{1}{2} \sum_k w_k (\theta - \theta_k)^\top F_k (\theta - \theta_k)$ with respect to $\theta$ gives $\nabla_\theta \mathcal{J}(\theta) = \sum_k w_k F_k (\theta - \theta_k) = 0$. Factoring out $\theta$ yields $\left(\sum_k w_k F_k\right) \theta = \sum_k w_k F_k \theta_k$. Because each $F_k \succ 0$ and $w_k \ge 0$ with $\sum_k w_k = 1$, the sum $\sum_k w_k F_k$ is strictly positive definite and invertible, establishing the unique closed-form minimizer $\theta_{\text{recomb}}$.
 \end{proof}
-Proposition~\ref{prop:recombination} guarantees that parameter recombination preserves high-probability action representations from parents in parameter regions where Fisher information is large, preventing catastrophic forgetting of critical sub-skills.
+\noindent Proposition~\ref{prop:recombination} demonstrates that adapting Fisher model merging to online multi-expert recombination preserves parent policy representations along high-curvature parameter directions where parents exhibit high certainty, preventing catastrophic forgetting during specialist initialization.
 
 \paragraph{Load-Balancing Anti-Monopoly Bound.}
+Next, we analyze how the auxiliary load-balancing loss prevents routing collapse.
 \begin{prop}[Routing Entropy Lower Bound]
 \label{prop:entropy}
-\label{prop:entropy}
-Let $f_k = \frac{1}{B}\sum_{i=1}^B \mathbb{I}(k_{\text{chosen},i}=k)$ denote the empirical dispatch frequency of expert $k \in \{1,\dots,K\}$ over mini-batch $B$, and $P_k = \frac{1}{B}\sum_{i=1}^B P_{i,k}$ its mean gating probability. Suppose routing is calibrated such that $P_k = f_k$ for all $k$, and the auxiliary load-balancing loss satisfies $\mathcal{L}_{\text{balance}} \le 1 + \delta$ for some $\delta \ge 0$. Then the routing entropy $H(f) = -\sum_k f_k \log f_k$ is strictly bounded away from zero:
+Let $f_k = \frac{1}{B}\sum_{i=1}^B \mathbb{I}(k_{\text{chosen},i}=k)$ denote the empirical dispatch frequency of expert $k \in \{1,\dots,K\}$ over mini-batch $B$, and $P_k = \frac{1}{B}\sum_{i=1}^B P_{i,k}$ its mean soft gating probability. Under the idealized calibration condition $P_k = f_k$ (which holds asymptotically when critic value bids are well-calibrated), if the auxiliary load-balancing loss satisfies $\mathcal{L}_{\text{balance}} \le 1 + \delta$ for some $\delta \ge 0$, then the empirical routing entropy $H(f) = -\sum_k f_k \log f_k$ is bounded strictly away from zero:
 \begin{equation}
 \label{eq:entropy_bound}
 H(f) \ge \log K - \frac{\delta}{2}
 \end{equation}
-Consequently, as $\delta \to 0$, the routing distribution approaches uniform dispersion $H(f) \to \log K$, precluding single-expert monopoly regimes ($H(f) = 0$).
+Consequently, as the load-balancing penalty enforces $\delta \to 0$, routing approaches the uniform maximum-entropy distribution $H(f) \to \log K$, precluding single-expert monopoly regimes ($H(f) = 0$).
 \end{prop}
 \begin{proof}
-Under calibration, $\mathcal{L}_{\text{balance}} = K \sum_k f_k^2 \le 1 + \delta$, hence $\sum_k f_k^2 \le \frac{1+\delta}{K}$. The squared Euclidean deviation of the dispatch distribution from the uniform distribution $u_k = 1/K$ is
-$\textstyle \sum_k (f_k - 1/K)^2 = \sum_k f_k^2 - \frac{1}{K} \le \frac{\delta}{K}$.
-Since the entropy $H$ is $\frac{K}{2}$-strongly concave in the $\ell_2$ norm around $u$---i.e., $H(f) \ge H(u) - \frac{K}{2} \sum_k (f_k - 1/K)^2$---we obtain
-$H(f) \ge \log K - \frac{K}{2} \cdot \frac{\delta}{K} = \log K - \frac{\delta}{2}$.
+Under calibration $P_k = f_k$, the load-balancing loss evaluates to $\mathcal{L}_{\text{balance}} = K \sum_{k=1}^K f_k^2 \le 1 + \delta$, which implies $\sum_k f_k^2 \le \frac{1+\delta}{K}$. The squared Euclidean deviation of the dispatch distribution $f$ from the uniform distribution $u = (1/K, \dots, 1/K)$ is:
+\begin{equation}
+\sum_{k=1}^K \left(f_k - \frac{1}{K}\right)^2 = \sum_{k=1}^K f_k^2 - \frac{2}{K}\sum_{k=1}^K f_k + \frac{K}{K^2} = \sum_{k=1}^K f_k^2 - \frac{1}{K} \le \frac{1+\delta}{K} - \frac{1}{K} = \frac{\delta}{K}
+\end{equation}
+Because the Shannon entropy $H(p)$ is strongly concave in the $\ell_2$ norm with parameter $K/2$ around the uniform distribution $u$---i.e., $H(f) \ge H(u) - \frac{K}{2} \|f - u\|_2^2$---substituting the bound yields:
+\begin{equation}
+H(f) \ge \log K - \frac{K}{2} \cdot \frac{\delta}{K} = \log K - \frac{\delta}{2}
+\end{equation}
 \end{proof}
-Proposition~\ref{prop:recombination} and the bound in Eq.~\eqref{eq:entropy_bound} jointly ensure that Fisher recombination preserves parent skills while the balancing objective keeps the routing distribution dispersed: for the configuration used in our experiments ($K \le 8$ observed experts, $\mathcal{L}_{\text{balance}} \le 1 + \delta$ with small $\delta$), entropy remains within $\delta/2$ nats of uniform, so monopoly regimes ($H(f)=0$) require $\delta \ge 2\log K$.
+\noindent \textbf{Remark on Practical Calibration.} In practice, discrete hysteresis routing creates a wedge between $f_k$ and soft gating probabilities $P_k$, so the bound is not tight; moreover, $H(f)$ is trivially $0$ whenever the pool contains a single active expert, regardless of the regularizer. Proposition~\ref{prop:entropy} should therefore be read as a design-level safeguard rather than a tight operating guarantee: it explains why the load-balancing penalty keeps the empirical routing distribution bounded away from monopoly whenever multiple experts are active, which is consistent with the routing telemetry reported in Table~\ref{tab:ablations}.

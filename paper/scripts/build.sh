@@ -8,6 +8,7 @@ TECTONIC="${TECTONIC:-$HOME/.cargo/bin/tectonic}"
 
 echo "=== 1. Generating LaTeX tables from benchmark results ==="
 (cd "$ROOT" && uv run python "$DIR/scripts/generate_tables.py")
+(cd "$ROOT" && uv run python "$DIR/scripts/generate_ablation_table.py")
 
 echo "=== 2. Compiling TikZ architecture diagram ==="
 "$TECTONIC" "$DIR/figures/architecture.tex" -o "$DIR/figures"

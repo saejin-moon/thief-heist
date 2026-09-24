@@ -24,10 +24,15 @@ from constants import (
     N_AGENTS,
     NUM_STEPS,
     OBSERVATION_SIZE,
+    THIEF_DEFICIT_MIN_SAMPLES,
     THIEF_ENVS_PER_MUTANT,
+    THIEF_GRADIENT_CONFLICT_THRESHOLD,
+    THIEF_HER_AUX_COEF,
+    THIEF_HER_REACH_DIST,
     THIEF_HYSTERESIS_EPSILON,
     THIEF_INITIAL_EXPERTS,
     THIEF_ISOLATION_UPDATES,
+    THIEF_MACRO_HORIZON,
     THIEF_MAX_SANDBOX_EXPERTS,
     THIEF_MUTATION_NOISE,
     THIEF_NUM_ENVS,
@@ -339,6 +344,124 @@ def check_plateau_trigger(
     return (second_half - first_half) < threshold
 
 
+def check_gradient_interference_trigger(
+    agent,
+    active_experts,
+    b_obs,
+    b_role,
+    b_mask,
+    b_actions,
+    b_goal,
+    b_advantages,
+    update,
+    last_grace_end_update,
+    active_sandbox_mutants,
+    incubation_queue,
+    device,
+    dormant_experts=None,
+    num_updates=None,
+    b_experts=None,
+):
+    """
+    Evaluates whether the active policy is experiencing catastrophic gradient interference
+    between positive-advantage (success) and negative-advantage (failure) sub-tasks.
+    """
+    warmup = (
+        min(THIEF_WARMUP_UPDATES, int(0.15 * num_updates))
+        if num_updates
+        else THIEF_WARMUP_UPDATES
+    )
+    if update <= warmup:
+        return False, None, 0.0
+    if num_updates is not None and update > int(0.85 * num_updates):
+        return False, None, 0.0
+    if active_sandbox_mutants or incubation_queue:
+        return False, None, 0.0
+    cooldown = (
+        min(THIEF_POST_GRACE_COOLDOWN_UPDATES, int(0.20 * num_updates))
+        if num_updates
+        else THIEF_POST_GRACE_COOLDOWN_UPDATES
+    )
+    if (update - last_grace_end_update) < cooldown:
+        return False, None, 0.0
+
+    adv = b_advantages.to(device)
+    pos_mask = adv > 0.0
+    neg_mask = adv < -0.5
+
+    if (
+        pos_mask.sum().item() < THIEF_DEFICIT_MIN_SAMPLES
+        or neg_mask.sum().item() < THIEF_DEFICIT_MIN_SAMPLES
+    ):
+        return False, None, 0.0
+
+    dormant_set = set(dormant_experts) if dormant_experts is not None else set()
+    parent_candidates = [
+        k for k in range(active_experts) if k not in dormant_set
+    ] or list(range(active_experts))
+    if b_experts is not None:
+        # Measure conflict through the routing-dominant (most-used non-dormant)
+        # expert, not blindly expert 0 — expert 0's tear may not reflect the pool.
+        usage = torch.bincount(
+            b_experts[b_experts < active_experts].to(device),
+            minlength=active_experts,
+        )
+        usage_masked = [
+            usage[k].item() if k not in dormant_set else -1
+            for k in range(active_experts)
+        ]
+        if max(usage_masked) > 0:
+            parent_idx = int(np.argmax(usage_masked))
+        else:
+            parent_idx = parent_candidates[0]
+    else:
+        parent_idx = parent_candidates[0]
+    actor = agent.experts[parent_idx].actor
+
+    def compute_partition_grad(mask):
+        sub_inds = torch.where(mask)[0]
+        if len(sub_inds) > 256:
+            perm = torch.randperm(len(sub_inds))[:256]
+            sub_inds = sub_inds[perm]
+
+        x_act = torch.cat(
+            [b_obs[sub_inds].flatten(1), b_role[sub_inds], b_goal[sub_inds]], dim=1
+        ).to(device)
+        m_act = b_mask[sub_inds].to(device)
+        a_act = b_actions[sub_inds].to(device)
+        adv_sub = adv[sub_inds]
+
+        logits = actor(x_act)
+        masked_logits = logits + ((1.0 - m_act) * -1e9)
+        dist = Categorical(logits=masked_logits)
+        log_prob = dist.log_prob(a_act)
+        loss = -(log_prob * adv_sub).mean()
+
+        actor.zero_grad()
+        loss.backward()
+
+        grads = []
+        with torch.no_grad():
+            for p in actor.parameters():
+                if p.grad is not None:
+                    grads.append(p.grad.data.flatten())
+        return torch.cat(grads) if grads else None
+
+    g_pos = compute_partition_grad(pos_mask)
+    g_neg = compute_partition_grad(neg_mask)
+
+    if g_pos is None or g_neg is None:
+        return False, None, 0.0
+
+    cos_sim = (
+        torch.dot(g_pos, g_neg) / (g_pos.norm() * g_neg.norm() + 1e-8)
+    ).item()
+
+    if cos_sim < THIEF_GRADIENT_CONFLICT_THRESHOLD:
+        return True, neg_mask, cos_sim
+    return False, None, cos_sim
+
+
 def compute_deficit_gradient(
     recombined_actor,
     b_obs,
@@ -402,6 +525,7 @@ def spawn_targeted_specialist(
     device,
     dormant_experts=None,
     ablation="none",
+    deficit_mask=None,
 ):
     """
     Spawn a new expert:
@@ -496,9 +620,16 @@ def spawn_targeted_specialist(
     )
     fitness_weights = torch.softmax(val_tensor, dim=0).numpy()
 
-    # --- Failure mask: overconfident predictions (returns < values) ---
-    # Cheap, no gradient-interference detection needed.
-    deficit_mask = (flat_returns - flat_values) < 0
+    # --- Failure mask ---
+    # When provided, use the spawn trigger's negative-advantage deficit mask
+    # (the exact transitions that caused the gradient conflict) so the child
+    # targets the observed failing behavior. Otherwise fall back to the
+    # generic overconfidence mask (returns < values).
+    if deficit_mask is not None:
+        deficit_mask = deficit_mask.to(flat_returns.device)
+    else:
+        deficit_mask = (flat_returns - flat_values) < 0
+    deficit_sample_count = int(deficit_mask.sum().item())
 
     # --- Compute targeted deficit gradient on a cloned temp actor of best parent ---
     temp_actor = MappoActor().to(device)
@@ -529,7 +660,8 @@ def spawn_targeted_specialist(
         with torch.no_grad():
             for name, param in agent.experts[c_idx].actor.named_parameters():
                 parent_param = dict(agent.experts[best_parent].actor.named_parameters())[name].data
-                param.copy_(parent_param + torch.randn_like(param) * THIEF_MUTATION_NOISE)
+                p_std = float(parent_param.std().item()) if parent_param.numel() > 1 and parent_param.std().item() > 1e-5 else 0.01
+                param.copy_(parent_param + torch.randn_like(param) * min(0.15 * p_std, THIEF_MUTATION_NOISE))
         return c_idx, best_parent, best_parent_val
 
     with torch.no_grad():
@@ -554,7 +686,8 @@ def spawn_targeted_specialist(
                     deficit_grads[p_path_idx[0]] if p_path_idx else torch.zeros_like(param)
                 )
                 targeted = recombined - (THIEF_TARGETED_LR * deficit_p)
-                noise = torch.randn_like(param) * THIEF_MUTATION_NOISE
+                p_std = float(param.std().item()) if param.numel() > 1 and param.std().item() > 1e-5 else 0.01
+                noise = torch.randn_like(param) * min(0.15 * p_std, THIEF_MUTATION_NOISE)
                 param.copy_(targeted + noise)
                 continue
 
@@ -590,9 +723,11 @@ def spawn_targeted_specialist(
             )
             targeted = recombined - (THIEF_TARGETED_LR * deficit_p)
 
-            # 3. Exploration noise
+            # 3. Geometry-aware exploration noise calibrated by parameter scale
             scale = torch.clamp(1.0 / (torch.sqrt(f_combined) + 1e-8), max=10.0)
-            noise = torch.randn_like(param) * scale * THIEF_MUTATION_NOISE
+            p_std = float(param.std().item()) if param.numel() > 1 and param.std().item() > 1e-5 else 0.01
+            noise_std = torch.clamp(scale * THIEF_MUTATION_NOISE, max=0.15 * p_std)
+            noise = torch.randn_like(param) * noise_std
             param.copy_(targeted + noise)
 
     return c_idx, best_parent, best_parent_val
@@ -663,7 +798,8 @@ def train(
     ablation_tag = f" | Ablation: {ablation}" if ablation != "none" else ""
     msg = (
         f"Training {algo_name} Stage {stage_idx} (Seed {seed}) on {device} "
-        f"({num_envs} envs, {engine_tag}{ablation_tag})..."
+        f"({num_envs} envs, {engine_tag} | HER Sub-Goal Navigation | "
+        f"Gradient-Interference Spawning{ablation_tag})..."
     )
     console_logger.info(msg)
     if file_logger:
@@ -768,8 +904,14 @@ def train(
 
     last_expert_usage = {}
     last_switch_rate = 0.0
+    last_her_reach_rate = 0.0
+    last_her_avg_dist = 0.0
+    consecutive_conflicts = 0  # Gradient-conflict hysteresis counter
 
     prev_poses = {
+        a: [np.zeros(2, dtype=np.float32) for _ in range(num_envs)] for a in AGENTS
+    }
+    macro_start_poses = {
         a: [np.zeros(2, dtype=np.float32) for _ in range(num_envs)] for a in AGENTS
     }
 
@@ -802,6 +944,18 @@ def train(
             a: torch.zeros((num_steps, num_envs), dtype=torch.long).to(device)
             for a in AGENTS
         }
+
+        # HER Buffers
+        her_relabeled_obs = []
+        her_relabeled_role = []
+        her_relabeled_mask = []
+        her_relabeled_actions = []
+        her_relabeled_goal = []
+        her_relabeled_expert = []
+
+        her_goals_assigned = 0
+        her_goals_reached = 0
+        her_total_dist = 0.0
 
         total_switches = 0
         total_switch_opportunities = 0
@@ -882,6 +1036,7 @@ def train(
 
                     if step == 0 or (update == 1 and prev_poses[a][e].sum() == 0):
                         prev_poses[a][e] = curr_pos.copy()
+                        macro_start_poses[a][e] = curr_pos.copy()
 
                     delta_step = curr_pos - prev_poses[a][e]
                     progress_val = float(np.dot(delta_step, goal_vec_np))
@@ -890,6 +1045,33 @@ def train(
                     int_r = float(np.clip(progress_val, -1.0, 1.0))
                     ext_r = float(rewards[a][e])
                     b_rewards[a][step, e] = ext_r + (THIEF_PROGRESS_COEF * int_r)
+
+                    # HER Macro Horizon Segmentation & Hindsight Relabeling
+                    if (step + 1) % THIEF_MACRO_HORIZON == 0:
+                        start_pos = macro_start_poses[a][e]
+                        disp = curr_pos - start_pos
+                        dist_covered = float(np.linalg.norm(disp))
+                        her_goals_assigned += 1
+                        her_total_dist += dist_covered
+
+                        if dist_covered >= THIEF_HER_REACH_DIST:
+                            her_goals_reached += 1
+                        elif dist_covered > 0.1:
+                            hg = np.clip(disp / (dist_covered + 1e-5), -1.0, 1.0)
+                            hg_t = torch.tensor(
+                                hg, dtype=torch.float32, device=device
+                            )
+
+                            seg_start = step - THIEF_MACRO_HORIZON + 1
+                            for tau in range(seg_start, step + 1):
+                                her_relabeled_obs.append(b_obs[a][tau, e])
+                                her_relabeled_role.append(b_role[a][tau, e])
+                                her_relabeled_mask.append(b_mask[a][tau, e])
+                                her_relabeled_actions.append(b_actions[a][tau, e])
+                                her_relabeled_goal.append(hg_t)
+                                her_relabeled_expert.append(b_experts[a][tau, e])
+
+                        macro_start_poses[a][e] = curr_pos.copy()
 
             # Accumulate per-agent average return per env
             step_agent_reward = sum(rewards[a] for a in AGENTS) / N_AGENTS
@@ -1024,6 +1206,10 @@ def train(
                     )
                 b_returns[a] = b_advantages[a] + b_values[a]
 
+        if her_goals_assigned > 0:
+            last_her_reach_rate = (her_goals_reached / her_goals_assigned) * 100.0
+            last_her_avg_dist = her_total_dist / her_goals_assigned
+
         # Flatten worker transitions across all roles and environments
         flat_obs = torch.cat([b_obs[a].flatten(0, 1) for a in AGENTS], dim=0)
         flat_role = torch.cat([b_role[a].flatten(0, 1) for a in AGENTS], dim=0)
@@ -1038,6 +1224,17 @@ def train(
         flat_values = torch.cat([b_values[a].flatten(0, 1) for a in AGENTS], dim=0)
         flat_states = b_states.repeat(N_AGENTS, 1, 1).flatten(0, 1)
         flat_experts = torch.cat([b_experts[a].flatten(0, 1) for a in AGENTS], dim=0)
+
+        # HER auxiliary tensors
+        has_her = len(her_relabeled_actions) > 0
+        if has_her:
+            her_obs_t = torch.stack(her_relabeled_obs, dim=0)
+            her_role_t = torch.stack(her_relabeled_role, dim=0)
+            her_mask_t = torch.stack(her_relabeled_mask, dim=0)
+            her_act_t = torch.stack(her_relabeled_actions, dim=0)
+            her_goal_t = torch.stack(her_relabeled_goal, dim=0)
+            her_exp_t = torch.stack(her_relabeled_expert, dim=0)
+            her_total = her_act_t.shape[0]
 
         # --- PPO OPTIMIZATION LOOP ---
         batch_size = total_samples
@@ -1121,11 +1318,53 @@ def train(
                     load_balance_loss = torch.tensor(0.0, device=device)
 
                 balance_coef = 0.0 if ablation == "no_balance" else 0.01
+
+                # Auxiliary HER Hindsight Navigation Policy Loss
+                her_loss = torch.tensor(0.0, device=device)
+                if has_her:
+                    her_mb_size = min(minibatch_size, her_total)
+                    her_mb_inds = np.random.choice(
+                        her_total, size=her_mb_size, replace=False
+                    )
+                    h_obs = her_obs_t[her_mb_inds]
+                    h_role = her_role_t[her_mb_inds]
+                    h_mask = her_mask_t[her_mb_inds]
+                    h_goal = her_goal_t[her_mb_inds]
+                    h_act = her_act_t[her_mb_inds]
+                    h_exp = her_exp_t[her_mb_inds]
+
+                    total_her_loss = 0.0
+                    n_expert_groups = 0
+                    for k in range(active_experts):
+                        k_sel = h_exp == k
+                        if k_sel.sum() > 0:
+                            k_obs = h_obs[k_sel]
+                            k_role = h_role[k_sel]
+                            k_mask = h_mask[k_sel]
+                            k_goal = h_goal[k_sel]
+                            k_act = h_act[k_sel]
+
+                            bk = k_obs.shape[0]
+                            x_actor = torch.cat(
+                                [k_obs.view(bk, -1), k_role, k_goal], dim=1
+                            )
+                            logits = agent.experts[k].actor(x_actor)
+                            logits = logits.masked_fill(k_mask == 0, -1e8)
+                            probs = Categorical(logits=logits)
+                            total_her_loss = (
+                                total_her_loss - probs.log_prob(k_act).mean()
+                            )
+                            n_expert_groups += 1
+
+                    if n_expert_groups > 0:
+                        her_loss = total_her_loss / n_expert_groups
+
                 loss = (
                     pg_loss
                     - (ENT_COEF * entropy_loss)
                     + (VF_COEF * v_loss)
                     + (balance_coef * load_balance_loss)
+                    + (THIEF_HER_AUX_COEF * her_loss)
                 )
 
                 optimizer.zero_grad()
@@ -1228,18 +1467,38 @@ def train(
                 if file_logger:
                     file_logger.info(msg)
 
-        # Step B: Win-rate plateau spawning check
+        # Step B: Dynamic Gradient Interference Spawning Check
         if not active_sandbox_mutants and not incubation_queue:
             if ablation == "fixed_schedule":
-                # Ablation: bypass plateau detection; spawn on a fixed cadence instead.
+                # Ablation: bypass gradient-conflict detection; spawn on a fixed cadence instead.
                 FIXED_SPAWN_INTERVAL = 60
-                plateau_triggered = (update % FIXED_SPAWN_INTERVAL == 0)
+                conflict_triggered = update % FIXED_SPAWN_INTERVAL == 0
+                deficit_mask, cos_sim = None, 0.0
             else:
-                plateau_triggered = check_plateau_trigger(completed_wins)
-            post_cooldown = (
-                update - last_grace_end_update
-            ) >= THIEF_POST_GRACE_COOLDOWN_UPDATES
-            past_warmup = update > THIEF_WARMUP_UPDATES
+                conflict_triggered, deficit_mask, cos_sim = (
+                    check_gradient_interference_trigger(
+                        agent,
+                        active_experts,
+                        flat_obs,
+                        flat_role,
+                        flat_mask,
+                        flat_actions,
+                        flat_goal,
+                        flat_advantages,
+                        update,
+                        last_grace_end_update,
+                        active_sandbox_mutants,
+                        incubation_queue,
+                        device,
+                        dormant_experts=dormant_experts,
+                        num_updates=num_updates,
+                        b_experts=flat_experts,
+                    )
+                )
+                # Hysteresis: require the conflict to persist on 2 consecutive
+                # updates before committing to a spawn (damps single-check noise).
+                consecutive_conflicts = consecutive_conflicts + 1 if conflict_triggered else 0
+                conflict_triggered = consecutive_conflicts >= 2
             min_updates_needed = (
                 THIEF_ISOLATION_UPDATES
                 + THIEF_WARMUP_UPDATES
@@ -1247,7 +1506,7 @@ def train(
             )
             has_enough_time = (num_updates - update) >= min_updates_needed
 
-            if plateau_triggered and post_cooldown and past_warmup and has_enough_time:
+            if conflict_triggered and has_enough_time:
                 c_idx, best_parent, parent_val = spawn_targeted_specialist(
                     agent,
                     active_experts,
@@ -1263,10 +1522,12 @@ def train(
                     device,
                     dormant_experts=dormant_experts,
                     ablation=ablation,
+                    deficit_mask=deficit_mask,
                 )
                 old_count = active_experts
                 active_experts += 1
                 total_spawns += 1
+                consecutive_conflicts = 0
 
                 # Preserve Adam momentum and variance state for surviving parents
                 optimizer = update_optimizer_params(optimizer, agent, lr=LR)
@@ -1289,18 +1550,25 @@ def train(
                         "active_experts": active_experts,
                         "total_spawns": total_spawns,
                         "trigger": (
-                            "fixed_schedule" if ablation == "fixed_schedule" else "win_rate_plateau"
+                            "fixed_schedule" if ablation == "fixed_schedule" else "gradient_interference"
                         ),
+                        "cos_sim": cos_sim,
+                        "deficit_samples": int(deficit_mask.sum().item()) if deficit_mask is not None else 0,
                     }
                 )
 
                 trigger_name = (
-                    "Fixed-Schedule Event" if ablation == "fixed_schedule" else "Plateau Event"
+                    "Fixed-Schedule Event" if ablation == "fixed_schedule" else "Gradient Conflict Event"
                 )
                 msg = (
                     f"[{trigger_name}] Update {update} | "
                     f"Spawned expert E{c_idx} from parent E{best_parent} (Pool: {old_count} -> {active_experts} experts) | "
-                    f"In warmup: {list(active_sandbox_mutants.keys())}, Queue: {incubation_queue}"
+                    + (
+                        f"(cos_sim = {cos_sim:.3f} < {THIEF_GRADIENT_CONFLICT_THRESHOLD}) | "
+                        if ablation != "fixed_schedule"
+                        else ""
+                    )
+                    + f"In warmup: {list(active_sandbox_mutants.keys())}, Queue: {incubation_queue}"
                 )
                 console_logger.info(msg)
                 if file_logger:
@@ -1394,7 +1662,8 @@ def train(
                 f"Episodic Return: {avg_rew:.3f} | "
                 f"Steps: {avg_steps:.1f}/{stage_max_steps} | "
                 f"Alarm: {avg_alarm:.1f}/{stage_alarm_max:.0f} | "
-                f"Active Experts: {active_bidding_count}/{active_experts}"
+                f"Active Experts: {active_bidding_count}/{active_experts} | "
+                f"Goals Reached: {last_her_reach_rate:.1f}% (Dist: {last_her_avg_dist:.1f})"
             )
             console_logger.info(console_str)
 
@@ -1415,6 +1684,7 @@ def train(
                     f"Total Spawns: {total_spawns} | "
                     f"Switch Rate: {last_switch_rate:.1f}% | "
                     f"Routing Entropy: {routing_entropy:.3f} nats | "
+                    f"Goals Reached: {last_her_reach_rate:.1f}% (Avg Dist: {last_her_avg_dist:.1f} tiles, Relabeled: {len(her_relabeled_actions)}) | "
                     f"Usage: [{usage_str}]"
                 )
                 file_logger.info(file_str)

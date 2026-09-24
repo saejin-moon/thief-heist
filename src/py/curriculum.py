@@ -39,6 +39,8 @@ PRIORITY_ALGO_ORDER = [
     "coop",
     "marc",
     "coma",
+    "roma",
+    "rode",
 ]
 
 
@@ -553,6 +555,7 @@ def execute_evaluation(
         cmd.extend(["--run-id", str(run_id)])
     if use_rust:
         cmd.append("--rust")
+    cmd.extend(["--num-envs", "64"])
 
     env = os.environ.copy()
     env["PYTHONPATH"] = "src/py"
@@ -584,6 +587,7 @@ def execute_ablations(
         cmd.extend(["--timesteps", str(timesteps_override)])
     if use_rust:
         cmd.append("--rust")
+    cmd.extend(["--num-envs", "64"])
 
     env = os.environ.copy()
     env["PYTHONPATH"] = "src/py"
