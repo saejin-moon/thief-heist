@@ -1,15 +1,4 @@
-#!/usr/bin/env python3
-"""
-Rebuilds results/eval/eval_summary.json from the raw per-episode parquet
-(results/eval_episodes.parquet), replicating the exact aggregation logic of
-src/py/eval.py:evaluate_checkpoint().
-
-Use case: eval_summary.json is overwritten on each eval invocation; this script
-recovers the full multi-run canonical summary from the durable episode-level data.
-
-Canonical run mapping (per algorithm) is configurable below; only episodes
-belonging to the canonical runs are included.
-"""
+"""Rebuild evaluation summary from episode-level evaluation Parquet."""
 
 import json
 import os

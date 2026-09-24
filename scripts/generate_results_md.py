@@ -1,11 +1,4 @@
-#!/usr/bin/env python3
-"""
-generate_results_md.py
-Compiles comprehensive benchmark evaluation metrics across all 350 checkpoints
-(7 algorithms x 10 seeds x 5 stages = 350,000 episodes) from results/eval/eval_summary.json
-and generates the authoritative paper/RESULTS.md, results/benchmark_master_summary.md,
-and paper/results_master_table.md documents.
-"""
+"""Compile benchmark evaluation metrics and generate summary documents."""
 
 import json
 import os

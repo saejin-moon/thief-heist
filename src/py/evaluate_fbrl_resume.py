@@ -1,9 +1,4 @@
-"""
-Resumed high-throughput evaluation runner for FbRL checkpoints.
-Evaluates the remaining 105 checkpoints across 5 balanced worker processes.
-After evaluation, aggregates all 350 benchmark checkpoints (150 from G20x + 200 from FbRL)
-from eval_episodes.parquet and generates the master benchmark reports.
-"""
+"""Resume high-throughput evaluation runner for FbRL checkpoints."""
 
 import os
 import sys
@@ -164,11 +159,7 @@ def aggregate_all_benchmark_results():
 def main():
     worker_queues = get_missing_tasks()
     total_tasks = sum(len(q) for q in worker_queues)
-    print("=" * 80)
-    print(f"RESUMING FbRL PARALLEL EVALUATION: {total_tasks} Checkpoints Across 5 Workers")
-    for i, q in enumerate(worker_queues):
-        print(f"  Worker {i}: {len(q)} tasks -> {q[:2]} ... {q[-2:] if len(q) > 2 else ''}")
-    print("=" * 80)
+    print(f"Resuming FbRL parallel evaluation: {total_tasks} checkpoints across 5 workers")
 
     if total_tasks > 0:
         t0 = time.time()

@@ -1,11 +1,4 @@
-"""
-Record HEIST ASCII gameplay to an animated GIF using trained model checkpoints.
-Features:
-- Full color ANSI terminal rendering to true-type font image frames.
-- Search mode (--until-win) to simulate seeds until a successful victory is achieved.
-- Accurate terminal state capture: freezes on the winning map layout without leaking
-  the auto-reset subsequent map.
-"""
+"""Record HEIST ASCII gameplay to an animated GIF using trained model checkpoints."""
 
 import argparse
 import copy

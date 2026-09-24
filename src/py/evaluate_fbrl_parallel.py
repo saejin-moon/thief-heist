@@ -1,9 +1,4 @@
-"""
-Parallel evaluation runner for FbRL checkpoints.
-Spawns 5 concurrent workers across seed pairs [0,1], [2,3], [4,5], [6,7], [8,9]
-evaluating 4 algorithms (ecoop, mappo, hmappo, coop) across all 5 stages for 1000 episodes each.
-Merges results with existing G20x evaluation records to produce the complete 350-checkpoint benchmark evaluation.
-"""
+"""Parallel evaluation runner for FbRL checkpoints."""
 
 import json
 import os
@@ -53,9 +48,7 @@ def run_batch(batch_idx: int, seeds: list[int]):
 
 def main():
     os.makedirs("results/eval", exist_ok=True)
-    print("=" * 80)
-    print(f"PARALLEL EVALUATION FOR FbRL (5 Concurrent Batches | 10 Seeds | 4 Algorithms | 5 Stages)")
-    print("=" * 80)
+    print("Parallel evaluation for FbRL (5 concurrent batches, 10 seeds, 4 algorithms, 5 stages)")
 
     t0 = time.time()
     with ProcessPoolExecutor(max_workers=5) as executor:
