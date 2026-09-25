@@ -515,7 +515,10 @@ def record_gif(
 
     config = dict(CURRICULUM_STAGES[stage])
     config["max_steps"] = max_steps
-    w = config.get("map_w", 35)
+    if "map_size" in config:
+        _, w = config["map_size"]
+    else:
+        w = config.get("map_w", 35)
     box_w = max(78, w * 2 + 8)
 
     cell_w = 8 if stage >= 4 else 9
