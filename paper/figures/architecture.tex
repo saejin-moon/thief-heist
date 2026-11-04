@@ -33,7 +33,7 @@
         line width=0.55pt,
         align=left,
         inner sep=3.5pt,
-        text width=3.15cm
+        text width=3.55cm
     },
     evobox/.style={
         draw=cardborder,
@@ -94,9 +94,9 @@
 \end{scope}
 
 % Column 2: Decentralized router and specialist pool
-\node[card, right=2.15cm of scout, yshift=0.55cm, text width=3.45cm] (router) {
-    \textbf{\footnotesize Dynamic Value Router}\\[-1pt]
-    \scriptsize $k^* = \arg\max_k V_k(s)$\\[-1pt]
+\node[card, right=2.15cm of scout, yshift=0.55cm, text width=3.55cm] (router) {
+    \textbf{\footnotesize Team Value Dispatcher}\\[-1pt]
+    \scriptsize $k^* = \arg\max_k V_k(s, \mathbf{r}_i, \mathbf{g}_i)$\\[-1pt]
     \tiny + hysteresis barrier $\epsilon = 0.05$
 };
 
@@ -112,7 +112,7 @@
 
 \node[above=0.14cm of e1, align=center] (pool_title) {
     \textbf{\scriptsize Active Specialist Pool $\mathcal{E}$}\\[-2pt]
-    {\tiny load-balancing loss $\mathcal{L}_{\mathrm{balance}}$}
+    {\tiny entropy regularization $\mathcal{L}_{\mathrm{bal}}$}
 };
 
 \begin{scope}[on background layer]
@@ -121,8 +121,8 @@
 \end{scope}
 
 \node[above=0.28cm of router, align=center] (col2_title) {
-    \textbf{\small 2. Decentralized MoE}\\[-2pt]
-    {\scriptsize\itshape value bidding \& routing}
+    \textbf{\small 2. Orchestrated MoE}\\[-2pt]
+    {\scriptsize\itshape team dispatch \& routing}
 };
 
 \begin{scope}[on background layer]
@@ -133,7 +133,7 @@
 % Column 3: Evolutionary engine (THIEF core)
 \node[evobox, right=2.15cm of router] (plateau) {
     \textbf{\footnotesize Plateau Detection}\\[-1pt]
-    \tiny stagnation: $\Delta W_{100} < 0.03$
+    \tiny stagnation: $\Delta_{\mathrm{win}} < 0.03$
 };
 \node[evobox, below=of plateau] (deficit) {
     \textbf{\footnotesize Deficit Gradient}\\[-1pt]
@@ -159,25 +159,25 @@
 \end{scope}
 
 % Inter-panel flows
-% 1. Environment -> Router: observations
+% 1. Environment -> Router: global telemetry & roles
 \draw[->, line width=1.0pt, draw=textdark]
     (panel_env.east |- router.center) -- (panel_router.west |- router.center)
-    node[midway, above=2.5pt, flowlabel] {$o_i,\, \mathbf{r}_i,\, \mathbf{g}_i$};
+    node[midway, above=2.5pt, flowlabel] {$s,\, \mathbf{r}_i,\, \mathbf{g}_i$};
 
 % 2. Router -> Pool: chosen specialist (internal, within panel 2)
 \draw[->, line width=0.9pt, draw=accentblue]
     (router.south) -- (pool_box.north)
     node[midway, right=2.5pt, flowlabelA, font=\tiny] {$k_{\mathrm{chosen}}$};
 
-% 3. Pool -> Environment: actions (bottom corridor)
+% 3. Pool -> Environment: decentralized actions
 \draw[->, line width=1.0pt, draw=textdark]
     (panel_router.west |- pool_box.center) -- (panel_env.east |- pool_box.center)
-    node[midway, above=2.5pt, flowlabel] {$a_i \sim \pi$};
+    node[midway, above=2.5pt, flowlabel] {$a_i \sim \pi(o_i)$};
 
 % 4. Router -> Evolutionary engine: plateau trigger (top corridor)
 \draw[->, line width=1.0pt, draw=accentblue]
     (panel_router.east |- plateau.center) -- (panel_evo.west |- plateau.center)
-    node[midway, above=2.5pt, flowlabelA, font=\tiny] {plateau $\Delta W$};
+    node[midway, above=2.5pt, flowlabelA, font=\tiny] {plateau $\Delta_{\mathrm{win}}$};
 
 % 5. Evolutionary engine -> Pool: spawned child (bottom corridor)
 \draw[->, line width=1.0pt, draw=accentblue]

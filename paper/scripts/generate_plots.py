@@ -103,7 +103,7 @@ def plot_curriculum_curves(data, out_dir="paper/figures"):
     for row in data:
         grouped[row["algo"]][row["stage"]].append(row)
 
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(5.5, 2.55))
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(5.5, 2.8))
 
     # Panel (a): Absolute Win Rate Scaling
     for a in algos_order:
@@ -125,11 +125,10 @@ def plot_curriculum_curves(data, out_dir="paper/figures"):
 
     ax1.set_xticks(stages)
     ax1.set_xticklabels(stage_labels)
-    ax1.set_xlabel("Curriculum stage (grid size)", labelpad=2.0)
     ax1.set_ylabel("Win rate (%)", labelpad=2.0)
     ax1.set_ylim(-3, 105)
     ax1.set_yticks([0, 25, 50, 75, 100])
-    ax1.set_title("(a) Win Rate Scaling (Stages 1--4)", fontsize=9.2, pad=4)
+    ax1.set_title("(a) Win Rate Scaling (Stages 1\u20134)", fontsize=9.2, pad=4)
 
     # Panel (b): Relative Advantage over MAPPO (%)
     mappo_wrs = {s: float(np.mean([r["win_rate"] * 100.0 for r in grouped["mappo"][s]])) for s in stages}
@@ -152,24 +151,26 @@ def plot_curriculum_curves(data, out_dir="paper/figures"):
     ax2.axhline(0, color="#4D4D4D", linestyle="-", linewidth=1.1, alpha=0.7)
     ax2.set_xticks(stages)
     ax2.set_xticklabels(stage_labels)
-    ax2.set_xlabel("Curriculum stage (grid size)", labelpad=2.0)
     ax2.set_ylabel("Win rate gain vs. MAPPO (%)", labelpad=2.0)
     ax2.set_ylim(-28, 115)
     ax2.set_title("(b) Relative Gain over Baseline", fontsize=9.2, pad=4)
+
+    # Shared bottom x-axis label positioned directly beneath tick marks
+    fig.text(0.53, 0.175, "Curriculum stage (facility grid size)", ha="center", va="center", fontsize=8.2)
 
     handles, labels = ax1.get_legend_handles_labels()
     fig.legend(
         handles, labels,
         loc="lower center",
-        bbox_to_anchor=(0.5, -0.01),
+        bbox_to_anchor=(0.53, 0.01),
         ncol=4,
-        fontsize=7.2,
-        columnspacing=1.0,
-        handletextpad=0.3,
+        fontsize=6.8,
+        columnspacing=0.8,
+        handletextpad=0.25,
         frameon=False,
     )
 
-    fig.tight_layout(rect=[0, 0.16, 1, 1], w_pad=2.0)
+    fig.tight_layout(rect=[0, 0.22, 1, 0.98], w_pad=2.2)
     path = os.path.join(out_dir, "curriculum_combined.pdf")
     fig.savefig(path, format="pdf")
     plt.close(fig)

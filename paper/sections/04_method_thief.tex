@@ -4,7 +4,7 @@
 THIEF maintains an evolving pool of $K$ decentralized expert sub-networks $\mathcal{E} = \{E_k\}_{k=1}^K$. Each expert $E_k$ consists of a role-conditioned policy actor $\pi_{\theta_k}(a \mid o_i, \mathbf{r}_i, \mathbf{g}_i)$ and an associated centralized critic $V_{\phi_k}(s, \mathbf{r}_i, \mathbf{g}_i)$. To maintain clarity across the codebase and text, we summarize our terminology mapping: \emph{specialist} denotes an individual policy column, \emph{sandbox incubation} corresponds to isolated parallel shard warmup, and \emph{dormancy culling} corresponds to inactive expert pruning.
 
 \subsection{Role-Conditioned Value Bidding with Hysteresis Routing}
-THIEF models an orchestrated team dispatch architecture: a centralized coordinator evaluates the global facility state $s$ (along with agent role $\mathbf{r}_i$ and sub-goal compass $\mathbf{g}_i$) to dispatch specialists, while each assigned policy actor $\pi_{\theta_k}(a \mid o_i, \mathbf{r}_i, \mathbf{g}_i)$ executes actions strictly decentralized based on its egocentric $7 \times 7$ field of view $o_i$. During rollout execution, candidate experts submit scalar value bids $V_j(s, \mathbf{r}_i, \mathbf{g}_i)$ to the team router. In naive value-bidding MoEs, small step-to-step fluctuations in state values trigger high-frequency switching between distinct policy behaviors, preventing temporally coherent subtask execution. Inspired by the concept of hysteresis in multi-agent learning~\cite{matignon2007hysteretic}---where asymmetric update barriers stabilize coordination---THIEF constructs a state-dependent switching barrier to preserve behavioral commitment:
+THIEF models an orchestrated team dispatch architecture: a centralized coordinator evaluates the global facility state $s$ (along with agent role $\mathbf{r}_i$ and sub-goal compass $\mathbf{g}_i$) to dispatch specialists, while each assigned policy actor $\pi_{\theta_k}(a \mid o_i, \mathbf{r}_i, \mathbf{g}_i)$ executes actions strictly decentralized based on its egocentric $7 \times 7$ field of view $o_i$. During rollout execution, candidate experts submit scalar value bids $V_j(s, \mathbf{r}_i, \mathbf{g}_i)$ to the team router. In naive value-bidding MoEs, small step-to-step fluctuations in state values trigger high-frequency switching between distinct policy behaviors, preventing temporally coherent subtask execution. Inspired by the concept of hysteresis in multi-agent learning \citep{matignon2007hysteretic}---where asymmetric update barriers stabilize coordination---THIEF constructs a state-dependent switching barrier to preserve behavioral commitment:
 \begin{align}
 k^* &= \arg\max_{j \in \mathcal{C}_{\text{active}}} V_j(s, \mathbf{r}_i, \mathbf{g}_i) \\
 k_{\text{chosen}} &= 
@@ -20,7 +20,7 @@ Rather than expanding network capacity along rigid, predefined training schedule
 \begin{equation}
 \Delta_{\text{win}} = \bar{W}_{\text{recent}}[50:100] - \bar{W}_{\text{recent}}[0:50] < 0.03
 \end{equation}
-To ensure that spawning targets true structural bottlenecks rather than transient stochastic dips, THIEF evaluates multi-task gradient conflict. Adapting the cosine-similarity diagnostic from PCGrad~\cite{yu2020gradient} to success and failure partitions of a single task, THIEF computes gradients over successful transitions $\mathcal{D}_{\text{succ}}$ and failed transitions $\mathcal{D}_{\text{fail}}$:
+To ensure that spawning targets true structural bottlenecks rather than transient stochastic dips, THIEF evaluates multi-task gradient conflict. Adapting the cosine-similarity diagnostic from PCGrad \citep{yu2020gradient} to success and failure partitions of a single task, THIEF computes gradients over successful transitions $\mathcal{D}_{\text{succ}}$ and failed transitions $\mathcal{D}_{\text{fail}}$:
 \begin{equation}
 \mathcal{S}_{\text{conflict}} = \frac{\nabla_\theta \mathcal{L}_{\text{succ}} \cdot \nabla_\theta \mathcal{L}_{\text{fail}}}{\|\nabla_\theta \mathcal{L}_{\text{succ}}\| \|\nabla_\theta \mathcal{L}_{\text{fail}}\|} < 0
 \end{equation}
@@ -33,7 +33,7 @@ For each active parent expert $k$, THIEF maintains an exponential moving average
 \begin{equation}
 F_k^{(t+1)} = \beta F_k^{(t)} + (1-\beta) \left[\nabla_\theta \log \pi_k(a \mid o_i, \mathbf{r}_i, \mathbf{g}_i)\right]^2
 \end{equation}
-with momentum decay $\beta = 0.99$. Parents are weighted by softmax-normalized empirical value returns $w_k = \text{softmax}(\bar{V}_k / \tau)$. Applying the closed-form curvature-optimal Riemannian projection derived in~\cite{matena2021merging}, the base parameters $\theta_{\text{recomb}}$ are synthesized via:
+with momentum decay $\beta = 0.99$. Parents are weighted by softmax-normalized empirical value returns $w_k = \text{softmax}(\bar{V}_k / \tau)$. Applying the closed-form curvature-optimal Riemannian projection derived by \citet{matena2021merging}, the base parameters $\theta_{\text{recomb}}$ are synthesized via:
 \begin{equation}
 \theta_{\text{recomb}} = \frac{\sum_k w_k (F_k + \lambda) \odot \theta_k}{\sum_k w_k (F_k + \lambda)}
 \end{equation}
@@ -47,7 +47,7 @@ where $\xi \sim \mathcal{N}(0, I)$, $\eta_{\text{def}} = 0.08$, and $\sigma = 0.
 A newly initialized specialist possesses an uncalibrated critic network $V_{\text{child}}$. In competitive global value bidding, established generalists would consistently submit higher value bids, permanently starving $E_{\text{child}}$ of rollout transitions. THIEF resolves this cold-start calibration deficit through isolated sandbox incubation: $25\%$ of the vectorized simulation shards (4 out of 16 parallel environments) are partitioned and dedicated exclusively to $E_{\text{child}}$ for $\tau_{\text{iso}} = 10$ updates. During this incubation phase, $E_{\text{child}}$ collects on-policy rollouts and updates its critic without competition from established experts, properly calibrating its value landscape before re-entering the global router.
 
 \subsection{Load-Balancing Regularization \& Dormancy Culling}
-To prevent the routing distribution from collapsing into a single-expert monopoly across heterogeneous agent roles, THIEF enforces auxiliary load-balancing entropy regularization~\cite{fedus2022switch}:
+To prevent the routing distribution from collapsing into a single-expert monopoly across heterogeneous agent roles, THIEF enforces auxiliary load-balancing entropy regularization \citep{fedus2022switch}:
 \begin{align}
 P_{i,k} &= \frac{\exp(V_k(s_i, \mathbf{r}_i, \mathbf{g}_i) / \tau_{\text{gate}})}{\sum_{j \in \mathcal{C}_{\text{active}}} \exp(V_j(s_i, \mathbf{r}_i, \mathbf{g}_i) / \tau_{\text{gate}})} \\
 \mathcal{L}_{\text{balance}} &= |\mathcal{C}_{\text{active}}| \sum_{k \in \mathcal{C}_{\text{active}}} \left(\frac{1}{B}\sum_{i=1}^B \mathbb{I}(k_{\text{chosen},i}=k)\right) \left(\frac{1}{B}\sum_{i=1}^B P_{i,k}\right)

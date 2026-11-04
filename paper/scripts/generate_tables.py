@@ -43,11 +43,11 @@ def generate_main_results_table(data, output_path="paper/tables/main_results.tex
         ("marc",  "MARC (Iter 1)"),
     ]
     baselines = [
-        ("roma",   "ROMA \\cite{wang2020roma}"),
-        ("rode",   "RODE \\cite{wang2021rode}"),
-        ("mappo",  "MAPPO \\cite{yu2022surprising}"),
-        ("hmappo", "H-MAPPO \\cite{vezhnevets2017feudal}"),
-        ("coma",   "COMA \\cite{foerster2018counterfactual}"),
+        ("roma",   "ROMA \\citep{wang2020roma}"),
+        ("rode",   "RODE \\citep{wang2021rode}"),
+        ("mappo",  "MAPPO \\citep{yu2022surprising}"),
+        ("hmappo", "H-MAPPO \\citep{vezhnevets2017feudal}"),
+        ("coma",   "COMA \\citep{foerster2018counterfactual}"),
     ]
     all_algos = lineage + baselines
     stages = [0, 1, 2, 3, 4]
@@ -161,11 +161,11 @@ def generate_subtask_table(data, output_path="paper/tables/subtask_metrics.tex")
         ("marc",  "MARC (Iteration 1)"),
     ]
     baselines = [
-        ("roma",   "ROMA \\cite{wang2020roma}"),
-        ("rode",   "RODE \\cite{wang2021rode}"),
-        ("mappo",  "MAPPO \\cite{yu2022surprising}"),
-        ("hmappo", "H-MAPPO \\cite{vezhnevets2017feudal}"),
-        ("coma",   "COMA \\cite{foerster2018counterfactual}"),
+        ("roma",   "ROMA \\citep{wang2020roma}"),
+        ("rode",   "RODE \\citep{wang2021rode}"),
+        ("mappo",  "MAPPO \\citep{yu2022surprising}"),
+        ("hmappo", "H-MAPPO \\citep{vezhnevets2017feudal}"),
+        ("coma",   "COMA \\citep{foerster2018counterfactual}"),
     ]
 
     grouped = defaultdict(lambda: defaultdict(list))

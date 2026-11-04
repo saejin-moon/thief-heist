@@ -1,10 +1,10 @@
 \section{The HEIST Environment \& Benchmark}
 \label{sec:env}
 
-While multi-agent benchmarks such as Overcooked~\cite{carroll2019utility}, Pommerman~\cite{resnick2018pommerman}, Level-Based Foraging (LBF)~\cite{papoudakis2021benchmarking}, and Melting Pot~\cite{leibo2021scalable} evaluate cooperative coordination, they primarily test symmetric capabilities or short-horizon spatial swaps. To study heterogeneous specialization under severe temporal and spatial scaling, we introduce \textbf{HEIST}, a high-throughput, procedurally generated Dec-POMDP environment where four asymmetric agents must orchestrate a multi-phase facility infiltration under active adversarial security.
+While multi-agent benchmarks such as Overcooked \citep{carroll2019utility}, Pommerman \citep{resnick2018pommerman}, Level-Based Foraging \citep[LBF;][]{papoudakis2021benchmarking}, and Melting Pot \citep{leibo2021scalable} evaluate cooperative coordination, they primarily test symmetric capabilities or short-horizon spatial swaps. To study heterogeneous specialization under severe temporal and spatial scaling, we introduce \textbf{HEIST}, a high-throughput, procedurally generated Dec-POMDP environment where four asymmetric agents must orchestrate a multi-phase facility infiltration under active adversarial security.
 
 \subsection{Dec-POMDP Formulation}
-A HEIST mission is formalized as a Decentralized Partially Observable Markov Decision Process:
+A HEIST mission is formalized as a Decentralized Partially Observable Markov Decision Process operating under an orchestrated Centralized Dispatch with Decentralized Execution (CDDE) framework, where global state $s \in \mathcal{S}$ is accessible to the centralized mission dispatcher for specialist routing, while each agent executes actions based strictly on egocentric local observations $o_i \in \Omega_i$:
 \begin{equation}
 \mathcal{M} = \langle \mathcal{N}, \mathcal{S}, \{\mathcal{A}_i\}, \mathcal{P}, \mathcal{R}, \{\Omega_i\}, \mathcal{O}, \gamma \rangle
 \end{equation}
@@ -40,8 +40,8 @@ Adversarial security guards follow a three-state automaton: \emph{Patrol} (waypo
 where event penalties include guard line-of-sight exposure ($+10.0$), active tracking ($+1.5$/step), guard neutralizations ($+5.0$), door bypasses ($+3.0$), and extraction timer expiration ($+15.0$). If accumulated alarm reaches the ceiling $\alpha \ge \alpha_{\max}$, facility lockdown triggers immediate defeat ($R_{\text{team}} = -10.0$).
 
 \subsection{Phased Potential Shaping \& Macro-Horizon Relabeling}
-The terminal team reward yields $+15.0$ upon full four-agent escape with loot, with step bleed $r_{\text{bleed}} = -2.0 / T_{\max}$. To mitigate credit starvation without perturbing optimal policy trajectories~\cite{ng1999policy}, we apply phased potential-based reward shaping:
+The terminal team reward yields $+15.0$ upon full four-agent escape with loot, with step bleed $r_{\text{bleed}} = -2.0 / T_{\max}$. To mitigate credit starvation without perturbing optimal policy trajectories \citep{ng1999policy}, we apply phased potential-based reward shaping:
 \begin{equation}
 \Phi_i(s) = -\|\mathbf{p}_i - \mathbf{p}_{\text{target}}\|_1, \quad r_{i,\text{shaping}} = \gamma \Phi_i(s') - \Phi_i(s)
 \end{equation}
-Potential functions activate sequentially per role upon subtask completion. Additionally, for long-horizon macro-actions, we adapt Hindsight Experience Replay (HER)~\cite{andrychowicz2017hindsight} to relabel failed terminal and extraction trajectories with achieved terminal coordinates, accelerating early exploration.
+Potential functions activate sequentially per role upon subtask completion. Additionally, for long-horizon macro-actions, we adapt Hindsight Experience Replay (HER) \citep{andrychowicz2017hindsight} to relabel failed terminal and extraction trajectories with achieved terminal coordinates, accelerating early exploration.
