@@ -32,6 +32,10 @@ results/**/model.pt
 # Large PDF artifacts
 *.pdf
 paper/*.pdf
+!paper/figures/*.pdf
+
+# AI dump files
+repomix-output.xml
 
 # Keep JSON summaries and Markdown tables tracked
 !results/**/*.json

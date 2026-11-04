@@ -218,10 +218,10 @@ def plot_stage3_subtasks(data, out_dir="paper/figures"):
         for rect in rects:
             h = rect.get_height()
             if h > 25:
-                ax.annotate(f"{h:.0f}\\%",
+                ax.annotate(f"{h:.0f}%",
                             xy=(rect.get_x() + rect.get_width() / 2, h),
-                            xytext=(0, 2), textcoords="offset points",
-                            ha="center", va="bottom", fontsize=6.3, color="#202124")
+                            xytext=(0, 1), textcoords="offset points",
+                            ha="center", va="bottom", fontsize=5.8, color="#202124")
 
     ax.set_ylabel("Completion rate (%)", labelpad=2.0)
     ax.set_xticks(x)

@@ -1,7 +1,7 @@
 \section{Theoretical Analysis}
 \label{sec:theory}
 
-In this section, we analyze the theoretical guarantees governing Fisher parameter recombination and the anti-monopoly properties of the auxiliary load-balancing objective. We emphasize the scope of these results up front: Proposition~\ref{prop:recombination} is a direct transplant of the established Fisher merging result of Matena and Raffel~\cite{matena2021merging} into our multi-expert RL setting (we claim adaptation, not novelty), and Proposition~\ref{prop:entropy} is an idealized motivating bound derived under a calibration condition that discrete hysteresis routing only approximately satisfies (see the remark below). Their role is to justify the design choices of Section~\ref{sec:thief} and to explain the empirically observed anti-monopoly telemetry, not to constitute a new general theory.
+In this section, we analyze the theoretical guarantees governing Fisher parameter recombination and the anti-monopoly properties of the auxiliary load-balancing objective. We emphasize the scope of these results up front: Proposition~\ref{prop:recombination} is a direct transplant of the established Fisher merging result of \citet{matena2021merging} into our multi-expert RL setting (we claim adaptation, not novelty), and Proposition~\ref{prop:entropy} is an idealized motivating bound derived under a calibration condition that discrete hysteresis routing only approximately satisfies (see the remark below). Their role is to justify the design choices of Section~\ref{sec:thief} and to explain the empirically observed anti-monopoly telemetry, not to constitute a new general theory.
 
 \paragraph{Fisher Information Geometry and Policy Preservation.}
 Let $\mathcal{P} = \{\pi_\theta : \theta \in \Theta\}$ denote the statistical manifold of stochastic policies parameterized by $\theta \in \mathbb{R}^D$, equipped with the Fisher Information metric tensor:
@@ -13,9 +13,9 @@ Under a second-order Taylor approximation around parameter vector $\theta_k$, th
 D_{\text{KL}}(\pi_{\theta_k} \parallel \pi_\theta) = \frac{1}{2} (\theta - \theta_k)^\top F_k (\theta - \theta_k) + \mathcal{O}(\|\theta - \theta_k\|^3)
 \end{equation}
 
-\begin{prop}[Curvature-Optimal Recombination~\cite{matena2021merging}]
+\begin{prop}[Curvature-Optimal Recombination \citep{matena2021merging}]
 \label{prop:recombination}
-Let $\{\theta_k\}_{k=1}^K$ denote the parameter vectors of parent policies with positive definite Fisher Information matrices $\{F_k\}_{k=1}^K$ and non-negative mixture weights $w_k$ satisfying $\sum_k w_k = 1$. As established by Matena and Raffel~\cite{matena2021merging}, the recombined parameter vector:
+Let $\{\theta_k\}_{k=1}^K$ denote the parameter vectors of parent policies with positive definite Fisher Information matrices $\{F_k\}_{k=1}^K$ and non-negative mixture weights $w_k$ satisfying $\sum_k w_k = 1$. As established by \citet{matena2021merging}, the recombined parameter vector:
 \begin{equation}
 \theta_{\text{recomb}} = \left(\sum_{k=1}^K w_k F_k\right)^{-1} \left(\sum_{k=1}^K w_k F_k \theta_k\right)
 \end{equation}

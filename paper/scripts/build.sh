@@ -4,7 +4,7 @@ set -e
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ROOT="$(cd "$DIR/.." && pwd)"
-TECTONIC="${TECTONIC:-$HOME/.cargo/bin/tectonic}"
+TECTONIC="${TECTONIC:-$(which tectonic 2>/dev/null || echo "$HOME/.cargo/bin/tectonic")}"
 
 echo "=== 1. Generating LaTeX tables from benchmark results ==="
 (cd "$ROOT" && uv run python "$DIR/scripts/generate_tables.py")
