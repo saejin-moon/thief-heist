@@ -1,8 +1,10 @@
 # THIEF Compute Additions & Roadmap (`TODO.md`)
 
+**Status**: **Point B.1 and Point B.2 Completed** (all 8 Table 5 micro-ablation variants unified to $N=10$ random seeds with 1,000 held-out evaluation episodes per seed/stage; decentralized `local_router` achieving $10.5\% \pm 2.3\%$ on Stage 4).
+
 This guide outlines the step-by-step procedures for running **Point B** compute jobs on another workstation or GPU cluster:
-1. **B.1: Finishing Seeds 3–9 for Table 5 Micro-Ablations** (unifying all 7 variants to $N=10$ seeds).
-2. **B.2: Implementing the 100% Decentralized Local-Observation Router Ablation** (eliminating global state $s$ during test-time routing).
+1. **B.1: Finishing Seeds 3–9 for Table 5 Micro-Ablations** (unifying all 7 variants to $N=10$ seeds) - **COMPLETE**.
+2. **B.2: Implementing the 100% Decentralized Local-Observation Router Ablation** (eliminating global state $s$ during test-time routing) - **COMPLETE**.
 
 ---
 

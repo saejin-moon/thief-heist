@@ -38,6 +38,7 @@ ABLATION_VARIANTS = [
     "no_balance",
     "no_hysteresis",
     "fixed_schedule",
+    "local_router",
 ]
 
 VARIANT_META = {
@@ -48,6 +49,7 @@ VARIANT_META = {
     "no_balance":     (r"w/o load balancing", r"$\alpha_{\mathrm{bal}}=0$"),
     "no_hysteresis":  ("w/o hysteresis", r"$\epsilon=0$"),
     "fixed_schedule": ("fixed-schedule spawning", "plateau trigger bypassed"),
+    "local_router":   ("local-router", r"decentralized $g_\psi(o_i)$ (zero global state at eval)"),
 }
 
 STAGE_LABELS = {
@@ -204,14 +206,36 @@ def evaluate_ablation_variant(
             except Exception as e:
                 print(f"\n[ERROR] Evaluating {variant} seed {seed} stage {stage_idx}: {e}")
 
-    # Save variant evaluation JSON
+    # Save variant evaluation JSON (safely merge with existing results so previous seeds are preserved)
     eval_dir = "results/eval"
     os.makedirs(eval_dir, exist_ok=True)
     out_json = f"{eval_dir}/ablation_{variant}_eval_n{episodes}.json"
+    existing_results = []
+    if os.path.exists(out_json):
+        try:
+            with open(out_json) as f:
+                existing_results = json.load(f)
+        except Exception:
+            existing_results = []
+
+    merged_map = {
+        (r.get("train_seed", r.get("seed")), r.get("stage")): r
+        for r in existing_results
+    }
+    for r in all_eval_results:
+        merged_map[(r.get("train_seed", r.get("seed")), r.get("stage"))] = r
+
+    final_results = sorted(
+        merged_map.values(),
+        key=lambda x: (
+            x.get("train_seed", x.get("seed", 0)),
+            x.get("stage", 0),
+        ),
+    )
     with open(out_json, "w") as f:
-        json.dump(all_eval_results, f, indent=4)
-    print(f"Saved evaluation metrics to {out_json}")
-    return all_eval_results
+        json.dump(final_results, f, indent=4)
+    print(f"Saved evaluation metrics to {out_json} ({len(final_results)} runs aggregated)")
+    return final_results
 
 
 def load_mechanism_metrics(variant: str):

@@ -28,9 +28,10 @@ class TestAblationPipeline(unittest.TestCase):
             "no_balance",
             "no_hysteresis",
             "fixed_schedule",
+            "local_router",
         ]
         self.assertEqual(ABLATION_VARIANTS, expected_variants)
-        self.assertEqual(len(ABLATION_VARIANTS), 7)
+        self.assertEqual(len(ABLATION_VARIANTS), 8)
 
     def test_parse_ablation_variants(self):
         self.assertEqual(parse_ablation_variants("all"), ABLATION_VARIANTS)
@@ -77,6 +78,49 @@ class TestAblationPipeline(unittest.TestCase):
             os.remove(mock_file)
         if os.path.exists(out_tex):
             os.remove(out_tex)
+
+    def test_local_gating_network_contract(self):
+        import torch
+        from train_thief import LocalGatingNetwork, ThiefNetwork
+
+        gate = LocalGatingNetwork(num_experts=1)
+        self.assertEqual(gate.num_experts, 1)
+
+        # 55-dim local input: 49 (7x7 obs) + 4 (role) + 2 (compass)
+        x_local = torch.randn(8, 55)
+        out = gate(x_local)
+        self.assertEqual(out.shape, (8, 1))
+
+        # Dynamic expert addition
+        gate.add_expert()
+        self.assertEqual(gate.num_experts, 2)
+        out2 = gate(x_local)
+        self.assertEqual(out2.shape, (8, 2))
+
+        # ThiefNetwork with decentralized_eval
+        state_dim = 2550
+        net = ThiefNetwork(state_dim=state_dim, num_initial_experts=2)
+        batch_size = 4
+        obs = torch.randn(batch_size, 7, 7)
+        role = torch.eye(4)[:batch_size]
+        mask = torch.ones(batch_size, 6)
+        goal = torch.randn(batch_size, 2)
+
+        # Under decentralized_eval=True, state is literally None
+        actions, logprobs, entropies, values, chosen_expert = (
+            net.get_action_and_value(
+                obs=obs,
+                role=role,
+                mask=mask,
+                goal=goal,
+                state=None,
+                active_experts=2,
+                decentralized_eval=True,
+            )
+        )
+        self.assertEqual(actions.shape, (batch_size,))
+        self.assertEqual(chosen_expert.shape, (batch_size,))
+        self.assertTrue(torch.all((chosen_expert >= 0) & (chosen_expert < 2)))
 
 
 if __name__ == "__main__":

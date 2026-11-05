@@ -117,6 +117,57 @@ class MappoNetwork(nn.Module):
         return action, log_prob, entropy, value
 
 
+class LocalGatingNetwork(nn.Module):
+    """
+    Decentralized Gating Network.
+    Evaluates only local observation o_i, role r_i, and mission compass g_i.
+    Input dim: (7 * 7) + 4 (role) + 2 (compass) = 55 dimensions.
+    Output: K-dimensional logits for expert dispatch.
+    """
+
+    def __init__(self, num_experts=THIEF_INITIAL_EXPERTS):
+        super().__init__()
+        in_dim = (
+            (OBSERVATION_SIZE[0] * OBSERVATION_SIZE[1]) + N_AGENTS + GOAL_VECTOR_DIM
+        )
+        self.in_dim = in_dim
+        self.num_experts = max(1, num_experts)
+        self.feature_net = nn.Sequential(
+            layer_init(nn.Linear(in_dim, 64)),
+            nn.Tanh(),
+            layer_init(nn.Linear(64, 64)),
+            nn.Tanh(),
+        )
+        self.out_head = layer_init(nn.Linear(64, self.num_experts), std=0.01)
+
+    def forward(self, x_local):
+        feat = self.feature_net(x_local)
+        return self.out_head(feat)
+
+    def add_expert(self):
+        """Expands output linear layer by 1 dimension, preserving previous expert weights."""
+        old_head = self.out_head
+        device = old_head.weight.device
+        new_num = self.num_experts + 1
+        new_head = layer_init(nn.Linear(64, new_num), std=0.01).to(device)
+        with torch.no_grad():
+            new_head.weight[: self.num_experts] = old_head.weight
+            new_head.bias[: self.num_experts] = old_head.bias
+        self.out_head = new_head
+        self.num_experts = new_num
+
+    def prune_experts(self, survivor_indices):
+        """Prunes output head rows corresponding to culled experts."""
+        device = self.out_head.weight.device
+        new_num = len(survivor_indices)
+        new_head = layer_init(nn.Linear(64, new_num), std=0.01).to(device)
+        with torch.no_grad():
+            new_head.weight.copy_(self.out_head.weight[survivor_indices])
+            new_head.bias.copy_(self.out_head.bias[survivor_indices])
+        self.out_head = new_head
+        self.num_experts = new_num
+
+
 class ThiefNetwork(nn.Module):
     """
     Modular Specialist Pool with Goal-Conditioned Mission Orientation for THIEF.
@@ -128,9 +179,12 @@ class ThiefNetwork(nn.Module):
     def __init__(self, state_dim, num_initial_experts=THIEF_INITIAL_EXPERTS):
         super().__init__()
         self.state_dim = state_dim
+        num_init = max(1, num_initial_experts)
         self.experts = nn.ModuleList(
-            [MappoNetwork(state_dim) for _ in range(max(1, num_initial_experts))]
+            [MappoNetwork(state_dim) for _ in range(num_init)]
         )
+        self.local_gate = LocalGatingNetwork(num_experts=num_init)
+        self.decentralized_eval = False
 
     def add_expert(self):
         """Appends a fresh expert module onto the device of existing parameters and returns its index."""
@@ -141,11 +195,13 @@ class ThiefNetwork(nn.Module):
         )
         new_mod = MappoNetwork(self.state_dim).to(device)
         self.experts.append(new_mod)
+        self.local_gate.add_expert()
         return len(self.experts) - 1
 
     def prune_experts(self, survivor_indices):
         """Retains only the surviving expert modules in contiguous order."""
         self.experts = nn.ModuleList([self.experts[i] for i in survivor_indices])
+        self.local_gate.prune_experts(survivor_indices)
 
     def get_action_and_value(
         self,
@@ -162,6 +218,7 @@ class ThiefNetwork(nn.Module):
         dormant_experts=None,
         epsilon=THIEF_HYSTERESIS_EPSILON,
         num_envs=THIEF_NUM_ENVS,
+        decentralized_eval=False,
     ):
         """
         Executes routing and policy forward passes across the expert pool conditioned on mission targets.
@@ -170,9 +227,17 @@ class ThiefNetwork(nn.Module):
         - When new experts are warming up: each occupies dedicated warmup envs,
           leaving remaining envs for general competitive bidding.
         - Dormant experts are excluded from candidate bidding without altering expert tensor indices.
+        - When decentralized_eval=True: routes via student local_gate (zero global state s).
         """
         batch_size = obs.shape[0]
-        x_critic = torch.cat([state, role, goal], dim=1) if state is not None else None
+        use_decentralized = (
+            decentralized_eval or getattr(self, "decentralized_eval", False)
+        )
+        x_critic = (
+            torch.cat([state, role, goal], dim=1)
+            if (state is not None and not use_decentralized)
+            else None
+        )
 
         # 1. Routing Selection Phase
         if expert_idx is not None:
@@ -210,6 +275,42 @@ class ThiefNetwork(nn.Module):
                     dtype=torch.long,
                     device=obs.device,
                 )
+                chosen_expert = best_idx
+            elif use_decentralized and self.local_gate is not None:
+                x_local = torch.cat([obs.flatten(1), role, goal], dim=1)
+                gate_logits_all = self.local_gate(x_local)
+                gate_logits = gate_logits_all[:, candidate_experts]
+                best_candidate_idx = gate_logits.argmax(dim=-1)
+                best_idx = torch.tensor(candidate_experts, device=obs.device)[
+                    best_candidate_idx
+                ]
+
+                if previous_expert is not None:
+                    has_prev = (previous_expert >= 0) & (previous_expert < active_experts)
+                    prev_in_candidates = torch.tensor(
+                        [p.item() in candidate_experts for p in previous_expert],
+                        device=obs.device,
+                        dtype=torch.bool,
+                    )
+
+                    l_prev = gate_logits_all.gather(
+                        1, previous_expert.clamp(0, active_experts - 1).unsqueeze(1)
+                    ).squeeze(1)
+                    l_best = gate_logits_all.gather(1, best_idx.unsqueeze(1)).squeeze(1)
+
+                    dynamic_barrier = torch.max(
+                        torch.full_like(l_prev, epsilon),
+                        epsilon * torch.abs(l_prev),
+                    )
+                    should_switch = l_best > (l_prev + dynamic_barrier)
+
+                    chosen_expert = torch.where(
+                        has_prev & prev_in_candidates & ~should_switch,
+                        previous_expert,
+                        best_idx,
+                    )
+                else:
+                    chosen_expert = best_idx
             else:
                 bids = torch.stack(
                     [self.experts[k].critic(x_critic) for k in candidate_experts],
@@ -232,37 +333,37 @@ class ThiefNetwork(nn.Module):
                     best_candidate_idx
                 ]
 
-            if previous_expert is not None:
-                has_prev = (previous_expert >= 0) & (previous_expert < active_experts)
-                prev_in_candidates = torch.tensor(
-                    [p.item() in candidate_experts for p in previous_expert],
-                    device=obs.device,
-                    dtype=torch.bool,
-                )
+                if previous_expert is not None:
+                    has_prev = (previous_expert >= 0) & (previous_expert < active_experts)
+                    prev_in_candidates = torch.tensor(
+                        [p.item() in candidate_experts for p in previous_expert],
+                        device=obs.device,
+                        dtype=torch.bool,
+                    )
 
-                v_bids_all = torch.stack(
-                    [self.experts[k].critic(x_critic) for k in range(active_experts)],
-                    dim=-1,
-                ).squeeze(1)
+                    v_bids_all = torch.stack(
+                        [self.experts[k].critic(x_critic) for k in range(active_experts)],
+                        dim=-1,
+                    ).squeeze(1)
 
-                v_prev = v_bids_all.gather(
-                    1, previous_expert.clamp(0, active_experts - 1).unsqueeze(1)
-                ).squeeze(1)
-                v_best = v_bids_all.gather(1, best_idx.unsqueeze(1)).squeeze(1)
+                    v_prev = v_bids_all.gather(
+                        1, previous_expert.clamp(0, active_experts - 1).unsqueeze(1)
+                    ).squeeze(1)
+                    v_best = v_bids_all.gather(1, best_idx.unsqueeze(1)).squeeze(1)
 
-                dynamic_barrier = torch.max(
-                    torch.full_like(v_prev, epsilon),
-                    epsilon * torch.abs(v_prev),
-                )
-                should_switch = v_best > (v_prev + dynamic_barrier)
+                    dynamic_barrier = torch.max(
+                        torch.full_like(v_prev, epsilon),
+                        epsilon * torch.abs(v_prev),
+                    )
+                    should_switch = v_best > (v_prev + dynamic_barrier)
 
-                chosen_expert = torch.where(
-                    has_prev & prev_in_candidates & ~should_switch,
-                    previous_expert,
-                    best_idx,
-                )
-            else:
-                chosen_expert = best_idx
+                    chosen_expert = torch.where(
+                        has_prev & prev_in_candidates & ~should_switch,
+                        previous_expert,
+                        best_idx,
+                    )
+                else:
+                    chosen_expert = best_idx
 
             # Warmup routing across environments
             if grace_list:
@@ -1359,12 +1460,25 @@ def train(
                     if n_expert_groups > 0:
                         her_loss = total_her_loss / n_expert_groups
 
+                # Local Router Distillation Loss (Point B.2 ablation)
+                loss_gate_distill = torch.tensor(0.0, device=device)
+                if ablation == "local_router" and len(active_candidates) > 1:
+                    teacher_probs = F.softmax(cand_bids / 2.0, dim=1).detach()
+                    x_local_mb = torch.cat(
+                        [mb_obs.view(mb_obs.shape[0], -1), mb_role, mb_goal], dim=1
+                    )
+                    student_logits = agent.local_gate(x_local_mb)[:, active_candidates]
+                    loss_gate_distill = F.cross_entropy(student_logits, teacher_probs)
+
+                gate_distill_coef = 0.05 if ablation == "local_router" else 0.0
+
                 loss = (
                     pg_loss
                     - (ENT_COEF * entropy_loss)
                     + (VF_COEF * v_loss)
                     + (balance_coef * load_balance_loss)
                     + (THIEF_HER_AUX_COEF * her_loss)
+                    + (gate_distill_coef * loss_gate_distill)
                 )
 
                 optimizer.zero_grad()
@@ -1856,6 +1970,7 @@ if __name__ == "__main__":
             "no_balance",
             "no_hysteresis",
             "fixed_schedule",
+            "local_router",
         ],
         help="THIEF micro-ablation variant (default: none = full THIEF)",
     )

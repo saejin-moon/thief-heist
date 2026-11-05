@@ -57,6 +57,9 @@ def load_thief_model(ckpt_path, state_dim, device):
         model.prune_experts(surviving_indices)
         active_experts = len(surviving_indices)
 
+    is_local_router = "local_router" in str(ckpt_path)
+    model.decentralized_eval = is_local_router
+
     def policy_fn(
         obs_all,
         role_all,
@@ -67,15 +70,17 @@ def load_thief_model(ckpt_path, state_dim, device):
     ):
         num_envs_eval = obs_all.shape[1]
         with torch.no_grad():
+            state_input = None if model.decentralized_eval else state_rep
             actions, _, _, _, chosen_expert = model.get_action_and_value(
                 obs_all.flatten(0, 1),
                 role_all.flatten(0, 1),
                 mask_all.flatten(0, 1),
                 goal_all.flatten(0, 1),
-                state_rep,
+                state_input,
                 active_experts=active_experts,
                 previous_expert=prev_experts,
                 num_envs=num_envs_eval,
+                decentralized_eval=model.decentralized_eval,
             )
             return actions, chosen_expert
 

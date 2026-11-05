@@ -18,6 +18,7 @@ VARIANT_META = {
     "no_balance":     (r"w/o balance", r"$\alpha_{\mathrm{bal}}=0$"),
     "no_hysteresis":  ("w/o hysteresis", r"$\epsilon=0$ (no barrier)"),
     "fixed_schedule": ("fixed-cadence", "periodic updates"),
+    "local_router":   ("local-router", r"decentralized $g_\psi(o_i)$ (zero global state at eval)"),
 }
 
 VARIANT_ORDER = [
@@ -28,6 +29,7 @@ VARIANT_ORDER = [
     "no_balance",
     "no_hysteresis",
     "fixed_schedule",
+    "local_router",
 ]
 
 STAGE_LABELS = {2: r"St.~2 ($25^2$)", 4: r"St.~4 ($50^2$)"}
