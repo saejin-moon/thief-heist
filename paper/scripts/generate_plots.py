@@ -14,7 +14,7 @@ import numpy as np
 # Global typography: serif (Times-like) to match the NeurIPS text font.
 plt.rcParams.update({
     "font.family": "serif",
-    "font.serif": ["Times New Roman", "Times", "Nimbus Roman", "DejaVu Serif"],
+    "font.serif": ["DejaVu Serif", "STIXGeneral", "Times New Roman"],
     "mathtext.fontset": "stix",
     "font.size": 8.5,
     "axes.labelsize": 9.5,
